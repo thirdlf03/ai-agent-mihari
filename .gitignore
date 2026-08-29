@@ -1,0 +1,16 @@
+# Swift
+.build/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+.swiftpm/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+dist/
+*.egg-info/
+
+# macOS
+.DS_Store
