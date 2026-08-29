@@ -142,4 +142,36 @@ struct LivePetPresenterTests {
         presenter.setMonitoring(.watching)
         #expect(!presenter.controller.isFrozen)
     }
+
+    @Test("監視が始まると作業開始の一言を言う")
+    func speaksWhenWatchingStarts() {
+        let presenter = makePresenter()
+        presenter.setMonitoring(.paused)
+
+        presenter.setMonitoring(.watching)
+
+        #expect(presenter.controller.lastSpokenKind == .watchStart)
+    }
+
+    @Test("監視中のまま入れ直しても言い直さない")
+    func staysQuietWhenWatchingIsSetAgain() {
+        let presenter = makePresenter()
+
+        presenter.setMonitoring(.watching)
+
+        #expect(presenter.controller.lastSpokenKind == nil)
+    }
+
+    @Test("休憩明けは休憩おわりの一言を言い、入れ直しても言い直さない")
+    func speaksBreakEndWhenBreakFinishes() {
+        let presenter = makePresenter()
+        presenter.setMonitoring(.onBreak)
+
+        presenter.setMonitoring(.watching)
+        #expect(presenter.controller.lastSpokenKind == .breakEnd)
+
+        // 言い直していれば watchStart に変わる。
+        presenter.setMonitoring(.watching)
+        #expect(presenter.controller.lastSpokenKind == .breakEnd)
+    }
 }
