@@ -4,6 +4,8 @@ import Foundation
 public enum CaptureKind: String, Sendable, Equatable {
     case camera
     case screenshot
+    /// デーモン経由で取得した iPhone の画面。
+    case iphone
 }
 
 /// 一時ディレクトリに保存した画像 1 枚。

@@ -25,7 +25,10 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     public let questioner = HeadGestureQuestioner()
 
     // 以下は検証用の 10 タブ画面でしか使わないので、開かれるまで作らない。
-    public lazy var capture = CaptureViewModel()
+    public lazy var capture = CaptureViewModel(iphoneScreenshot: { [daemon] in
+        guard let client = await daemon.connectedClient else { throw DaemonError.notRunning }
+        return try await client.iphoneScreenshot()
+    })
     public lazy var vision = FaceVisionViewModel()
     public lazy var headGesture = HeadGestureController()
 
