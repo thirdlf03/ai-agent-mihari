@@ -38,6 +38,7 @@ public enum SelfTest {
         results.append(await continuousGaze())
         results.append(await music())
         results.append(await overlay())
+        results.append(await headGesture())
 
         FileHandle.standardOutput.write(Data(render(results).utf8))
         return results.allSatisfy(\.ok)
@@ -264,6 +265,95 @@ public enum SelfTest {
         context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
         let total = pixels.reduce(0) { $0 + Int($1) }
         return Double(total) / Double(pixels.count * 255)
+    }
+
+    /// AirPods のヘッドトラッキングが実際に届くか。
+    ///
+    /// `CMHeadphoneMotionManager` は SaboriLab の 21 モジュールで唯一「未検証」だった API。
+    /// `isDeviceMotionAvailable` は AirPods が未接続でも true を返す(機種対応を示すだけ)ので、
+    /// **実際にサンプルが流れてくるか**を見ないと確かめたことにならない。
+    ///
+    /// `MIHARI_SELFTEST_HEAD_GESTURE=1` を付けたときだけ実行する。
+    /// 人が首を振らないと判定まで到達しないため、既定では疎通だけを見る。
+    @MainActor
+    private static func headGesture() async -> Result {
+        let source = AirPodsHeadOrientationSource()
+        let availability = source.availability()
+        guard availability.isAvailable else {
+            return Result(
+                name: "AirPods の首振り",
+                ok: false,
+                detail: availability.reason ?? "利用できない"
+            )
+        }
+
+        // まずサンプルが本当に流れてくるかを見る。
+        var samples: [HeadOrientationSample] = []
+        let collector = Task {
+            for await sample in source.updates() {
+                samples.append(sample)
+                if samples.count >= 40 { break }
+            }
+        }
+        try? await Task.sleep(for: .seconds(3))
+        collector.cancel()
+
+        guard !samples.isEmpty else {
+            return Result(
+                name: "AirPods の首振り",
+                ok: false,
+                detail: "利用可能と出るがサンプルが 1 件も流れてこない（AirPods 未接続の可能性）"
+            )
+        }
+
+        let pitches = samples.map { $0.pitchDegrees }
+        let yaws = samples.map { $0.yawDegrees }
+        let spread = String(
+            format: "%d 件受信 · pitch %.1f〜%.1f° · yaw %.1f〜%.1f°",
+            samples.count,
+            pitches.min() ?? 0,
+            pitches.max() ?? 0,
+            yaws.min() ?? 0,
+            yaws.max() ?? 0
+        )
+
+        guard ProcessInfo.processInfo.environment["MIHARI_SELFTEST_HEAD_GESTURE"] == "1" else {
+            return Result(name: "AirPods の首振り", ok: true, detail: spread)
+        }
+
+        // ここからは人が首を振らないと決着しない。
+        // どちらに振るかを指示して、返ってきた判定と突き合わせる。
+        // 指示しないと「縦に振ったのに no が出た」のか「横に振って正しく no」なのか区別できない。
+        let questioner = HeadGestureQuestioner(source: source)
+        var rounds: [String] = []
+        var allCorrect = true
+
+        for (instruction, expected) in [("縦(うなずく)", HeadGestureResponse.yes), ("横(振る)", .no)] {
+            FileHandle.standardOutput.write(
+                Data("\n>>> 6 秒以内に首を \(instruction) に振ってください\n".utf8)
+            )
+            let answer = await questioner.ask(prompt: "自己診断 \(instruction)")
+            let correct = answer == expected
+            allCorrect = allCorrect && correct
+            rounds.append("\(instruction)→\(describe(answer))\(correct ? "" : "（期待: \(describe(expected))）")")
+            // 続けて振らせると前の動きを拾ってしまうので、少し空ける。
+            try? await Task.sleep(for: .seconds(1))
+        }
+
+        return Result(
+            name: "AirPods の首振り",
+            ok: allCorrect,
+            detail: "\(spread) · " + rounds.joined(separator: " / ")
+        )
+    }
+
+    private static func describe(_ response: HeadGestureResponse) -> String {
+        switch response {
+        case .yes: return "はい"
+        case .no: return "いいえ"
+        case .timedOut: return "時間切れ"
+        case .unavailable(let reason): return "使えない(\(reason))"
+        }
     }
 
     private nonisolated(unsafe) static var lastPhoto: Data?
