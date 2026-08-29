@@ -32,6 +32,11 @@ make lint    # Swift / Python のフォーマットと lint を検査する
 swift test
 ```
 
+`build.sh` は一時ディレクトリ（`.build/staging.XXXXXX`）で組み立て・署名・検証まで済ませてから `Mihari.app` を差し替える。
+**アプリを起動したまま `make build` すると、古いバンドルは `.build/Mihari.app.previous` へ退避され、新しいものは次回起動から有効になる**
+（起動中のアプリには反映されないので、一度終了して起動し直す）。起動中は警告を 1 行出すだけでビルドは止めない。
+止めたい場合は `MIHARI_BUILD_REQUIRE_QUIT=1 make build` にすると、差し替える前に非 0 で終了する。
+
 アプリの標準出力やログをターミナルで見たい場合は、`open` の代わりに
 `./Mihari.app/Contents/MacOS/Mihari` を直接実行する。バンドル内の実行ファイルを直接叩いても
 バンドル ID と署名は変わらないため、TCC のプロンプトは同じように出る。
@@ -64,6 +69,7 @@ swift test
   画面の「まとめて許可を求める」を押し直すか、システム設定から一度削除して登録し直す。
   **Apple Development 証明書で署名していればこれは起きない**（TCC の照合が cdhash ではなく
   Team ID を含む要件になるため）。作り方は「[署名について](#署名について)」を参照。
+- **起動中のアプリの足元でバンドルを作り直すと、TCC が `Info.plist` の用途文字列を読めず `__TCC_CRASHING_DUE_TO_PRIVACY_VIOLATION__` で落ちる**ことがあったため、`build.sh` は一時ディレクトリで組み立ててから差し替えている。
 - **画面収録**は事前照会の API が `CGPreflightScreenCaptureAccess` しかなく、未決定と拒否済みを区別できない。
   false のときは赤ではなく灰色（未決定）で出る。また `CGRequestScreenCaptureAccess` のプロンプトは初回だけで、
   2 回目以降はシステム設定から許可してアプリを再起動する必要がある。
