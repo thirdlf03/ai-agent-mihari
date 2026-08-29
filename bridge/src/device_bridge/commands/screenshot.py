@@ -121,7 +121,8 @@ def _device_connected_check(udid: str | None) -> PreflightCheck:
         False,
         "iPhone に接続できる",
         remediation=(
-            "iPhone を USB で接続するか、同じ Wi-Fi 上にあることを確認したうえで "
+            "iPhone を USB で接続するか、tunneld が常駐していて iPhone が同じ Wi-Fi 上に"
+            "いる(画面が点いている)ことを確認したうえで、"
             "`uv run device-bridge list` に UDID が出るか確認する"
         ),
     )

@@ -14,7 +14,9 @@ from device_bridge.commands.iphone_state import (
     IphoneStateSnapshot,
     IphoneStateStore,
     build_snapshot,
+    classify_display,
     classify_notification,
+    resolve_activity,
     run_monitor_cycle,
     unresponsive_snapshot,
 )
@@ -77,6 +79,66 @@ def test_classify_notification_ignores_ambiguous_lockstate() -> None:
 def test_classify_notification_ignores_unknown_names() -> None:
     assert classify_notification("com.example.something.else") is None
     assert classify_notification(None) is None
+
+
+def test_classify_display_prefers_normal_mode_active() -> None:
+    # 主指標が読めていれば、副指標が矛盾していても主指標に従う。
+    assert classify_display(True, 0) == IphoneActivity.ACTIVE
+    assert classify_display(False, 16384) == IphoneActivity.IDLE
+
+
+def test_classify_display_falls_back_to_backlight_brightness() -> None:
+    # AppleCLCD2 が無い機種向けの保険。
+    assert classify_display(None, 16384) == IphoneActivity.ACTIVE
+    assert classify_display(None, 0) == IphoneActivity.IDLE
+
+
+def test_classify_display_returns_none_when_nothing_readable() -> None:
+    assert classify_display(None, None) is None
+
+
+def test_resolve_activity_prefers_display_over_notification() -> None:
+    # 画面状態が読めているときは通知名より優先する。
+    assert (
+        resolve_activity(
+            IphoneActivity.IDLE,
+            "com.apple.springboard.hasBlankedScreen",
+            IphoneActivity.ACTIVE,
+        )
+        == IphoneActivity.ACTIVE
+    )
+    assert (
+        resolve_activity(
+            IphoneActivity.ACTIVE,
+            "com.apple.springboard.hasWokenUp",
+            IphoneActivity.IDLE,
+        )
+        == IphoneActivity.IDLE
+    )
+
+
+def test_resolve_activity_uses_notification_when_display_unreadable() -> None:
+    assert (
+        resolve_activity(IphoneActivity.IDLE, "com.apple.springboard.hasWokenUp", None)
+        == IphoneActivity.ACTIVE
+    )
+    assert (
+        resolve_activity(IphoneActivity.ACTIVE, "com.apple.springboard.hasBlankedScreen", None)
+        == IphoneActivity.IDLE
+    )
+
+
+def test_resolve_activity_keeps_previous_without_display_or_notification() -> None:
+    assert resolve_activity(IphoneActivity.ACTIVE, None, None) == IphoneActivity.ACTIVE
+    assert resolve_activity(IphoneActivity.IDLE, None, None) == IphoneActivity.IDLE
+
+
+def test_resolve_activity_keeps_previous_for_ambiguous_lockstate() -> None:
+    # lockstate は向きが分からないので、画面状態が無ければ直前の状態を保つ。
+    assert (
+        resolve_activity(IphoneActivity.ACTIVE, "com.apple.springboard.lockstate", None)
+        == IphoneActivity.ACTIVE
+    )
 
 
 def test_snapshot_to_payload_is_json_friendly() -> None:

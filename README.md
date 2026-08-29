@@ -87,7 +87,7 @@ CLI を単体で叩く場合:
 ```sh
 cd bridge
 uv run device-bridge list
-uv run device-bridge list --no-wifi   # Wi-Fi 探索を省略する
+uv run device-bridge list --no-wifi   # tunneld のトンネル(Wi-Fi)経由のデバイスを一覧に含めない
 uv run device-bridge info --udid <UDID>
 ```
 
@@ -95,13 +95,16 @@ stdout には常に JSON を 1 つだけ出力する。失敗時は stderr に `
 
 ### Wi-Fi 経由の接続
 
-macOS の usbmuxd は Wi-Fi 上の iPhone を返さないため、bonjour で自前に探す。
+macOS の usbmuxd は Wi-Fi 上の iPhone を返さない。bonjour(`_apple-mobdev2._tcp`)で自前に探して lockdown する方式は**廃止した**(実測で使えなかった。理由は [bridge/README.md](bridge/README.md) の「bonjour 経由の Wi-Fi lockdown はやめた」)。代わりに **tunneld が張っている RemoteXPC トンネル**(iOS 17+)を Wi-Fi 経路として使う。
 
-1. 一度 USB でつないでペアリングし、その状態で `list` を実行する。見えた UDID は `~/.device-bridge/known_devices.json` にキャッシュされる(`DEVICE_BRIDGE_CACHE_DIR` で変更可)
-2. 以降は USB を抜いても、同じ Wi-Fi にいる限り `list` に `{"connection_type": "WiFi", "host": "<IP>"}` として出る。bonjour で見つけたホストへ usbmuxd のペアレコードを使って lockdown 接続し、UDID の一致で突き合わせている
-3. `info` も USB で見えなければ自動的に Wi-Fi 経由で取得する
+1. 一度 USB でつないでペアリングし、RemotePairing レコードを作る(これが無いと tunneld はトンネルを張れない)
+2. tunneld を root で常駐させる(`sudo bridge/scripts/install_tunneld_daemon.sh`)。Wi-Fi 側の監視は既定で ON なので追加の指定は要らない
+3. 以降は USB を抜いても、同じ Wi-Fi にいる限り `list` に `{"connection_type": "Tunnel", "host": null}` として出る。USB で見えているデバイスは従来どおり `{"connection_type": "USB", "host": null}` で、こちらが優先される
+4. `info` も USB で見えなければ自動的にトンネル経由で取得する
 
-キャッシュが空のときは bonjour 探索をしない。探索する場合 `list` は 2 秒ほど余分にかかる。
+**iPhone がロックされて眠っている間はトンネルごと消えるため、`list` からも消えて「応答なし」になる。** 画面が点けば tunneld が数秒〜30 秒で張り直す。
+
+`~/.device-bridge/known_devices.json`(`DEVICE_BRIDGE_CACHE_DIR` で変更可)への UDID の記録は続けているが、探索には使わなくなった。
 
 ## ペット
 

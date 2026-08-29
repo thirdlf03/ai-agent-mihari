@@ -1,20 +1,28 @@
 """``device_bridge.commands.screenshot_source`` のうち、実機を必要としない部分を検証する。
 
-``LiveScreenshotSource`` 本体(lockdown 接続・DDI 照会・tunneld 照会)は実機が無いと
-検証できないため対象外とし、ここでは PNG 変換とマウンタ選択という純粋なロジックだけを見る。
+``LiveScreenshotSource`` の lockdown 接続・DDI 照会は実機が無いと検証できないため対象外とし、
+ここでは PNG 変換とマウンタ選択という純粋なロジックと、デバイス探索(``find_device``)だけを見る。
 """
 
 from __future__ import annotations
 
 import io
+from typing import Any
 
+import pytest
 from PIL import Image
 from pymobiledevice3.services.mobile_image_mounter import (
     DeveloperDiskImageMounter,
     PersonalizedImageMounter,
 )
 
-from device_bridge.commands.screenshot_source import _ensure_png, _mounter_for
+from device_bridge.commands import devices as devices_module
+from device_bridge.commands.screenshot import PreflightCheckId, evaluate_preflight
+from device_bridge.commands.screenshot_source import (
+    LiveScreenshotSource,
+    _ensure_png,
+    _mounter_for,
+)
 
 
 def _tiff_bytes() -> bytes:
@@ -70,3 +78,37 @@ def test_mounter_for_selects_developer_image_below_ios17() -> None:
 
     assert isinstance(mounter, DeveloperDiskImageMounter)
     assert mounter.IMAGE_TYPE == "Developer"
+
+
+async def test_find_device_returns_tunnel_only_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    """USB を抜いていても、tunneld のトンネルがあれば「接続できる」と判定する。"""
+
+    async def fake_usb() -> list[str]:
+        return []
+
+    async def fake_tunnel(**kwargs: Any) -> list[str]:
+        return ["UDID-TUNNEL"]
+
+    monkeypatch.setattr(devices_module, "list_usb_udids", fake_usb)
+    monkeypatch.setattr(devices_module, "list_tunnel_udids", fake_tunnel)
+
+    udid = await LiveScreenshotSource().find_device()
+
+    assert udid == "UDID-TUNNEL"
+    checks = {check.id: check for check in evaluate_preflight(udid=udid, facts=None).checks}
+    assert checks[PreflightCheckId.DEVICE_CONNECTED].ok is True
+
+
+async def test_find_device_returns_none_without_usb_or_tunnel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_usb() -> list[str]:
+        return []
+
+    async def fake_tunnel(**kwargs: Any) -> list[str]:
+        return []
+
+    monkeypatch.setattr(devices_module, "list_usb_udids", fake_usb)
+    monkeypatch.setattr(devices_module, "list_tunnel_udids", fake_tunnel)
+
+    assert await LiveScreenshotSource().find_device() is None

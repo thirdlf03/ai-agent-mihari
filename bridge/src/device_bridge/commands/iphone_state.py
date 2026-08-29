@@ -1,10 +1,15 @@
 """iPhone の「操作中 / 未操作 / 応答なし」を判定するための状態モデル。
 
-Darwin 通知は変化した瞬間だけを伝える差分通知であり、購読開始時点の絶対状態は分からない。
-そのため観測を始めた直後は ``IDLE``(未操作)として扱い、以後の通知で更新していく。
-この前提は既知の制約として PR に明記している。
+画面が点いているかどうかは IORegistry(``AppleCLCD2`` の ``NormalModeActive``)から
+その時点の絶対値として読めるので、観測開始時点から正しい活動状態を出せる。Darwin 通知は
+「何かが変わった」という合図としてだけ使い、通知を受けたら画面状態を読み直す。
+IORegistry が読めない機種では従来どおり ``IDLE``(未操作)から始め、通知だけで更新していく。
 
-実機との通信(notification_proxy の購読・diagnostics のバッテリー取得)は
+通知名だけで向きを決めないのは、実測(iOS 26.6 / iPhone 14)で ``hasWokenUp`` が
+一度も発火せず、消灯時も点灯時も同じ ``hasBlankedScreen`` が来たため。通知だけでは
+遷移の向きが分からず ``ACTIVE`` になる経路が無い。
+
+実機との通信(notification_proxy の購読・diagnostics の IORegistry / バッテリー取得)は
 ``iphone_state_source.LiveDeviceStateSource`` に隔離してあり、このモジュールは
 それを差し替え可能にする ``DeviceStateSource`` プロトコルにしか依存しない。
 実機が無い環境でも本モジュールは import・実行でき、テストでは
@@ -23,7 +28,8 @@ from typing import Any, Protocol
 
 # 画面が消灯した(ブランクした)ことを示す。iOS のバージョンにより変わりうる非公開の通知名。
 NOTIFICATION_SCREEN_BLANKED = "com.apple.springboard.hasBlankedScreen"
-# スリープから復帰し、画面が点灯したことを示す。
+# スリープから復帰し、画面が点灯したことを示す。ただし iOS 26.6 / iPhone 14 では
+# 一度も発火しなかった。発火する iOS のための保険として購読だけ続けている。
 NOTIFICATION_SCREEN_WOKEN = "com.apple.springboard.hasWokenUp"
 # ロック状態が変化した(遷移の向きまでは分からない)。参考情報として購読はするが、
 # 単体では活動状態を確定させる根拠にしない。
@@ -39,6 +45,10 @@ OBSERVED_NOTIFICATIONS: tuple[str, ...] = (
     NOTIFICATION_LOCK_COMPLETE,
 )
 
+#: 通知を受けてから画面状態が IORegistry に反映されるまで待つ秒数(実測 0.5〜1.0 秒)。
+DISPLAY_SETTLE_SECONDS = 1.0
+#: 通知が来なくても画面状態を読み直す間隔(秒)。
+DISPLAY_POLL_INTERVAL = 5.0
 #: 通知が来ない間、バッテリー情報を取り直す間隔(秒)。
 BATTERY_POLL_INTERVAL = 30.0
 #: デバイスが見つからない・観測が切れたときの再接続間隔(秒)。
@@ -81,6 +91,9 @@ UNKNOWN_SNAPSHOT = IphoneStateSnapshot(activity=IphoneActivity.UNRESPONSIVE)
 def classify_notification(name: str | None) -> IphoneActivity | None:
     """Darwin 通知名から活動状態を推定する。
 
+    画面状態が IORegistry から読めない機種のための保険。読める環境では
+    ``resolve_activity`` が画面状態を優先するので、この結果は使われない。
+
     対象外の通知(``lockstate`` など方向が分からないもの)は ``None`` を返し、
     呼び出し側は直前の状態を維持する。
 
@@ -92,6 +105,47 @@ def classify_notification(name: str | None) -> IphoneActivity | None:
     if name in (NOTIFICATION_SCREEN_BLANKED, NOTIFICATION_LOCK_COMPLETE):
         return IphoneActivity.IDLE
     return None
+
+
+def classify_display(
+    normal_mode_active: bool | None, backlight_brightness: int | None
+) -> IphoneActivity | None:
+    """IORegistry から読んだ画面の点灯状態を活動状態に直す。
+
+    ``NormalModeActive``(``AppleCLCD2``)を主指標にし、それが読めない機種のために
+    バックライトの輝度(``AppleARMBacklight``、点灯 16384 / 消灯 0)を副指標として使う。
+
+    :param normal_mode_active: 画面が点灯していれば ``True``、消灯していれば ``False``。
+        読めなければ ``None``。
+    :param backlight_brightness: バックライトの輝度。読めなければ ``None``。
+    :returns: 判定できた活動状態。どちらも読めなければ ``None``。
+    """
+    if normal_mode_active is not None:
+        return IphoneActivity.ACTIVE if normal_mode_active else IphoneActivity.IDLE
+    if backlight_brightness is not None:
+        return IphoneActivity.ACTIVE if backlight_brightness > 0 else IphoneActivity.IDLE
+    return None
+
+
+def resolve_activity(
+    previous: IphoneActivity, notification: str | None, display: IphoneActivity | None
+) -> IphoneActivity:
+    """画面状態・通知・直前の状態から、いま採用すべき活動状態を決める。
+
+    画面状態が読めていればそれが最優先。読めない機種でだけ通知名から推定し、
+    それも決め手にならなければ直前の状態を維持する。
+
+    :param previous: 直前の活動状態。
+    :param notification: 直前に受け取った通知の ``Name``(無ければ ``None``)。
+    :param display: ``classify_display`` の結果(読めなければ ``None``)。
+    :returns: 採用する活動状態。
+    """
+    if display is not None:
+        return display
+    from_notification = classify_notification(notification)
+    if from_notification is not None:
+        return from_notification
+    return previous
 
 
 def build_snapshot(

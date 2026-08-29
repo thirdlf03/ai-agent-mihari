@@ -4,15 +4,18 @@
 pymobiledevice3 で行う薄い層。``screenshot.py`` 側は本モジュールの具象クラスを知らな
 くても動くようにしてあり、実機が無い環境でもテストは本モジュールを差し替えて成立させる。
 
-Wi-Fi 経由の接続は ``commands/devices.py`` の bonjour + lockdown 実装を、lockdown への
-接続方針(USB を優先し、無ければペアレコードを使った Wi-Fi 接続)は
+lockdown への接続方針(USB を優先し、無ければ tunneld のトンネル経由)は
 ``commands/iphone_state_source.py`` の ``_connect_lockdown`` と同じ考え方を踏襲する。
+bonjour で見つけたホストへ TCP:62078 で直接繋ぐ classic な Wi-Fi lockdown は使わない
+(理由は ``commands/devices.py`` の docstring を参照)。
 
-前提が揃っているかの判定は、いずれも DDI 不要な軽い問い合わせで完結する。
+前提が揃っているかの判定は、いずれも DDI 不要な軽い問い合わせで完結する。USB でもトンネル
+でも同じ呼び出しで済む(``MobileImageMounterService`` は RSD を渡すと ``.shim.remote`` の
+サービス名に切り替わり、``get_developer_mode_status`` は RSD のリモート lockdown が受ける)。
 
-- Developer Mode: ``lockdown.get_developer_mode_status()``(classic lockdown の値照会)
+- Developer Mode: ``lockdown.get_developer_mode_status()``(lockdown の値照会)
 - DDI マウント: ``com.apple.mobile.mobile_image_mounter``(is_developer_service ではない
-  ため classic lockdown だけで問い合わせできる)。DDI 自体のマウントも同じ経路で行う。
+  ため lockdown だけで問い合わせできる)。DDI 自体のマウントも同じ経路で行う。
 - tunneld 到達性: iOS 17+ の developer サービス(スクリーンショット含む)は
   RemoteXPC トンネル越しにしか届かないため、tunneld の HTTP API にこのデバイスの
   トンネルが登録されているかを見る
@@ -38,10 +41,8 @@ from typing import Any
 
 from packaging.version import Version
 from PIL import Image
-from pymobiledevice3.exceptions import TunneldConnectionError
-from pymobiledevice3.lockdown import create_using_tcp, create_using_usbmux
+from pymobiledevice3.lockdown import create_using_usbmux
 from pymobiledevice3.lockdown_service_provider import LockdownServiceProvider
-from pymobiledevice3.pair_records import get_usbmux_pairing_record
 from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
 from pymobiledevice3.services.dvt.instruments.screenshot import Screenshot
 from pymobiledevice3.services.mobile_image_mounter import (
@@ -51,7 +52,6 @@ from pymobiledevice3.services.mobile_image_mounter import (
 )
 from pymobiledevice3.services.screenshot import ScreenshotService
 from pymobiledevice3.tunneld.api import get_tunneld_device_by_udid
-from pymobiledevice3.usbmux import list_devices as usbmux_list_devices
 
 from device_bridge.commands import devices as devices_module
 from device_bridge.commands.screenshot import PreflightFacts, requires_tunneld
@@ -64,13 +64,12 @@ class LiveScreenshotSource:
     """実機に接続してセルフチェックとスクリーンショット撮影を行う。"""
 
     async def find_device(self) -> str | None:
-        """接続中(USB または、既知デバイスの Wi-Fi)の UDID を 1 つ返す。"""
-        result = await asyncio.to_thread(devices_module.list_devices, wifi=True)
-        entries = result.get("devices", [])
-        if not entries:
-            return None
-        udid = entries[0].get("udid")
-        return udid if isinstance(udid, str) else None
+        """接続中(USB、無ければ tunneld のトンネル)の UDID を 1 つ返す。
+
+        USB を抜いても、tunneld がトンネルを張っていれば「接続できる」と判定する。
+        """
+        udids = await devices_module.list_connected_udids()
+        return udids[0] if udids else None
 
     async def gather_preflight_facts(self, udid: str) -> PreflightFacts:
         """セルフチェックに必要な事実を集める。個々の失敗は ``None`` に丸める。"""
@@ -163,32 +162,29 @@ def _mounter_for(lockdown: LockdownServiceProvider, ios_version: str) -> MobileI
 
 
 async def _is_tunneld_reachable(udid: str) -> bool:
-    """tunneld がこのデバイス向けのトンネルを張っているかを見る。"""
-    try:
-        rsd = await get_tunneld_device_by_udid(udid)
-    except TunneldConnectionError:
-        return False
-    return rsd is not None
+    """tunneld がこのデバイス向けのトンネルを張っているかを見る。
+
+    HTTP API の一覧に UDID が載っているかだけを見る。実際にトンネルへ繋いで確かめないのは、
+    ここが軽い前提チェックであり、繋いだ RSD の後始末まで面倒を見たくないため。
+    """
+    return udid in await devices_module.list_tunnel_udids()
 
 
 async def _connect_lockdown(udid: str) -> LockdownServiceProvider:
-    """USB で見えていれば usbmuxd 経由、無ければ Wi-Fi 経由で lockdown に繋ぐ。
+    """USB で見えていれば usbmuxd 経由、無ければ tunneld のトンネル経由で繋ぐ。
 
-    ``iphone_state_source._connect_lockdown`` と同じ考え方(ペアレコードを使った
-    ``autopair=False`` の TCP 接続)を踏襲している。
+    ``iphone_state_source._connect_lockdown`` と同じ考え方を踏襲している。
     """
-    usb_devices = await usbmux_list_devices()
-    if any(device.serial == udid for device in usb_devices):
-        return await create_using_usbmux(serial=udid)
-
-    location = (await devices_module.discover_wifi([udid], [])).get(udid)
-    if location is None:
-        raise RuntimeError(f"device not found: {udid}")
-
-    pair_record = await get_usbmux_pairing_record(udid)
-    return await create_using_tcp(
-        hostname=location["host"], identifier=udid, autopair=False, pair_record=pair_record
+    transport = devices_module.select_transport(
+        udid, await devices_module.list_usb_udids(), await devices_module.list_tunnel_udids()
     )
+    if transport == "usbmux":
+        return await create_using_usbmux(serial=udid)
+    if transport == "tunnel":
+        rsd = await devices_module.connect_tunnel(udid)
+        if rsd is not None:
+            return rsd
+    raise RuntimeError(f"device not found: {udid}")
 
 
 async def _close_quietly(lockdown: LockdownServiceProvider) -> None:
