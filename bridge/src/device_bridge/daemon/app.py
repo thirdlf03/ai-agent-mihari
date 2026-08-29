@@ -6,7 +6,7 @@ from fastapi import FastAPI
 
 from device_bridge.daemon.config import DaemonConfig
 from device_bridge.daemon.events import EventBus
-from device_bridge.daemon.routers import devices, events, health
+from device_bridge.daemon.routers import devices, events, health, iphone_state
 
 
 def create_app(config: DaemonConfig) -> FastAPI:
@@ -25,4 +25,5 @@ def create_app(config: DaemonConfig) -> FastAPI:
     app.include_router(health.router)
     app.include_router(devices.router)
     app.include_router(events.router)
+    app.include_router(iphone_state.router)
     return app
