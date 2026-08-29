@@ -31,6 +31,13 @@ public struct DetectionThresholds: Equatable, Sendable {
     /// これが無いと 1 秒ごとに撮って送り続けることになる。
     public let cooldownSeconds: TimeInterval
 
+    /// 「休憩中?」に はい と答えたとき、見張りを止めておく時間。
+    /// この間はカメラも開かないし、撮らない・送らない・喋らない。
+    public let breakDurationSeconds: TimeInterval
+
+    /// 「休憩中?」の返事を待つ時間。これを過ぎたら無反応として問いかけを閉じ、監視を続ける。
+    public let promptTimeoutSeconds: TimeInterval
+
     public init(
         suspectSeconds: TimeInterval = 120,
         confirmSeconds: TimeInterval = 300,
@@ -38,7 +45,9 @@ public struct DetectionThresholds: Equatable, Sendable {
         notLookingDurationSeconds: TimeInterval = 15,
         gazeFreshnessSeconds: TimeInterval = 10,
         stampGraceSeconds: TimeInterval = AttendanceGrace.defaultGracePeriod,
-        cooldownSeconds: TimeInterval = 180
+        cooldownSeconds: TimeInterval = 180,
+        breakDurationSeconds: TimeInterval = 900,
+        promptTimeoutSeconds: TimeInterval = 20
     ) {
         self.suspectSeconds = suspectSeconds
         self.confirmSeconds = max(suspectSeconds, confirmSeconds)
@@ -47,6 +56,8 @@ public struct DetectionThresholds: Equatable, Sendable {
         self.gazeFreshnessSeconds = gazeFreshnessSeconds
         self.stampGraceSeconds = stampGraceSeconds
         self.cooldownSeconds = cooldownSeconds
+        self.breakDurationSeconds = breakDurationSeconds
+        self.promptTimeoutSeconds = promptTimeoutSeconds
     }
 
     /// 何か起こりうる最短の無操作秒数。これ未満なら判定を始めるまでもない。
@@ -72,7 +83,9 @@ public struct DetectionThresholds: Equatable, Sendable {
             notLookingDurationSeconds: 8,
             gazeFreshnessSeconds: 10,
             stampGraceSeconds: 15,
-            cooldownSeconds: 30
+            cooldownSeconds: 30,
+            breakDurationSeconds: 60,
+            promptTimeoutSeconds: 8
         )
     }
 }

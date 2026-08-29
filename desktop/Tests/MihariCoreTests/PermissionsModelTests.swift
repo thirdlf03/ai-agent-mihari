@@ -17,6 +17,20 @@ struct PermissionsModelTests {
         }
     }
 
+    private typealias Checker = @Sendable () -> [PermissionKind: PermissionState]
+
+    /// 実機の TCC を見に行かず、指定した権限だけを許可済みとして返す照会スタブ。
+    private static func checker(granting granted: Set<PermissionKind>) -> Checker {
+        {
+            PermissionKind.allCases.reduce(into: [:]) { states, kind in
+                states[kind] = PermissionState(
+                    grant: granted.contains(kind) ? .granted : .denied,
+                    detail: "stub"
+                )
+            }
+        }
+    }
+
     private func makeDefaults() -> UserDefaults {
         // 実行のたびに空の UserDefaults を使い、テスト同士が初回起動フラグを共有しないようにする。
         let suiteName = "mihari.test.\(UUID().uuidString)"
@@ -62,6 +76,42 @@ struct PermissionsModelTests {
         await second.requestOnFirstLaunchIfNeeded()
         #expect(secondSpy.requested.isEmpty)
         #expect(second.lastMessage == nil)
+    }
+
+    @Test("必須が 1 つでも欠けていれば見張り始めない")
+    func requiredSatisfaction() {
+        let missing = PermissionsModel(
+            defaults: makeDefaults(),
+            checkPermissions: Self.checker(granting: [.camera, .microphone, .screenRecording])
+        )
+        missing.refresh()
+        #expect(missing.missingRequired == [.inputMonitoring])
+        #expect(!missing.isRequiredSatisfied)
+
+        // 任意(オートメーション / モーション)は欠けていても始められる。
+        let satisfied = PermissionsModel(
+            defaults: makeDefaults(),
+            checkPermissions: Self.checker(granting: Set(PermissionKind.required))
+        )
+        satisfied.refresh()
+        #expect(satisfied.missingRequired.isEmpty)
+        #expect(satisfied.isRequiredSatisfied)
+        #expect(satisfied.pending == [.automation, .motion])
+    }
+
+    @Test("初回起動のまとめ要求を済ませたかを覚えている")
+    func firstLaunchCompletion() async {
+        let defaults = makeDefaults()
+        let spy = RequestSpy()
+        let model = PermissionsModel(defaults: defaults, requestPermission: spy.request)
+        #expect(!model.hasCompletedFirstLaunch)
+
+        await model.requestOnFirstLaunchIfNeeded()
+        #expect(model.hasCompletedFirstLaunch)
+
+        // 同じ defaults を引き継いだ別インスタンスでも、初回ではなくなっている。
+        let second = PermissionsModel(defaults: defaults)
+        #expect(second.hasCompletedFirstLaunch)
     }
 
     @Test("まとめ要求は許可済みの権限を飛ばす")

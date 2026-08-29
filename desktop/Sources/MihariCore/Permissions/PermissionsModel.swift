@@ -16,15 +16,21 @@ public final class PermissionsModel: ObservableObject {
 
     private let defaults: UserDefaults
     private let requestPermission: @Sendable (PermissionKind) async -> String
+    private let checkPermissions: @Sendable () -> [PermissionKind: PermissionState]
 
-    /// - Parameter requestPermission: 実際にプロンプトを出す処理。テストでは差し替えて、
-    ///   テスト実行だけで TCC のダイアログが出ないようにする。
+    /// - Parameters:
+    ///   - requestPermission: 実際にプロンプトを出す処理。テストでは差し替えて、
+    ///     テスト実行だけで TCC のダイアログが出ないようにする。
+    ///   - checkPermissions: 現在の状態を照会する処理。テストでは差し替えて、
+    ///     実機の TCC の状態に左右されずに起動フローの判定を確かめる。
     public init(
         defaults: UserDefaults = .standard,
-        requestPermission: @escaping @Sendable (PermissionKind) async -> String = PermissionRequester.request
+        requestPermission: @escaping @Sendable (PermissionKind) async -> String = PermissionRequester.request,
+        checkPermissions: @escaping @Sendable () -> [PermissionKind: PermissionState] = PermissionChecker.checkAll
     ) {
         self.defaults = defaults
         self.requestPermission = requestPermission
+        self.checkPermissions = checkPermissions
         self.states = PermissionKind.allCases.reduce(into: [:]) { $0[$1] = .unchecked }
     }
 
@@ -37,8 +43,23 @@ public final class PermissionsModel: ObservableObject {
         PermissionKind.allCases.filter { state(for: $0).grant != .granted }
     }
 
+    /// 未許可のまま残っている必須権限。ここが空になるまで見張りを始めない。
+    public var missingRequired: [PermissionKind] {
+        PermissionKind.required.filter { state(for: $0).grant != .granted }
+    }
+
+    /// 必須権限がすべて許可されているか。
+    public var isRequiredSatisfied: Bool {
+        missingRequired.isEmpty
+    }
+
+    /// 初回起動のまとめ要求を済ませたか。初回だけ権限画面を出すための判定に使う。
+    public var hasCompletedFirstLaunch: Bool {
+        defaults.bool(forKey: Self.didRequestOnLaunchKey)
+    }
+
     public func refresh() {
-        states = PermissionChecker.checkAll()
+        states = checkPermissions()
         lastCheckedAt = Date()
     }
 

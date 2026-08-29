@@ -21,6 +21,12 @@ public final class DetectionEngine: ObservableObject {
     /// 画面に残す記録の件数。
     public static let logHistoryLimit = 50
 
+    /// 疑いに入ったときにペットが投げる問いかけ。
+    public static let breakQuestion = "休憩中?"
+
+    /// タイマーの待ち方。本番は `Task.sleep`、テストでは短時間で解決するものに差し替える。
+    public typealias Sleeping = (Duration) async -> Void
+
     @Published public private(set) var isWatching = false
     @Published public private(set) var state: DetectionState = .normal
     @Published public private(set) var lastSignals: DetectionSignals?
@@ -30,16 +36,31 @@ public final class DetectionEngine: ObservableObject {
     /// いま音楽が鳴っているか。
     @Published public private(set) var music: NowPlaying = .silent
     @Published public private(set) var log: [DetectionLogEntry] = []
+
+    /// いまのエスカレーション段階。ペットへ渡している `PetEvent.escalationStage` と同じ値。
+    /// 状態パネルに出して、どこまで上がっているかを見えるようにする。
+    @Published public private(set) var escalationStage = 0
+
+    /// 最後に証拠を撮った時刻。まだ撮っていなければ `nil`。
+    /// クールダウンの判定に使っている値そのもので、残り時間の表示にも使う。
+    @Published public private(set) var lastEvidenceAt: Date?
     @Published public var thresholds: DetectionThresholds = .default
+
+    /// 休憩が明ける時刻。休憩していなければ `nil`。
+    ///
+    /// ここが埋まっている間は評価そのものを飛ばす。カメラも開かず、撮らず、送らず、喋らない。
+    @Published public private(set) var breakUntil: Date?
 
     private let idleMonitor: MacIdleMonitor
     private let frontmostMonitor: FrontmostAppMonitor
     private let capture: CaptureService
     private let attendance: AttendanceModel?
     private var loop: Task<Void, Never>?
-    private var lastEvidenceAt: Date?
     private let gazeMonitor: GazeMonitor
     private let musicController: MusicControlling
+    private let sleep: Sleeping
+    /// いま出している「休憩中?」の問いかけ。出していなければ `nil`。
+    private var promptSession: BreakPromptSession?
 
     /// 実行部。テストからはここを差し替えて、実際に撮らず送らずに筋道だけを確かめる。
     public struct Actions: Sendable {
@@ -49,6 +70,8 @@ public final class DetectionEngine: ObservableObject {
         public var interrupt: @Sendable (SpeechRequest) async -> Void
         public var post: @Sendable (String, Data?, String) async -> Bool
         public var classify: @Sendable (Data) async -> SpeechRequest.VisionLabel
+        /// 問いかけを出して AirPods の首振りを待つ。既定は「AirPods が無い」として即座に返す。
+        public var askHeadGesture: @Sendable (String, TimeInterval) async -> HeadGestureResponse
 
         public init(
             captureMacPhoto: @escaping @Sendable () async -> Data? = { nil },
@@ -56,7 +79,11 @@ public final class DetectionEngine: ObservableObject {
             speak: @escaping @Sendable (SpeechRequest) async -> String? = { _ in nil },
             interrupt: @escaping @Sendable (SpeechRequest) async -> Void = { _ in },
             post: @escaping @Sendable (String, Data?, String) async -> Bool = { _, _, _ in false },
-            classify: @escaping @Sendable (Data) async -> SpeechRequest.VisionLabel = { _ in .unknown }
+            classify: @escaping @Sendable (Data) async -> SpeechRequest.VisionLabel = { _ in .unknown },
+            askHeadGesture: @escaping @Sendable (String, TimeInterval) async -> HeadGestureResponse = {
+                _,
+                _ in .unavailable(reason: "未接続")
+            }
         ) {
             self.captureMacPhoto = captureMacPhoto
             self.captureIPhoneScreenshot = captureIPhoneScreenshot
@@ -64,6 +91,7 @@ public final class DetectionEngine: ObservableObject {
             self.interrupt = interrupt
             self.post = post
             self.classify = classify
+            self.askHeadGesture = askHeadGesture
         }
     }
 
@@ -76,13 +104,18 @@ public final class DetectionEngine: ObservableObject {
     /// エンジンはペットの中身を知らないので、渡す形だけ決めて外で繋ぐ。
     public var onEvent: ((PetEvent) -> Void)?
 
+    /// 出している問いかけを引っ込めてもらう合図。
+    /// はい / いいえ / 無反応 / エピソード終了、どの終わり方でも必ず呼ぶ。
+    public var onPromptDismissed: (() -> Void)?
+
     public init(
         idleMonitor: MacIdleMonitor = MacIdleMonitor(),
         frontmostMonitor: FrontmostAppMonitor = FrontmostAppMonitor(),
         capture: CaptureService = CaptureService(),
         attendance: AttendanceModel? = nil,
         gazeMonitor: GazeMonitor = GazeMonitor(),
-        musicController: MusicControlling = AppleScriptMusicController()
+        musicController: MusicControlling = AppleScriptMusicController(),
+        sleep: @escaping Sleeping = { try? await Task.sleep(for: $0) }
     ) {
         self.idleMonitor = idleMonitor
         self.frontmostMonitor = frontmostMonitor
@@ -90,6 +123,7 @@ public final class DetectionEngine: ObservableObject {
         self.attendance = attendance
         self.gazeMonitor = gazeMonitor
         self.musicController = musicController
+        self.sleep = sleep
     }
 
     public func start() {
@@ -107,10 +141,22 @@ public final class DetectionEngine: ObservableObject {
         loop?.cancel()
         loop = nil
         isWatching = false
+        let previous = state
         state = .normal
         gazeMonitor.stop()
         gaze = .none
         music = .silent
+        // 見張りを止めたのに問いかけだけ画面に残しても、答えようがない。
+        // 休憩(`breakUntil`)は消さない。休憩と監視の開始 / 停止は別の話。
+        //
+        // 疑い / 確定の途中で止めたなら、エピソードもここで終わらせる。
+        // 黙って `state` だけ戻すと、ペットは固定アニメのまま取り残される
+        // (再開後の評価は正常 → 正常で、解除のイベントが出ない)。
+        if previous == .normal {
+            dismissPrompt()
+        } else {
+            finishEpisode()
+        }
     }
 
     /// いまの材料を集める。必要なら途中でカメラを覗く。
@@ -161,8 +207,15 @@ public final class DetectionEngine: ObservableObject {
     }
 
     /// 1 回だけ評価して実行する。ループからも、画面の「いま評価する」ボタンからも呼ぶ。
+    ///
+    /// 休憩中はここで打ち切る。**材料を集める前に返すので、カメラも開かない。**
     @discardableResult
     public func evaluate(now: Date = Date()) async -> DetectionDecision {
+        if let resting = restingDecision(now: now) {
+            state = .normal
+            return resting
+        }
+
         let signals = await currentSignals(now: now)
         lastSignals = signals
 
@@ -171,13 +224,122 @@ public final class DetectionEngine: ObservableObject {
             signals,
             secondsSinceLastEvidence: lastEvidenceAt.map { now.timeIntervalSince($0) }
         )
+        let previous = state
         state = decision.state
 
-        guard decision.state != .normal else { return decision }
+        guard decision.state != .normal else {
+            if previous != .normal { finishEpisode() }
+            return decision
+        }
 
-        let outcome = await perform(decision, signals: signals, now: now)
+        // 疑いに入った瞬間だけ問いかけを添える。同じエピソードの中では二度と出さない。
+        let prompt = previous == .normal && decision.state == .suspected ? makeBreakPrompt() : nil
+        let outcome = await perform(decision, signals: signals, now: now, prompt: prompt)
         record(decision, outcome: outcome, at: now)
         return decision
+    }
+
+    // MARK: - 休憩
+
+    /// 休憩に入る。明けるまで評価そのものを飛ばす。
+    ///
+    /// 監視を止めるのとは別物。ループは回り続けるが、`evaluate` が何もせずに返るだけ。
+    /// 休憩が明ければ何もしなくても通常の評価に戻る。
+    public func startBreak(now: Date = Date()) {
+        breakUntil = now.addingTimeInterval(thresholds.breakDurationSeconds)
+        escalationStage = 0
+        // 休むと言った相手のカメラを開けたままにしない。緑ランプを点けておく理由がない。
+        gazeMonitor.stop()
+        gaze = .none
+        onEvent?(
+            PetEvent(state: .normal, escalationStage: 0, line: "\(breakMinutes) 分休むね")
+        )
+    }
+
+    /// 休憩を切り上げる。
+    public func endBreak() {
+        breakUntil = nil
+    }
+
+    /// 休憩の残り分数。表示用なので 1 分未満でも 0 分とは言わない。
+    private var breakMinutes: Int {
+        max(1, Int((thresholds.breakDurationSeconds / 60).rounded()))
+    }
+
+    /// 休憩中なら「何もしない」結論を返す。明けていれば片付けて `nil` を返し、通常の評価に戻す。
+    private func restingDecision(now: Date) -> DetectionDecision? {
+        guard let breakUntil else { return nil }
+        guard now < breakUntil else {
+            self.breakUntil = nil
+            record(.idle(reason: "休憩が明けた"), outcome: "見張りに戻る", at: now)
+            return nil
+        }
+        return .idle(reason: "休憩中(残り \(seconds: breakUntil.timeIntervalSince(now)))")
+    }
+
+    // MARK: - 問いかけ
+
+    /// 「休憩中?」の問いかけを組み立て、首振りと無反応タイマーの受け口も張る。
+    ///
+    /// ボタン・首振り・時間切れのどれが先に来ても、採用されるのは 1 つだけ
+    /// (`BreakPromptSession` が保証する)。
+    private func makeBreakPrompt() -> PetYesNoPrompt {
+        dismissPrompt()
+
+        let session = BreakPromptSession()
+        promptSession = session
+        let id = session.id
+
+        session.waitForHeadGesture(
+            question: Self.breakQuestion,
+            timeout: thresholds.promptTimeoutSeconds,
+            ask: actions.askHeadGesture,
+            onAnswer: { [weak self] sessionID, answer in
+                self?.resolvePrompt(sessionID: sessionID, answer: answer)
+            }
+        )
+        session.startTimeout(
+            seconds: thresholds.promptTimeoutSeconds,
+            sleep: sleep,
+            onTimeout: { [weak self] sessionID in
+                self?.dismissPrompt(sessionID: sessionID)
+            }
+        )
+
+        return PetYesNoPrompt(question: Self.breakQuestion) { [weak self] answer in
+            Task { @MainActor in
+                self?.resolvePrompt(sessionID: id, answer: answer)
+            }
+        }
+    }
+
+    /// 問いかけに答えが出た。**先に来た 1 つだけ**を採用し、残りは捨てる。
+    private func resolvePrompt(sessionID: UUID, answer: Bool) {
+        guard let session = promptSession, session.claim(sessionID: sessionID) else { return }
+        promptSession = nil
+        session.settle()
+        onPromptDismissed?()
+        if answer { startBreak() }
+    }
+
+    /// 問いかけを引っ込める。答えは採らない(＝監視を続ける)。
+    ///
+    /// - Parameter sessionID: 指定すると、その問いかけが出たままのときだけ引っ込める。
+    ///   `nil` なら出ているものを無条件に引っ込める。
+    private func dismissPrompt(sessionID: UUID? = nil) {
+        guard let session = promptSession else { return }
+        if let sessionID, session.id != sessionID { return }
+        promptSession = nil
+        session.settle()
+        onPromptDismissed?()
+    }
+
+    /// 疑いのエピソードが終わった。答えの出ていない問いかけを閉じ、ペットに戻ったことを伝える。
+    private func finishEpisode() {
+        dismissPrompt()
+        escalationStage = 0
+        // セリフは空。「おかえり」の動きだけしてもらう。
+        onEvent?(PetEvent(state: .normal, escalationStage: 0, line: ""))
     }
 
     // MARK: - 実行
@@ -185,7 +347,8 @@ public final class DetectionEngine: ObservableObject {
     private func perform(
         _ decision: DetectionDecision,
         signals: DetectionSignals,
-        now: Date
+        now: Date,
+        prompt: PetYesNoPrompt?
     ) async -> String {
         var notes: [String] = []
 
@@ -216,7 +379,7 @@ public final class DetectionEngine: ObservableObject {
                 notes.append("喋れなかった")
             }
         }
-        notifyPet(decision, label: label, line: line)
+        notifyPet(decision, label: label, line: line, prompt: prompt)
 
         if let evidence {
             let sent = await actions.post(decision.reason, evidence, filename(for: decision.evidence))
@@ -227,14 +390,20 @@ public final class DetectionEngine: ObservableObject {
     }
 
     /// ペットに状態とセリフを渡す。ペット側の実装は知らない。
-    private func notifyPet(_ decision: DetectionDecision, label: SpeechRequest.VisionLabel, line: String) {
+    private func notifyPet(
+        _ decision: DetectionDecision,
+        label: SpeechRequest.VisionLabel,
+        line: String,
+        prompt: PetYesNoPrompt?
+    ) {
+        escalationStage = petStage(decision)
         onEvent?(
             PetEvent(
                 state: petState(decision.state),
-                escalationStage: petStage(decision),
+                escalationStage: escalationStage,
                 line: line,
                 visionLabel: petLabel(label),
-                prompt: nil
+                prompt: prompt
             )
         )
     }
