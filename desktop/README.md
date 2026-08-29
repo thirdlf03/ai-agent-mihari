@@ -376,3 +376,81 @@ Cmd+Option+Esc の強制終了でユーザーが自力で抜け出せる経路�
 (`NX_KEYTYPE_PLAY` の `CGEvent`)にフォールバックする。メディアキーは再生/一時停止のトグルなので、
 「何も再生していない」または「状態そのものが分からない」ときには送らない。誤って再生を
 始めてしまうリスクを避けるため。
+## AirPods 首振り（はい/いいえ）
+
+ペットの問いかけに、AirPods のヘッドトラッキングで「はい/いいえ」を返す（#18）。カメラのフォールバックは持たない方針。
+
+`CMHeadphoneMotionManager` は macOS 14.0+ の API で、SaboriLab の21モジュールでは唯一未検証だった。
+実装前に、署名済み `.app` バンドルから小さな検証コードで疎通確認をした。分かったこと:
+
+- `CMHeadphoneMotionManager.authorizationStatus()` は `notDetermined` から始まり、
+  `startDeviceMotionUpdates` を呼んだ瞬間にプロンプトが出て `authorized` に変わった。
+  これは既存の `PermissionRequester.requestMotion` に書かれている挙動と一致する
+- `isDeviceMotionAvailable` は、AirPods が Bluetooth 未接続の状態でも `true` を返した。
+  対応機種かどうかだけを見ており、接続状態そのものは見ていないらしい
+- **検証環境の AirPods Pro は Bluetooth 接続されていなかったため、実際に `CMDeviceMotion` が
+  流れてくるかは未確認。** 15 秒間購読を続けても、サンプルは 0 件だった
+
+つまり「API を呼べる」ことと「権限を得られる」ことは確認できたが、「実際に値が流れる」ことは
+実機で AirPods を接続してから確認する必要がある。判定ロジックはこの不確実性を踏まえて、
+CoreMotion に依存しない形にしてテストで担保してある。
+
+### 構成
+
+```
+Sources/MihariCore/HeadGesture/
+├── HeadOrientationSample.swift        # pitch/yaw の1サンプル。CoreMotion に依存しない
+├── HeadGestureThresholds.swift        # 振幅・往復回数・時間窓などの閾値（注入可能）
+├── HeadGestureRecognizer.swift        # 判定ロジック本体。角度の時系列を渡すと答えが出る
+├── HeadGestureAvailability.swift      # 利用可否（使える/使えない＋理由）
+├── HeadOrientationSource.swift        # サンプル供給側の契約（プロトコル）
+├── AirPodsHeadOrientationSource.swift # CMHeadphoneMotionManager を使う本物の実装
+├── HeadGestureResponse.swift          # 質問の結果（はい/いいえ/時間切れ/利用不可）
+├── HeadGestureQuestioner.swift        # 「質問 → 待つ → 結果」を1つにまとめた async API
+└── HeadGestureController.swift        # HeadGestureView 用の ObservableObject
+```
+
+`HeadGestureRecognizer` は CoreMotion を一切知らない純粋なロジックで、
+`Tests/MihariCoreTests/HeadGestureRecognizerTests.swift` で疑似的な角度の時系列を流してテストしている。
+
+### 他モジュールとの接続（#16 向け）
+
+ペットの問いかけ UI（#16）は `HeadGestureQuestioner` だけに依存すればよい。内部実装や
+`HeadGestureView` の型は一切知らなくてよい設計にしてある。
+
+```swift
+let questioner = HeadGestureQuestioner()
+let response = await questioner.ask(prompt: "休憩する？")
+switch response {
+case .yes: // うなずいた
+case .no: // 首を振った
+case .timedOut: // 反応がなかった
+case .unavailable(let reason): // AirPods未接続などで質問自体をスキップした
+}
+```
+
+### 判定の閾値と根拠
+
+首振りの判定は、振れ幅・往復回数・時間窓の3つの条件がすべて揃ったときだけ「はい/いいえ」を返す。
+AirPods の実データでは未検証のため、`HeadGestureThresholds.default` は日常の首の動きで
+誤反応しない方向に倒した見積もり値。
+
+| 定数 | 既定値 | 根拠 |
+| --- | --- | --- |
+| `minAmplitudeDegrees` | 12° | 画面を見る程度の視線移動（10°未満のことが多い）より確実に大きく、明確なうなずき/首振り（15〜30°）より確実に小さい値 |
+| `minReversalCount` | 2 | 1往復（2回反転）未満は「一度だけ下を見て戻す」動作と区別できないため |
+| `timeWindowSeconds` | 1.6秒 | 意図したうなずき/首振りの1往復はおよそ0.3〜0.6秒。2往復分の余裕を持たせた |
+| `noiseFloorDegrees` | 1.5° | センサーノイズ・首の微振動を反転として誤カウントしないための下限 |
+| `maxCrossAxisRatio` | 0.6 | 首を斜めに振ったときに、うなずきと首振りを取り違えないための、主軸に対する副軸の許容比率 |
+
+`HeadGestureView`（「AirPods 首振り」タブ相当。ルートへの組み込みは親が行う）で生の pitch/yaw を
+出しているのは、これらの値を実機の AirPods で調整するため。
+
+### 既知の制約
+
+- AirPods が Bluetooth 接続されていないと、`availability()` は `.unavailable` を返して質問を
+  スキップする。カメラなどへのフォールバックは持たない（#2 の Epic で明示的にそう決まっている）
+- `CMHeadphoneMotionManager` は同時に1つの購読しか持てない。`HeadGestureController` は
+  プレビュー中に質問が来たら一旦プレビューを止め、終わったら再開する形で衝突を避けている
+- 閾値は実機の AirPods で未検証。誤反応しやすい/しにくいが判明したら
+  `HeadGestureThresholds.default` を調整する
