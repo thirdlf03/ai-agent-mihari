@@ -534,16 +534,27 @@ pymobiledevice3 の CLI でも `developer screenshot`（非推奨）は失敗し
 
 ### 撮れる状態にするまで
 
-**USB 接続が必要。** DeveloperDiskImage のアップロードは Wi-Fi 経由では
-`Connection was terminated abruptly` で落ちる。
+**USB が要るのは DDI のマウント時だけ。** マウントが済めばケーブルを抜いてよく、
+以降は Wi-Fi で完結する（実機で確認済み）。
 
 1. iPhone を **USB ケーブル**で繋ぐ（「信頼」を許可）
 2. 設定 > プライバシーとセキュリティ > デベロッパモード を オン
-3. `cd bridge && uv run pymobiledevice3 mounter auto-mount`（root 不要。初回はイメージのダウンロードが走る）
+3. `cd bridge && uv run pymobiledevice3 mounter auto-mount`
+   （root 不要。初回はイメージのダウンロードが走る。**Wi-Fi 経由では
+   `Connection was terminated abruptly` で落ちるので、ここだけ USB が必須**）
 4. `sudo bridge/scripts/start_tunneld.sh`（**root 必須**。常駐し続ける）
+5. **ここで USB を抜いてよい。** tunneld は `_remotepairing._tcp` を bonjour で見つけて
+   Wi-Fi 側にトンネルを張り直す
 
 `GET /iphone/screenshot/preflight` が 4 項目すべて OK になれば撮れる。
 足りない項目には直すためのコマンドが付く。
 
-**tunneld は root で常駐し続けるプロセス。** Mac を再起動したら 4 をやり直す。
-デモ前に一度通しておくこと。
+### 再セットアップが要るとき
+
+| 何が起きたか | やり直すこと |
+| --- | --- |
+| Mac を再起動した | 4 だけ（tunneld）。DDI は端末側に残っている |
+| **iPhone を再起動した** | **1〜4 全部。** DDI が消えるので USB を挿し直す |
+| Wi-Fi が変わった / 圏外になった | tunneld が張り直すまで待つ |
+
+デモ前に一度通して、`preflight` が `ready: true` になることを確認しておくこと。
