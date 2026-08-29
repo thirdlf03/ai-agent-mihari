@@ -15,6 +15,7 @@ from device_bridge.daemon.routers import (
     events,
     health,
     iphone_state,
+    screenshot,
     voice,
 )
 from device_bridge.discord_bot.bot import DiscordService
@@ -60,4 +61,5 @@ def create_app(config: DaemonConfig) -> FastAPI:
     app.include_router(voice.router)
     app.include_router(discord.router)
     app.include_router(iphone_state.router)
+    app.include_router(screenshot.router)
     return app
