@@ -100,7 +100,11 @@ final class PetSpeechWindow: NSPanel {
     }
 
     /// 透明度を変える。`animated` が false なら即座に反映する。
-    private func fade(to alpha: CGFloat, animated: Bool, then completion: (() -> Void)?) {
+    ///
+    /// `completion` を MainActor 隔離にしているのは、`runAnimationGroup` の完了ハンドラが
+    /// `@Sendable` で、非 Sendable なクロージャを持ち込むと Swift 6.3 以降がエラーにするため。
+    /// MainActor 隔離の関数型は Sendable なので、そのまま持ち込んで `assumeIsolated` で呼べる。
+    private func fade(to alpha: CGFloat, animated: Bool, then completion: (@MainActor () -> Void)?) {
         guard animated else {
             alphaValue = alpha
             completion?()
