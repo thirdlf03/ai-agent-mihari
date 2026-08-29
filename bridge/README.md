@@ -74,7 +74,24 @@ developer サービスを RemoteXPC ベースのトンネル越しでしか公�
 このトンネルを維持する **tunneld** を root 権限で常駐させておく必要がある。
 **ここが当日のセットアップで一番の障害になりやすい。**
 
-ヘルパースクリプトを使う場合:
+やり方は 2 つある。**常用するなら A(1 回だけ sudo して OS に任せる)を推奨。**
+
+#### A. LaunchDaemon として常駐させる(推奨・sudo は最初の 1 回だけ)
+
+```sh
+sudo bridge/scripts/install_tunneld_daemon.sh
+```
+
+- launchd(`/Library/LaunchDaemons/com.thirdlf03.mihari.tunneld.plist`)に登録され、
+  **Mac を再起動しても自動で立ち上がり、プロセスが落ちても自動で復活する**。
+  以後、手動での起動は一切不要
+- ログは `/var/log/mihari-tunneld.log`
+- 状態確認: `launchctl print system/com.thirdlf03.mihari.tunneld | head`
+- やめるとき: `sudo bridge/scripts/uninstall_tunneld_daemon.sh`
+- root なしで tunneld を動かす抜け道は無い(pymobiledevice3 11.1.6 で `--usbmux` のみでも
+  root を要求されることを確認済み)。だから「1 回だけ sudo」に寄せている
+
+#### B. その場でフォアグラウンド起動する(単発の検証向け)
 
 ```sh
 bridge/scripts/start_tunneld.sh
@@ -82,9 +99,9 @@ bridge/scripts/start_tunneld.sh
 
 - root でなければ自動的に `sudo` で再実行する(パスワードを聞かれる)
 - `uv` が `PATH` に無い環境では `UV_PATH=/path/to/uv bridge/scripts/start_tunneld.sh` のように
-  明示する(探索順はルート README の環境変数の節と同じ)
+  明示する(探索順はルート README の環境変数の節と同じ。A のスクリプトも同様)
 - Ctrl-C で終了するまでフォアグラウンドで動き続ける常駐プロセスなので、専用のターミナルタブ
-  (または `tmux`)を 1 つ割り当てておく。デーモン化したい場合は自前で `nohup` 等を使うこと
+  (または `tmux`)を 1 つ割り当てておく
 
 直接コマンドを叩く場合:
 
@@ -157,8 +174,9 @@ curl -s -X POST -H "X-Mihari-Token: <token>" http://127.0.0.1:<port>/iphone/scre
   変わる可能性がある(`get_developer_mode_status` / DDI マウント確認 / tunneld の到達確認は
   いずれも pymobiledevice3 の実装に依存する)
 - iOS のバージョンが上がると DDI が外れ、再マウントが必要になることがある
-- tunneld は root 常駐が前提のプロセスであり、アプリからは制御できない。ユーザーが手動で
-  起動しておく運用になる
+- tunneld は root 常駐が前提のプロセスであり、アプリからは制御できない。代わりに
+  `install_tunneld_daemon.sh` で launchd(LaunchDaemon)に任せる。登録時に 1 回だけ
+  sudo が必要になるのは避けられない
 - `com.apple.mobile.screenshotr` は PNG ではなく TIFF を返すことがあるため、本実装は Pillow で
   PNG へ変換して常に PNG を保証している
 
