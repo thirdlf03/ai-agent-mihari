@@ -17,10 +17,10 @@ struct PermissionsModelTests {
         }
     }
 
+    private typealias Checker = @Sendable () -> [PermissionKind: PermissionState]
+
     /// 実機の TCC を見に行かず、指定した権限だけを許可済みとして返す照会スタブ。
-    private static func checker(granting granted: Set<PermissionKind>) -> @Sendable () ->
-        [PermissionKind: PermissionState]
-    {
+    private static func checker(granting granted: Set<PermissionKind>) -> Checker {
         {
             PermissionKind.allCases.reduce(into: [:]) { states, kind in
                 states[kind] = PermissionState(
