@@ -218,7 +218,8 @@ public enum SelfTest {
     @MainActor
     private static func overlay() async -> Result {
         // 実物の音楽コントローラを使うので、鳴っていれば本当に止まる。
-        // 診断が人の音楽を止めたまま終わらないよう、解除時に必ず再開させる。
+        // 本番は止めっぱなしが既定(サボっていた人に音楽を返す理由がない)だが、
+        // 診断で人の再生を奪ったまま終わるのは筋が違うので、ここだけ再開させる。
         let model = OverlayModel(
             presenter: ScreenSaverOverlayPresenter(),
             maxDurationSeconds: 2,

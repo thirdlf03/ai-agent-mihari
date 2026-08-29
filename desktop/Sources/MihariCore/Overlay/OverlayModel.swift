@@ -38,6 +38,11 @@ public final class OverlayModel: ObservableObject {
     public typealias Sleeping = (Duration) async -> Void
 
     @Published public var maxDurationSeconds: Int
+
+    /// 解除したあと、止めた音楽を再開するか。
+    ///
+    /// **既定は再開しない。** サボって音楽を聴いていた相手に、説教のあと音楽を
+    /// 返してやる理由がない。聴き直したければ本人が再生すればよい。
     @Published public var resumeMusicAfterDismiss: Bool
     @Published public private(set) var isPresented = false
     @Published public private(set) var lastDismissReason: OverlayDismissReason?
@@ -70,7 +75,7 @@ public final class OverlayModel: ObservableObject {
         presenter: OverlayWindowPresenting,
         musicController: MusicControlling = AppleScriptMusicController(),
         maxDurationSeconds: Int = OverlayModel.defaultMaxDurationSeconds,
-        resumeMusicAfterDismiss: Bool = true,
+        resumeMusicAfterDismiss: Bool = false,
         speak: @escaping SermonSpeaking = { _ in nil },
         stopSpeaking: @escaping () -> Void = {},
         sleep: @escaping Sleeping = { try? await Task.sleep(for: $0) }

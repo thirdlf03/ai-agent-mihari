@@ -254,3 +254,84 @@ struct OverlayModelTests {
         #expect(long > empty)
     }
 }
+
+@Suite("解除後に音楽を戻さない")
+@MainActor
+struct OverlayMusicResumeDefaultTests {
+
+    private final class StubPresenter: OverlayWindowPresenting {
+        private var shown = false
+        var isPresenting: Bool { shown }
+        func present(text: String, onEscape: @escaping () -> Void) { shown = true }
+        func dismiss() { shown = false }
+    }
+
+    private final class RecordingMusic: MusicControlling, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _resumed: [MusicStopOutcome] = []
+        var resumed: [MusicStopOutcome] { lock.withLock { _resumed } }
+
+        func nowPlaying() async -> NowPlaying { .playing(.spotify) }
+        func stopPlaying() async -> MusicStopOutcome { .stoppedViaAppleScript(player: .spotify) }
+        func resumePlaying(_ outcome: MusicStopOutcome) async {
+            lock.withLock { _resumed.append(outcome) }
+        }
+    }
+
+    /// 条件が満たされるまで待つ。固定時間で待つと負荷で競走に負ける。
+    private func waitUntil(
+        _ what: String,
+        timeout: Duration = .seconds(3),
+        _ condition: @Sendable () -> Bool
+    ) async {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        Issue.record("待っても起きなかった: \(what)")
+    }
+
+    @Test("既定では音楽を再開しない")
+    func doesNotResumeByDefault() async {
+        // サボって音楽を聴いていた相手に、説教のあと音楽を返してやる理由がない。
+        let music = RecordingMusic()
+        let model = OverlayModel(
+            presenter: StubPresenter(),
+            musicController: music,
+            maxDurationSeconds: 1,
+            // タイマーを発火させない。手で解除したときの挙動だけを見たいので、
+            // 即座に返る sleep を渡すと上限タイマーが先に解除してしまう。
+            sleep: { _ in try? await Task.sleep(for: .seconds(3600)) }
+        )
+
+        #expect(model.resumeMusicAfterDismiss == false)
+
+        model.show()
+        await model.waitForSermonSetupForTesting()
+        model.dismissManually()
+        // 「起きないこと」の確認なので、再開が走る余地を与えたうえで見る。
+        try? await Task.sleep(for: .milliseconds(200))
+
+        #expect(music.resumed.isEmpty)
+    }
+
+    @Test("設定を入れれば再開できる")
+    func resumesWhenAskedTo() async {
+        let music = RecordingMusic()
+        let model = OverlayModel(
+            presenter: StubPresenter(),
+            musicController: music,
+            maxDurationSeconds: 1,
+            resumeMusicAfterDismiss: true,
+            sleep: { _ in try? await Task.sleep(for: .seconds(3600)) }
+        )
+
+        model.show()
+        await model.waitForSermonSetupForTesting()
+        model.dismissManually()
+        await waitUntil("音楽が再開される") { music.resumed.count == 1 }
+
+        #expect(music.resumed.count == 1)
+    }
+}

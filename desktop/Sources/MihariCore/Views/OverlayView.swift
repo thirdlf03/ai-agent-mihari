@@ -66,7 +66,7 @@ public struct OverlayView: View {
                 .disabled(overlay.isPresented)
                 Spacer()
             }
-            Toggle("解除後に音楽を再開する", isOn: $overlay.resumeMusicAfterDismiss)
+            Toggle("解除後に音楽を再開する（既定は再開しない）", isOn: $overlay.resumeMusicAfterDismiss)
                 .disabled(overlay.isPresented)
         }
         .padding(12)
