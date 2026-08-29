@@ -9,7 +9,7 @@
 | --- | --- |
 | `desktop/` | アプリ本体 `Mihari`(SwiftUI / SwiftPM)。詳細は [desktop/README.md](desktop/README.md) |
 | `bridge/` | Python 側。`device-bridge` CLI と、アプリが常駐させる HTTP デーモン(uv 管理) |
-| `app/` | **参照用に凍結。** 旧 macOS アプリ(`MacApp`)。Wi-Fi 経由の lockdown 接続の実装を読むために残している |
+| `app/` | **参照用に凍結。** 旧 macOS アプリ(`MacApp`)。詳細は [app/README.md](app/README.md) |
 
 アプリは起動時に `bridge/` のデーモンを子プロセスとして立ち上げる。
 Swift → Python は `127.0.0.1` の REST、Python → Swift は SSE。

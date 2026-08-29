@@ -122,6 +122,13 @@ public struct DaemonClient: Sendable {
         try await post("discord/schedule", body: WatchScheduleRequest(at: time, requestedBy: "app"))
     }
 
+    /// iPhone の画面を 1 枚撮る。PNG のバイト列がそのまま返る。
+    public func iphoneScreenshot() async throws -> Data {
+        var request = try makeRequest(path: "iphone/screenshot", authenticated: true)
+        request.httpMethod = "POST"
+        return try await sendRaw(request)
+    }
+
     /// SSE の接続に使うリクエスト。
     public func eventStreamRequest() throws -> URLRequest {
         var request = try makeRequest(path: "events", authenticated: true)
@@ -165,6 +172,21 @@ public struct DaemonClient: Sendable {
             request.setValue(token, forHTTPHeaderField: Self.tokenHeader)
         }
         return request
+    }
+
+    /// JSON ではなくバイト列をそのまま返す要求。画像の取得に使う。
+    private func sendRaw(_ request: URLRequest) async throws -> Data {
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw DaemonError.requestFailed(status: 0, message: error.localizedDescription)
+        }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status) else {
+            throw DaemonError.requestFailed(status: status, message: Self.detail(from: data))
+        }
+        return data
     }
 
     private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
