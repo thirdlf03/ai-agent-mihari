@@ -1,33 +1,29 @@
 # progate-online-hackathon0829
 
-macOS アプリ(Swift)が Python 側の CLI をサブプロセス起動し、stdout の JSON を受け取って iOS デバイス情報を表示する。
+**Mihari** — サボりを検知して声で絡み、証拠を Discord に晒す macOS 常駐アプリ。
+全体像と設計の決定事項は [Issue #2 (Epic)](https://github.com/thirdlf03/progate-online-hackathon0829/issues/2) にまとめてある。
 
 ## 構成
 
 | ディレクトリ | 内容 |
 | --- | --- |
-| `app/` | SwiftUI 製 macOS アプリ(SwiftPM executable パッケージ、ターゲット `MacApp`)。デスクトップペットもここに含む |
-| `app/Sources/MacApp/Resources/pets/` | ペットの素材(`pet.json` とスプライトシート) |
-| `bridge/` | pymobiledevice3 を使う CLI `device-bridge`(uv 管理) |
+| `desktop/` | 検知・撮影・説教・Discord を担うアプリ本体 `Mihari`。詳細は [desktop/README.md](desktop/README.md) |
+| `bridge/` | Python 側。`device-bridge` CLI と、アプリが常駐させる HTTP デーモン(uv 管理) |
+| `app/` | **デスクトップペット**(`MacApp`)。スプライトのアニメーション・吹き出し・ドラッグ・メニュー |
+
+> **未接続:** ペットは `app/` に、検知エンジンは `desktop/` にあり、まだ繋がっていない。
+> `desktop/` 側には差し替え用の暫定表示(画像 1 枚)と連携インターフェースだけが入っている。
+> 統合の方針は [Issue #16](https://github.com/thirdlf03/progate-online-hackathon0829/issues/16) を参照。
+
+アプリは起動時に `bridge/` のデーモンを子プロセスとして立ち上げる。
+Swift → Python は `127.0.0.1` の REST、Python → Swift は SSE。
 
 ```
 app/Sources/MacApp/
-├── App/MacApp.swift          # @main・ペットメニュー
+├── App/MacApp.swift          # @main
 ├── Views/ContentView.swift   # 一覧 + 詳細
 ├── Models/Device.swift       # JSON に対応する Codable 型
-├── Bridge/DeviceBridge.swift # Process で device-bridge を起動
-├── Pet/
-│   ├── PetManifest.swift         # pet.json に対応する型
-│   ├── PetLibrary.swift          # 同梱ペットと ~/.codex/pets の列挙
-│   ├── PetAtlas.swift            # スプライトシートのコマ切り出し
-│   ├── PetStatus.swift           # 外部向けステータスとアニメーションの対応
-│   ├── PetSpeech.swift           # セリフ集と speech.json の読み込み
-│   ├── PetController.swift       # 表示状態とふるまいの管理
-│   ├── PetWindow.swift           # 浮遊表示する NSPanel
-│   ├── PetView.swift             # コマ表示・ドラッグ・メニュー
-│   ├── PetSpeechWindow.swift     # 吹き出しを出すペットの子ウィンドウ
-│   └── PetSpeechBubbleView.swift # 吹き出しの見た目
-└── Resources/pets/mauve/     # 同梱ペットの素材
+└── Bridge/DeviceBridge.swift # Process で device-bridge を起動
 
 bridge/src/device_bridge/
 ├── cli.py                    # argparse・JSON 出力
