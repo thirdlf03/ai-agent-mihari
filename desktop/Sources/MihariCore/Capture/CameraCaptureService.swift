@@ -71,6 +71,40 @@ public final class CameraCaptureService: @unchecked Sendable {
         }
     }
 
+    /// 自動露出が落ち着くまで待つ最短時間。
+    ///
+    /// 実機で測った結果、0.5 秒では平均輝度 0.017(ほぼ真っ黒)で顔が取れず、
+    /// 1.0 秒で 0.599 まで上がって顔が取れるようになった。余裕を見て 1.2 秒にしている。
+    /// `isAdjustingExposure` は早々に false を返すため、この待ちが無いと当てにならない。
+    /// 調整のため `MIHARI_CAMERA_WARMUP` 秒で上書きできる。
+    static var minimumWarmupSeconds: TimeInterval {
+        ProcessInfo.processInfo.environment["MIHARI_CAMERA_WARMUP"].flatMap(Double.init) ?? 1.2
+    }
+
+    /// これ以上は待たない。暗い部屋では露出調整が終わらないことがあるため、
+    /// 待ち続けて撮れないより、多少暗くても撮る方を選ぶ。
+    static let maximumWarmupSeconds: TimeInterval = 4.0
+
+    /// 露出調整の完了を確かめる間隔。
+    static let warmupPollSeconds: TimeInterval = 0.05
+
+    /// 自動露出とホワイトバランスが落ち着くまで待つ。
+    ///
+    /// `queue` 上で同期的に待つ。ここは撮影 1 回のためだけに使う専用キューで、
+    /// UI も他の撮影も止めない。
+    private static func waitForExposure(device: AVCaptureDevice) {
+        Thread.sleep(forTimeInterval: minimumWarmupSeconds)
+
+        let deadline = Date().addingTimeInterval(max(0, maximumWarmupSeconds - minimumWarmupSeconds))
+        while Date() < deadline {
+            if !device.isAdjustingExposure && !device.isAdjustingWhiteBalance {
+                return
+            }
+            Thread.sleep(forTimeInterval: warmupPollSeconds)
+        }
+        logger.info("露出が落ち着かないまま撮影する(暗い可能性がある)")
+    }
+
     /// 呼び出し元は必ず `queue` 上にいる。
     private func captureOnQueue(completion: @escaping @Sendable (Result<Data, Error>) -> Void) {
         let session = AVCaptureSession()
@@ -109,6 +143,10 @@ public final class CameraCaptureService: @unchecked Sendable {
 
         Self.logger.info("AVCaptureSession を開始する(撮影のみ・緑ランプ点灯)")
         session.startRunning()
+
+        // 開始直後に撮ると自動露出が追いつかず、ほぼ真っ黒な写真になる。
+        // 顔が写っていても検出できず「席にいない」と誤判定するので、落ち着くまで待つ。
+        Self.waitForExposure(device: device)
 
         let settings: AVCapturePhotoSettings
         if photoOutput.availablePhotoCodecTypes.contains(.jpeg) {

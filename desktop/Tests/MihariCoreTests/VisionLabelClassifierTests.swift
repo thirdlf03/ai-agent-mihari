@@ -16,16 +16,26 @@ struct VisionLabelClassifierTests {
         #expect(VisionLabelClassifier.classify(outcome: outcome) == .sleeping)
     }
 
-    @Test("yaw が大きければ lookingAway")
-    func largeYawIsLookingAway() {
+    @Test("yaw が大きくてもよそ見とは判定しない")
+    func largeYawIsIgnored() {
+        // この Vision のリビジョンでは yaw が常に 0.000 しか返らず、実機の映像フレームで
+        // まったく機能しなかった。取れていない値でよそ見を断定すると誤判定にしかならない。
         let outcome = FaceDetectionOutcome.faceFound(metrics(eyeOpenness: 0.3, yaw: 0.6))
-        #expect(VisionLabelClassifier.classify(outcome: outcome) == .lookingAway)
+        #expect(VisionLabelClassifier.classify(outcome: outcome) == .unknown)
     }
 
-    @Test("負の yaw(逆向き)でもよそ見と判定する")
-    func negativeYawIsLookingAway() {
+    @Test("負の yaw(逆向き)でもよそ見とは判定しない")
+    func negativeYawIsIgnored() {
         let outcome = FaceDetectionOutcome.faceFound(metrics(eyeOpenness: 0.3, yaw: -0.6))
-        #expect(VisionLabelClassifier.classify(outcome: outcome) == .lookingAway)
+        #expect(VisionLabelClassifier.classify(outcome: outcome) == .unknown)
+    }
+
+    @Test("yaw がどれだけ大きくても、目が開いていれば見ている扱いのまま")
+    func yawNeverAffectsGaze() {
+        for yaw in [0.0, 0.4, 1.2, -1.2] {
+            let outcome = FaceDetectionOutcome.faceFound(metrics(eyeOpenness: 0.3, yaw: yaw))
+            #expect(GazeState.from(outcome: outcome) == .lookingAtScreen, "yaw で判定が変わった: \(yaw)")
+        }
     }
 
     @Test("顔が検出できなければ absent")
@@ -43,13 +53,6 @@ struct VisionLabelClassifierTests {
     func eyeOpennessAtThresholdIsNotClosed() {
         let threshold = VisionLabelClassifier.defaultClosedEyeOpennessThreshold
         let outcome = FaceDetectionOutcome.faceFound(metrics(eyeOpenness: threshold, yaw: 0.0))
-        #expect(VisionLabelClassifier.classify(outcome: outcome) == .unknown)
-    }
-
-    @Test("yaw がちょうど閾値ならよそ見扱いにしない(境界)")
-    func yawAtThresholdIsNotLookingAway() {
-        let threshold = VisionLabelClassifier.defaultLookingAwayYawRadiansThreshold
-        let outcome = FaceDetectionOutcome.faceFound(metrics(eyeOpenness: 0.3, yaw: threshold))
         #expect(VisionLabelClassifier.classify(outcome: outcome) == .unknown)
     }
 

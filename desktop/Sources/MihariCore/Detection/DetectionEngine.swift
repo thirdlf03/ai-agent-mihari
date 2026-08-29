@@ -24,8 +24,8 @@ public final class DetectionEngine: ObservableObject {
     @Published public private(set) var isWatching = false
     @Published public private(set) var state: DetectionState = .normal
     @Published public private(set) var lastSignals: DetectionSignals?
-    /// 直近で確かめた視線。画面に出して閾値の調整に使う。
-    @Published public private(set) var lastGaze: GazeState = .unknown
+    /// いまの視線の状況。画面に出して閾値の調整に使う。
+    @Published public private(set) var gaze: GazeObservation = .none
     @Published public private(set) var log: [DetectionLogEntry] = []
     @Published public var thresholds: DetectionThresholds = .default
 
@@ -35,7 +35,7 @@ public final class DetectionEngine: ObservableObject {
     private let attendance: AttendanceModel?
     private var loop: Task<Void, Never>?
     private var lastEvidenceAt: Date?
-    private var lastGazeAt: Date?
+    private let gazeMonitor: GazeMonitor
 
     /// 実行部。テストからはここを差し替えて、実際に撮らず送らずに筋道だけを確かめる。
     public struct Actions: Sendable {
@@ -45,8 +45,6 @@ public final class DetectionEngine: ObservableObject {
         public var interrupt: @Sendable (SpeechRequest) async -> Void
         public var post: @Sendable (String, Data?, String) async -> Bool
         public var classify: @Sendable (Data) async -> SpeechRequest.VisionLabel
-        /// カメラを 1 枚覗いて、画面を見ているかだけを返す。写真は保存しない。
-        public var checkGaze: @Sendable () async -> GazeState
 
         public init(
             captureMacPhoto: @escaping @Sendable () async -> Data? = { nil },
@@ -54,8 +52,7 @@ public final class DetectionEngine: ObservableObject {
             speak: @escaping @Sendable (SpeechRequest) async -> String? = { _ in nil },
             interrupt: @escaping @Sendable (SpeechRequest) async -> Void = { _ in },
             post: @escaping @Sendable (String, Data?, String) async -> Bool = { _, _, _ in false },
-            classify: @escaping @Sendable (Data) async -> SpeechRequest.VisionLabel = { _ in .unknown },
-            checkGaze: @escaping @Sendable () async -> GazeState = { .unknown }
+            classify: @escaping @Sendable (Data) async -> SpeechRequest.VisionLabel = { _ in .unknown }
         ) {
             self.captureMacPhoto = captureMacPhoto
             self.captureIPhoneScreenshot = captureIPhoneScreenshot
@@ -63,7 +60,6 @@ public final class DetectionEngine: ObservableObject {
             self.interrupt = interrupt
             self.post = post
             self.classify = classify
-            self.checkGaze = checkGaze
         }
     }
 
@@ -80,12 +76,14 @@ public final class DetectionEngine: ObservableObject {
         idleMonitor: MacIdleMonitor = MacIdleMonitor(),
         frontmostMonitor: FrontmostAppMonitor = FrontmostAppMonitor(),
         capture: CaptureService = CaptureService(),
-        attendance: AttendanceModel? = nil
+        attendance: AttendanceModel? = nil,
+        gazeMonitor: GazeMonitor = GazeMonitor()
     ) {
         self.idleMonitor = idleMonitor
         self.frontmostMonitor = frontmostMonitor
         self.capture = capture
         self.attendance = attendance
+        self.gazeMonitor = gazeMonitor
     }
 
     public func start() {
@@ -104,14 +102,14 @@ public final class DetectionEngine: ObservableObject {
         loop = nil
         isWatching = false
         state = .normal
-        lastGaze = .unknown
-        lastGazeAt = nil
+        gazeMonitor.stop()
+        gaze = .none
     }
 
     /// いまの材料を集める。必要なら途中でカメラを覗く。
-    public func currentSignals(now: Date = Date()) async -> DetectionSignals {
+    public func currentSignals(now: Date = Date()) -> DetectionSignals {
         let idle = idleMonitor.idleSeconds()
-        let gaze = await resolveGaze(idleSeconds: idle, now: now)
+        let gaze = updateGazeMonitoring(idleSeconds: idle, now: now)
         return DetectionSignals(
             macIdleSeconds: idle,
             iphone: iphoneState,
@@ -121,32 +119,29 @@ public final class DetectionEngine: ObservableObject {
         )
     }
 
-    /// 視線を決める。
+    /// 視線の監視を、無操作かどうかで開け閉めする。
     ///
-    /// **手を動かしている間はカメラを起動しない。** 無操作が閾値を超えてから、
-    /// 間隔を空けて覗く。毎回覗くと緑ランプが点滅し続けて落ち着かない。
-    private func resolveGaze(idleSeconds: TimeInterval, now: Date) async -> GazeState {
-        guard idleSeconds >= thresholds.gazeCheckSeconds else {
-            // 触っている。覗く必要がないし、覚えていた結果も捨てる。
-            lastGaze = .unknown
-            lastGazeAt = nil
-            return .unknown
+    /// **手を動かしている間はカメラを開けない。** 怪しくなってから開き、
+    /// 触り始めたら閉じて、覚えていた結果も捨てる。
+    private func updateGazeMonitoring(idleSeconds: TimeInterval, now: Date) -> GazeObservation {
+        guard idleSeconds >= thresholds.gazeWatchSeconds else {
+            if gazeMonitor.isRunning { gazeMonitor.stop() }
+            gaze = .none
+            return .none
         }
 
-        if let checkedAt = lastGazeAt, now.timeIntervalSince(checkedAt) < thresholds.gazeCheckIntervalSeconds {
-            return lastGaze
-        }
+        if !gazeMonitor.isRunning { gazeMonitor.start() }
 
-        let gaze = await actions.checkGaze()
-        lastGaze = gaze
-        lastGazeAt = now
+        let observed = gazeMonitor.observation
+        // カメラを止めた直後の古い値で判定しない。
+        gaze = observed.isFresh(now: now, within: thresholds.gazeFreshnessSeconds) ? observed : .none
         return gaze
     }
 
     /// 1 回だけ評価して実行する。ループからも、画面の「いま評価する」ボタンからも呼ぶ。
     @discardableResult
     public func evaluate(now: Date = Date()) async -> DetectionDecision {
-        let signals = await currentSignals(now: now)
+        let signals = currentSignals(now: now)
         lastSignals = signals
 
         let judge = DetectionJudge(thresholds: thresholds)

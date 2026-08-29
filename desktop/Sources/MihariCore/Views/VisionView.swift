@@ -97,7 +97,7 @@ public struct VisionView: View {
                 StatusRow(key: "yaw(度)", value: formattedMetric(model.metrics?.yawDegrees))
             }
             Text(
-                "閉眼の閾値: 平均開き具合 < \(VisionLabelClassifier.defaultClosedEyeOpennessThreshold, specifier: "%.2f") / よそ見の閾値: |yaw| > \(VisionLabelClassifier.defaultLookingAwayYawRadiansThreshold, specifier: "%.2f") rad"
+                "閉眼の閾値: 平均開き具合 < \(VisionLabelClassifier.defaultClosedEyeOpennessThreshold, specifier: "%.2f")（よそ見の判定は行わない。この Vision では yaw が常に 0 で取れないため）"
             )
             .font(.caption)
             .foregroundStyle(.secondary)

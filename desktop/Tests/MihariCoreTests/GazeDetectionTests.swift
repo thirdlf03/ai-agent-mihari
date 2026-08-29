@@ -20,9 +20,11 @@ struct GazeStateTests {
         #expect(GazeState.from(outcome: .faceFound(metrics(openness: 0.05, yaw: 0.0))) == .notLooking)
     }
 
-    @Test("横を向いていれば見ていない")
-    func lookingAway() {
-        #expect(GazeState.from(outcome: .faceFound(metrics(openness: 0.30, yaw: 0.9))) == .notLooking)
+    @Test("よそ見は判定しない（yaw が取れないため）")
+    func yawIsNotUsed() {
+        // 実機の映像フレームで yaw は常に 0.000 だった。取れていない値で
+        // よそ見を断定すると、作業中の人を撮ることになる。
+        #expect(GazeState.from(outcome: .faceFound(metrics(openness: 0.30, yaw: 0.9))) == .lookingAtScreen)
     }
 
     @Test("誰も写っていなければ見ていない")
@@ -35,6 +37,49 @@ struct GazeStateTests {
         // カメラが使えないだけで撮られては困る。分からないときは不明のままにする。
         #expect(GazeState.from(outcome: .detectionFailed(reason: "カメラが使えない")) == .unknown)
     }
+
+    @Test("実機で測った通常時の目の開きが「寝ている」にならない")
+    func typicalOpenEyesAreNotSleeping() {
+        // 実機で測った平常時の値は 0.193〜0.239 だった。ここが閾値に近すぎると、
+        // わずかに細めただけで寝ていると誤判定して撮られてしまう。
+        for openness in [0.193, 0.203, 0.216, 0.239] {
+            #expect(
+                GazeState.from(outcome: .faceFound(metrics(openness: openness, yaw: 0.0)))
+                    == .lookingAtScreen,
+                "平常時の値を寝ていると誤判定した: \(openness)"
+            )
+        }
+    }
+}
+
+@Suite("見ていない時間の積み上げ")
+struct GazeObservationTests {
+
+    @Test("何も見ていない状態は新しくない")
+    func noneIsNeverFresh() {
+        #expect(GazeObservation.none.isFresh(now: Date(), within: 10) == false)
+    }
+
+    @Test("直近の結果は新しい")
+    func recentIsFresh() {
+        let now = Date()
+        let observation = GazeObservation(state: .notLooking, updatedAt: now.addingTimeInterval(-3))
+        #expect(observation.isFresh(now: now, within: 10))
+    }
+
+    @Test("古い結果は使わない")
+    func staleIsNotFresh() {
+        // カメラを止めた直後の値で判定しないための保険。
+        let now = Date()
+        let observation = GazeObservation(state: .notLooking, updatedAt: now.addingTimeInterval(-30))
+        #expect(observation.isFresh(now: now, within: 10) == false)
+    }
+
+    @Test("見ていない状態は続いた秒数つきで表示する")
+    func summaryShowsDuration() {
+        let observation = GazeObservation(state: .notLooking, notLookingSeconds: 18)
+        #expect(observation.summary.contains("18"))
+    }
 }
 
 @Suite("画面を見ていないときの判定")
@@ -42,143 +87,169 @@ struct NotLookingJudgeTests {
 
     private let judge = DetectionJudge(thresholds: .default)
 
-    private func signals(idle: TimeInterval, gaze: GazeState) -> DetectionSignals {
-        DetectionSignals(macIdleSeconds: idle, gaze: gaze)
+    private func signals(idle: TimeInterval, notLooking: TimeInterval) -> DetectionSignals {
+        DetectionSignals(
+            macIdleSeconds: idle,
+            gaze: GazeObservation(
+                state: notLooking > 0 ? .notLooking : .lookingAtScreen,
+                notLookingSeconds: notLooking,
+                updatedAt: Date()
+            )
+        )
     }
 
-    @Test("無操作かつ画面を見ていないと、確定まで待たずに確定する")
-    func notLookingConfirmsEarly() {
-        // 既定では確定 300 秒だが、見ていないと分かっているなら 90 秒で確定させる。
-        let decision = judge.decide(signals(idle: 100, gaze: .notLooking))
+    @Test("見ていない状態が続けば、無操作 5 分を待たずに確定する")
+    func sustainedNotLookingConfirmsEarly() {
+        let decision = judge.decide(signals(idle: 70, notLooking: 20))
         #expect(decision.state == .confirmed)
         #expect(decision.evidence == .macCamera)
     }
 
+    @Test("短い間だけ見ていなくても確定しない")
+    func briefNotLookingIsIgnored() {
+        // 瞬きや一瞬よそを向いただけで撮られては困る。
+        #expect(judge.decide(signals(idle: 70, notLooking: 3)).state == .normal)
+    }
+
+    @Test("継続時間の境界は 15 秒ちょうどから")
+    func durationBoundary() {
+        #expect(judge.decide(signals(idle: 70, notLooking: 14)).state == .normal)
+        #expect(judge.decide(signals(idle: 70, notLooking: 15)).state == .confirmed)
+    }
+
     @Test("どちらの条件で引っかかったかが根拠に残る")
     func reasonNamesTheCause() {
-        #expect(judge.decide(signals(idle: 100, gaze: .notLooking)).reason.contains("画面を見ていない"))
-        #expect(!judge.decide(signals(idle: 400, gaze: .unknown)).reason.contains("画面を見ていない"))
+        let byGaze = judge.decide(signals(idle: 70, notLooking: 20)).reason
+        #expect(byGaze.contains("見ていない"))
+        #expect(!judge.decide(signals(idle: 400, notLooking: 0)).reason.contains("見ていない"))
     }
 
     @Test("画面を見ていても無操作が続けば、これまで通り時間で確定する")
     func lookingStillConfirmsOnTime() {
-        #expect(judge.decide(signals(idle: 400, gaze: .lookingAtScreen)).state == .confirmed)
+        #expect(judge.decide(signals(idle: 400, notLooking: 0)).state == .confirmed)
     }
 
-    @Test("画面を見ている間は早期確定しない")
-    func lookingIsNotConfirmedEarly() {
-        // 資料を読んでいるだけで撮られては困る。
-        #expect(judge.decide(signals(idle: 100, gaze: .lookingAtScreen)).state == .normal)
-        #expect(judge.decide(signals(idle: 150, gaze: .lookingAtScreen)).state == .suspected)
-    }
-
-    @Test("視線が不明なら早期確定しない")
-    func unknownGazeIsNotConfirmedEarly() {
-        // カメラが使えないだけで撮られては困る。
-        #expect(judge.decide(signals(idle: 100, gaze: .unknown)).state == .normal)
-    }
-
-    @Test("早期確定の境界は 90 秒ちょうどから")
-    func notLookingBoundary() {
-        #expect(judge.decide(signals(idle: 89, gaze: .notLooking)).state == .normal)
-        #expect(judge.decide(signals(idle: 90, gaze: .notLooking)).state == .confirmed)
+    @Test("カメラが使えていなければ早期確定しない")
+    func withoutCameraNoEarlyConfirm() {
+        // 視線が取れないだけで撮られては困る。
+        let blind = DetectionSignals(macIdleSeconds: 100, gaze: .none)
+        #expect(judge.decide(blind).state == .normal)
     }
 
     @Test("見ていなくても在席スタンプ直後なら見逃す")
     func stampStillWins() {
-        let signals = DetectionSignals(macIdleSeconds: 200, gaze: .notLooking, secondsSinceStamp: 30)
+        let signals = DetectionSignals(
+            macIdleSeconds: 200,
+            gaze: GazeObservation(state: .notLooking, notLookingSeconds: 60, updatedAt: Date()),
+            secondsSinceStamp: 30
+        )
         #expect(judge.decide(signals).state == .normal)
-    }
-
-    @Test("覗き始めるより手前で早期確定しないよう閾値が守られる")
-    func gazeCheckNeverStartsAfterConfirmation() {
-        // 覗く前に「見ていない」で確定させると、視線が必ず不明のままになって機能しない。
-        let thresholds = DetectionThresholds(notLookingConfirmSeconds: 90, gazeCheckSeconds: 200)
-        #expect(thresholds.gazeCheckSeconds <= thresholds.notLookingConfirmSeconds)
     }
 }
 
-@Suite("カメラを覗く条件")
+@Suite("カメラを開ける条件")
 @MainActor
-struct GazePeekTests {
+struct GazeMonitoringTests {
 
-    /// 何回覗かれたかを数える。
-    private final class GazeSpy: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _count = 0
-        var count: Int { lock.withLock { _count } }
-        var answer: GazeState = .notLooking
+    /// 実際のカメラを開けずに、開け閉めだけを記録する。
+    private final class MonitorSpy: GazeMonitor {
+        private let spyLock = NSLock()
+        private var _running = false
+        private var _starts = 0
+        private var _stops = 0
+        private var _observation = GazeObservation.none
 
-        func check() async -> GazeState {
-            lock.withLock { _count += 1 }
-            return answer
+        override var isRunning: Bool { spyLock.withLock { _running } }
+        override var observation: GazeObservation { spyLock.withLock { _observation } }
+        var starts: Int { spyLock.withLock { _starts } }
+        var stops: Int { spyLock.withLock { _stops } }
+
+        func setObservation(_ value: GazeObservation) { spyLock.withLock { _observation = value } }
+        override func start() {
+            spyLock.withLock {
+                _running = true
+                _starts += 1
+            }
+        }
+        override func stop() {
+            spyLock.withLock {
+                _running = false
+                _stops += 1
+            }
         }
     }
 
-    private func engine(idle: TimeInterval, gaze: GazeSpy) -> DetectionEngine {
-        let engine = DetectionEngine(idleMonitor: MacIdleMonitor(probe: { idle }))
-        engine.actions = DetectionEngine.Actions(checkGaze: { await gaze.check() })
-        return engine
+    private func engine(idle: TimeInterval, monitor: MonitorSpy) -> DetectionEngine {
+        DetectionEngine(idleMonitor: MacIdleMonitor(probe: { idle }), gazeMonitor: monitor)
     }
 
-    @Test("手を動かしている間はカメラを一切起動しない")
-    func neverPeeksWhileActive() async {
+    @Test("手を動かしている間はカメラを開けない")
+    func neverOpensWhileActive() {
         // 緑ランプが点きっぱなしになると、ただの監視カメラになってしまう。
-        let gaze = GazeSpy()
-        _ = await engine(idle: 10, gaze: gaze).currentSignals()
-        #expect(gaze.count == 0)
+        let monitor = MonitorSpy()
+        _ = engine(idle: 10, monitor: monitor).currentSignals()
+        #expect(monitor.starts == 0)
     }
 
-    @Test("無操作が閾値を超えたら覗く")
-    func peeksOnceIdle() async {
-        let gaze = GazeSpy()
-        let signals = await engine(idle: 70, gaze: gaze).currentSignals()
-        #expect(gaze.count == 1)
-        #expect(signals.gaze == .notLooking)
+    @Test("無操作が閾値を超えたらカメラを開ける")
+    func opensOnceIdle() {
+        let monitor = MonitorSpy()
+        _ = engine(idle: 70, monitor: monitor).currentSignals()
+        #expect(monitor.starts == 1)
     }
 
-    @Test("間隔を空けずに何度も覗かない")
-    func respectsTheInterval() async {
-        let gaze = GazeSpy()
-        let engine = engine(idle: 70, gaze: gaze)
-        let now = Date()
-
-        _ = await engine.currentSignals(now: now)
-        _ = await engine.currentSignals(now: now.addingTimeInterval(5))
-        _ = await engine.currentSignals(now: now.addingTimeInterval(10))
-
-        #expect(gaze.count == 1)
+    @Test("すでに開いていれば開き直さない")
+    func doesNotReopen() {
+        let monitor = MonitorSpy()
+        let engine = engine(idle: 70, monitor: monitor)
+        _ = engine.currentSignals()
+        _ = engine.currentSignals()
+        #expect(monitor.starts == 1)
     }
 
-    @Test("間隔が明ければまた覗く")
-    func peeksAgainAfterTheInterval() async {
-        let gaze = GazeSpy()
-        let engine = engine(idle: 70, gaze: gaze)
-        let now = Date()
-
-        _ = await engine.currentSignals(now: now)
-        _ = await engine.currentSignals(now: now.addingTimeInterval(31))
-
-        #expect(gaze.count == 2)
-    }
-
-    @Test("触り始めたら覚えていた視線を捨てる")
-    func forgetsGazeWhenActive() async {
+    @Test("触り始めたらカメラを閉じて、覚えていた結果も捨てる")
+    func closesWhenActive() {
         // 席に戻って作業を再開したのに、さっきの「見ていない」で撮られては困る。
-        let gaze = GazeSpy()
+        let monitor = MonitorSpy()
         let idle = IdleBox()
-        let engine = DetectionEngine(idleMonitor: MacIdleMonitor(probe: { idle.read() }))
-        engine.actions = DetectionEngine.Actions(checkGaze: { await gaze.check() })
+        let engine = DetectionEngine(
+            idleMonitor: MacIdleMonitor(probe: { idle.read() }),
+            gazeMonitor: monitor
+        )
 
         idle.set(70)
-        _ = await engine.currentSignals()
-        #expect(engine.lastGaze == .notLooking)
+        monitor.setObservation(GazeObservation(state: .notLooking, notLookingSeconds: 40, updatedAt: Date()))
+        _ = engine.currentSignals()
+        #expect(engine.gaze.state == .notLooking)
 
         idle.set(0)
-        let signals = await engine.currentSignals()
+        let signals = engine.currentSignals()
 
-        #expect(signals.gaze == .unknown)
-        #expect(engine.lastGaze == .unknown)
+        #expect(monitor.stops == 1)
+        #expect(signals.gaze == .none)
+        #expect(engine.gaze == .none)
+    }
+
+    @Test("古い観測結果は判定に使わない")
+    func staleObservationIsDropped() {
+        let monitor = MonitorSpy()
+        monitor.setObservation(
+            GazeObservation(state: .notLooking, notLookingSeconds: 60, updatedAt: Date().addingTimeInterval(-120))
+        )
+        let signals = engine(idle: 70, monitor: monitor).currentSignals()
+        #expect(signals.gaze == .none)
+    }
+
+    @Test("監視を止めるとカメラも閉じる")
+    func stopClosesTheCamera() {
+        let monitor = MonitorSpy()
+        let engine = engine(idle: 70, monitor: monitor)
+        _ = engine.currentSignals()
+
+        engine.stop()
+
+        #expect(monitor.stops >= 1)
+        #expect(engine.gaze == .none)
     }
 }
 

@@ -1,3 +1,4 @@
+import AVFoundation
 import AppKit
 import Foundation
 
@@ -29,15 +30,37 @@ public enum SelfTest {
     @MainActor
     public static func run() async -> Bool {
         var results: [Result] = []
+        results.append(cameras())
         results.append(await screenshot())
         results.append(await camera())
         results.append(contentsOf: vision(from: results))
         results.append(gaze())
+        results.append(await continuousGaze())
         results.append(await music())
         results.append(await overlay())
 
         FileHandle.standardOutput.write(Data(render(results).utf8))
         return results.allSatisfy(\.ok)
+    }
+
+    /// どのカメラを掴んでいるか。Continuity Camera(iPhone)が既定に選ばれていると、
+    /// 机に置いた iPhone が天井を撮って「顔がいない」と判定され続ける。
+    private static func cameras() -> Result {
+        let session = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera, .external, .continuityCamera],
+            mediaType: .video,
+            position: .unspecified
+        )
+        let selected = AVCaptureDevice.default(for: .video)
+        let list = session.devices.map { device in
+            let mark = device.uniqueID == selected?.uniqueID ? "★" : "  "
+            return "\(mark)\(device.localizedName)[\(device.deviceType.rawValue)]"
+        }
+        return Result(
+            name: "カメラの選択",
+            ok: selected != nil,
+            detail: list.isEmpty ? "カメラが見つからない" : list.joined(separator: " / ")
+        )
     }
 
     @MainActor
@@ -59,7 +82,13 @@ public enum SelfTest {
             let data = try Data(contentsOf: artifact.url)
             try? artifact.delete()
             lastPhoto = data
-            return Result(name: "カメラで 1 枚撮る", ok: !data.isEmpty, detail: "\(data.count) バイトの PNG を保存した")
+            // 何が写っていたのかを目で確かめられるよう、診断時だけ手元に残す。
+            if let keep = ProcessInfo.processInfo.environment["MIHARI_SELFTEST_KEEP_PHOTO"] {
+                try? data.write(to: URL(fileURLWithPath: keep))
+            }
+            let brightness = averageBrightness(of: data)
+            let note = brightness.map { String(format: "平均の明るさ %.3f", $0) } ?? "明るさ不明"
+            return Result(name: "カメラで 1 枚撮る", ok: !data.isEmpty, detail: "\(data.count) バイト / \(note)")
         } catch {
             return Result(name: "カメラで 1 枚撮る", ok: false, detail: describe(error))
         }
@@ -81,8 +110,86 @@ public enum SelfTest {
         guard let data = lastPhoto, let image = try? CaptureImageCodec.decode(data) else {
             return Result(name: "視線の判定", ok: false, detail: "写真が無いので試せない")
         }
-        let state = GazeState.from(outcome: FaceVisionAnalyzer.analyze(image))
-        return Result(name: "視線の判定", ok: true, detail: state.label)
+        let outcome = FaceVisionAnalyzer.analyze(image)
+        let state = GazeState.from(outcome: outcome)
+
+        // どの条件で落ちているのかが分からないと閾値を詰められないので、生の値も出す。
+        var note = state.label
+        if case .faceFound(let metrics) = outcome {
+            let openness = metrics.averageEyeOpenness.map { String(format: "%.3f", $0) } ?? "-"
+            let yaw = metrics.yawRadians.map { String(format: "%.3f", $0) } ?? "-"
+            note += "（目の開き \(openness) / しきい値 \(VisionLabelClassifier.defaultClosedEyeOpennessThreshold)"
+            note += " · yaw \(yaw)＝判定には使わない）"
+        } else {
+            note += "（\(outcome)）"
+        }
+        return Result(name: "視線の判定", ok: true, detail: note)
+    }
+
+    /// 連続監視で視線が安定して取れるか。
+    ///
+    /// 単発フレームは瞬きや一瞬の視線移動で判定が飛ぶ。開けっぱなしにして
+    /// 数秒ぶんを見たときに、ちゃんと落ち着いた結果になるかを確かめる。
+    private static func continuousGaze() async -> Result {
+        let monitor = GazeMonitor()
+        monitor.start()
+        defer { monitor.stop() }
+
+        var samples: [GazeState] = []
+        var openings: [Double] = []
+        var yaws: [Double] = []
+        var lastOpenness: Double?
+        // 露出が落ち着くまでの待ちを含めて 6 秒ぶん見る。
+        for _ in 0..<24 {
+            try? await Task.sleep(for: .milliseconds(250))
+            let observation = monitor.observation
+            guard observation.updatedAt != nil else { continue }
+            samples.append(observation.state)
+            if let openness = observation.eyeOpenness {
+                openings.append(openness)
+                lastOpenness = openness
+            }
+            if let yaw = observation.yawRadians {
+                yaws.append(yaw)
+            }
+        }
+
+        guard !samples.isEmpty else {
+            return Result(name: "視線の連続監視", ok: false, detail: "フレームが 1 枚も解析されなかった")
+        }
+        _ = lastOpenness
+        let looking = samples.filter { $0 == .lookingAtScreen }.count
+        let notLooking = samples.filter { $0 == .notLooking }.count
+
+        // 静止画と映像フレームで目の開きの出方が違うなら、閾値を測り直す必要がある。
+        var spread = "顔なし"
+        if !openings.isEmpty {
+            let sorted = openings.sorted()
+            spread = String(
+                format: "最小 %.3f / 中央 %.3f / 最大 %.3f（%d/%d フレームで顔あり）",
+                sorted.first ?? 0,
+                sorted[sorted.count / 2],
+                sorted.last ?? 0,
+                openings.count,
+                samples.count
+            )
+        }
+        var yawSpread = "yaw なし"
+        if !yaws.isEmpty {
+            let sorted = yaws.map(abs).sorted()
+            // 判定には使っていないが、将来この値が返るようになったか気づけるよう出しておく。
+            yawSpread = String(
+                format: "|yaw| 最小 %.3f / 中央 %.3f / 最大 %.3f（判定には未使用）",
+                sorted.first ?? 0,
+                sorted[sorted.count / 2],
+                sorted.last ?? 0
+            )
+        }
+        return Result(
+            name: "視線の連続監視",
+            ok: true,
+            detail: "見ている \(looking) / 見ていない \(notLooking) · 目の開き \(spread) · \(yawSpread)"
+        )
     }
 
     /// 音楽を止められるか。オートメーション権限が無ければ失敗するが、それも分かってよい情報。
@@ -117,6 +224,28 @@ public enum SelfTest {
             ok: shown,
             detail: shown ? "表示され、2 秒で自動解除された" : "そもそも表示できなかった"
         )
+    }
+
+    /// 写真全体の平均輝度(0=真っ黒, 1=真っ白)。暗すぎて顔が取れないのかを切り分ける。
+    private static func averageBrightness(of data: Data) -> Double? {
+        guard let image = try? CaptureImageCodec.decode(data) else { return nil }
+        let width = 32
+        let height = 32
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        guard
+            let context = CGContext(
+                data: &pixels,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width,
+                space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGImageAlphaInfo.none.rawValue
+            )
+        else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let total = pixels.reduce(0) { $0 + Int($1) }
+        return Double(total) / Double(pixels.count * 255)
     }
 
     private nonisolated(unsafe) static var lastPhoto: Data?

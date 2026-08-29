@@ -36,7 +36,7 @@ public struct DetectionView: View {
                 Label(engine.isWatching ? "監視中" : "停止中", systemImage: engine.isWatching ? "eye" : "eye.slash")
                     .foregroundStyle(engine.isWatching ? Color.green : Color.secondary)
                     .font(.callout)
-                Label(engine.lastGaze.label, systemImage: gazeIcon)
+                Label(engine.gaze.summary, systemImage: gazeIcon)
                     .foregroundStyle(gazeColor)
                     .font(.callout)
             }
@@ -61,8 +61,8 @@ public struct DetectionView: View {
                 .foregroundStyle(.secondary)
             thresholdRow("疑い", engine.thresholds.suspectSeconds, "声をかけ始める")
             thresholdRow("確定", engine.thresholds.confirmSeconds, "証拠を取って晒す")
-            thresholdRow("視線を覗き始める", engine.thresholds.gazeCheckSeconds, "ここまではカメラを起動しない")
-            thresholdRow("見ていないので確定", engine.thresholds.notLookingConfirmSeconds, "見ていないなら早く確定する")
+            thresholdRow("カメラを開ける", engine.thresholds.gazeWatchSeconds, "ここまではカメラを起動しない")
+            thresholdRow("見ていない継続", engine.thresholds.notLookingDurationSeconds, "この秒数続いたら確定する")
             thresholdRow("スタンプ猶予", engine.thresholds.stampGraceSeconds, "在席スタンプ直後は見逃す")
             thresholdRow("クールダウン", engine.thresholds.cooldownSeconds, "次に撮るまで空ける")
         }
@@ -86,7 +86,7 @@ public struct DetectionView: View {
             if let signals = engine.lastSignals {
                 row("Mac 無操作", "\(Int(signals.macIdleSeconds)) 秒")
                 row("iPhone", iphoneLabel(signals.iphone))
-                row("視線", signals.gaze.label)
+                row("視線", signals.gaze.summary)
                 row("前面アプリ", signals.frontmostApp ?? "不明")
                 row(
                     "在席スタンプから",
@@ -154,7 +154,7 @@ public struct DetectionView: View {
     }
 
     private var gazeIcon: String {
-        switch engine.lastGaze {
+        switch engine.gaze.state {
         case .lookingAtScreen: return "eye.circle.fill"
         case .notLooking: return "eye.slash.circle.fill"
         case .unknown: return "questionmark.circle"
@@ -162,7 +162,7 @@ public struct DetectionView: View {
     }
 
     private var gazeColor: Color {
-        switch engine.lastGaze {
+        switch engine.gaze.state {
         case .lookingAtScreen: return .green
         case .notLooking: return .orange
         case .unknown: return .secondary

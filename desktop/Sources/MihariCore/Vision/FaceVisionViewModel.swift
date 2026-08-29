@@ -22,16 +22,13 @@ public final class FaceVisionViewModel: ObservableObject {
 
     private let captureService: CaptureService
     private let closedEyeOpennessThreshold: Double
-    private let lookingAwayYawRadiansThreshold: Double
 
     public init(
         captureService: CaptureService = CaptureService(),
-        closedEyeOpennessThreshold: Double = VisionLabelClassifier.defaultClosedEyeOpennessThreshold,
-        lookingAwayYawRadiansThreshold: Double = VisionLabelClassifier.defaultLookingAwayYawRadiansThreshold
+        closedEyeOpennessThreshold: Double = VisionLabelClassifier.defaultClosedEyeOpennessThreshold
     ) {
         self.captureService = captureService
         self.closedEyeOpennessThreshold = closedEyeOpennessThreshold
-        self.lookingAwayYawRadiansThreshold = lookingAwayYawRadiansThreshold
     }
 
     /// カメラで 1 枚撮り、その場でラベルを付ける。
@@ -78,8 +75,7 @@ public final class FaceVisionViewModel: ObservableObject {
         }
         label = VisionLabelClassifier.classify(
             outcome: outcome,
-            closedEyeOpennessThreshold: closedEyeOpennessThreshold,
-            lookingAwayYawRadiansThreshold: lookingAwayYawRadiansThreshold
+            closedEyeOpennessThreshold: closedEyeOpennessThreshold
         )
     }
 }

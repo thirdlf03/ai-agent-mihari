@@ -43,11 +43,36 @@ struct OverlayModelTests {
         func resumePlaying(_ outcome: MusicStopOutcome) async { resumedOutcomes.append(outcome) }
     }
 
-    /// テストの `maxDurationSeconds` / 見積もり秒数を、実時間を待たずミリ秒に縮めて解決する。
-    /// 「N 秒待つ」という相対関係はそのまま保つので、どちらのタイマーが先に発火するかは本番と同じ順序になる。
+    /// 実時間を待たずに済むよう、待ち時間を縮める倍率。
+    ///
+    /// 1 秒を 1 ミリ秒にすると、上限 100 秒がわずか 100 ミリ秒になる。テスト側が Esc を
+    /// 押すより先に上限タイマーが発火してしまい、全体実行のような負荷のかかる場面で
+    /// 落ちる(実際に 3 回に 1 回落ちた)。テストの操作が確実に先に済む幅を空ける。
+    private static let sleepScaleMilliseconds = 10
+
+    /// 待ち時間を縮める。「N 秒待つ」という相対関係はそのまま保つので、
+    /// どちらのタイマーが先に発火するかの順序は本番と同じになる。
     private func fastSleep(_ duration: Duration) async {
-        let millis = max(1, duration.components.seconds)
+        let millis = max(1, duration.components.seconds * Int64(Self.sleepScaleMilliseconds))
         try? await Task.sleep(for: .milliseconds(millis))
+    }
+
+    /// 条件が満たされるまで待つ。
+    ///
+    /// 固定時間で待つと、速すぎれば「まだ起きていない」、遅すぎれば「別のタイマーが
+    /// 先に発火した」で落ちる。実際に全体実行で 3 回に 1 回落ちていた。
+    /// 起きるまで待てば、遅い側の失敗は構造的に消える。
+    private func waitUntil(
+        _ what: String,
+        timeout: Duration = .seconds(3),
+        _ condition: @MainActor () -> Bool
+    ) async {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        Issue.record("待っても起きなかった: \(what)")
     }
 
     private func makeModel(
@@ -81,9 +106,8 @@ struct OverlayModelTests {
         )
 
         model.show()
-        try? await Task.sleep(for: .milliseconds(200))
+        await waitUntil("上限秒数で解除される") { !model.isPresented }
 
-        #expect(model.isPresented == false)
         #expect(model.lastDismissReason == .timeLimit)
     }
 
@@ -94,9 +118,8 @@ struct OverlayModelTests {
         let model = makeModel(presenter: presenter, maxDurationSeconds: 100, speak: { _ in "短い" })
 
         model.show()
-        try? await Task.sleep(for: .milliseconds(250))
+        await waitUntil("読み上げ完了で解除される") { !model.isPresented }
 
-        #expect(model.isPresented == false)
         #expect(model.lastDismissReason == .speechFinished)
     }
 
@@ -116,9 +139,7 @@ struct OverlayModelTests {
         #expect(presenter.presentCount == 1)
         #expect(presenter.lastText == OverlayModel.fallbackSermonLine)
 
-        // ここから先は推定読了時間の経過を待つタイマーなので、実時間で待つしかない。
-        try? await Task.sleep(for: .milliseconds(250))
-        #expect(model.isPresented == false)
+        await waitUntil("読み上げ完了で解除される") { !model.isPresented }
         #expect(model.lastDismissReason == .speechFinished)
     }
 

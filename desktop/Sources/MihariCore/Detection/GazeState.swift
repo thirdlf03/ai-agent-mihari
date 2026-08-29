@@ -22,10 +22,13 @@ public enum GazeState: String, Equatable, Sendable, CaseIterable {
 
     /// Vision の見立てから視線を決める。
     ///
-    /// 「顔は取れたが寝てもよそ見でもない」を `lookingAtScreen` として拾うため、
+    /// 「顔は取れたが目は開いている」を `lookingAtScreen` として拾うため、
     /// `SpeechRequest.VisionLabel` ではなく検出結果そのものから作る。
-    /// ラベル側は `unknown` が「正面を向いている」と「判定できなかった」の
+    /// ラベル側は `unknown` が「目が開いている」と「判定できなかった」の
     /// 両方を指してしまい、この 2 つを混ぜると見ていないのに見ていると誤るおそれがある。
+    ///
+    /// **よそ見は見ない。** yaw が取れないため、いまは
+    /// 「顔が写っているか」と「目が開いているか」だけで決めている。
     public static func from(outcome: FaceDetectionOutcome) -> GazeState {
         switch outcome {
         case .detectionFailed:
@@ -35,7 +38,11 @@ public enum GazeState: String, Equatable, Sendable, CaseIterable {
             return .notLooking
         case .faceFound(let metrics):
             switch VisionLabelClassifier.classify(metrics: metrics) {
-            case .sleeping, .lookingAway, .absent:
+            case .sleeping, .absent:
+                return .notLooking
+            case .lookingAway:
+                // いまの分類器はこれを返さないが、将来よそ見を復活させたときに
+                // ここで拾えるよう残しておく。
                 return .notLooking
             case .unknown:
                 return .lookingAtScreen

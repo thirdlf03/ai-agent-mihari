@@ -69,7 +69,8 @@ public struct DetectionJudge: Sendable {
     /// 時間切れだけでなく、**画面を見ていないと確認できた**場合も確定させる。
     /// 見ていないことが分かっているなら、時間切れまで待つ理由がない。
     private func confirmationCause(_ signals: DetectionSignals) -> ConfirmationCause? {
-        if signals.gaze == .notLooking, signals.macIdleSeconds >= thresholds.notLookingConfirmSeconds {
+        // 「見ていない」が続いた長さで決める。単発のフレームで決めると瞬きで飛ぶ。
+        if signals.gaze.notLookingSeconds >= thresholds.notLookingDurationSeconds {
             return .notLookingAtScreen
         }
         if signals.macIdleSeconds >= thresholds.confirmSeconds {
@@ -94,7 +95,7 @@ public struct DetectionJudge: Sendable {
         var parts: [String] = []
         if cause == .notLookingAtScreen {
             // どちらの条件で引っかかったのかが分からないと、閾値を詰めようがない。
-            parts.append("画面を見ていない")
+            parts.append("画面を \(seconds: signals.gaze.notLookingSeconds) 見ていない")
         }
         parts.append("Mac が \(seconds: signals.macIdleSeconds) 無操作")
         switch signals.iphone {

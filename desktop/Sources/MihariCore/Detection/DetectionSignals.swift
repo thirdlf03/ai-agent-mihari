@@ -12,8 +12,8 @@ public struct DetectionSignals: Equatable, Sendable {
     /// iPhone の様子。取得できなければ `.unreachable`。
     public let iphone: SpeechRequest.IPhoneState
 
-    /// 画面を見ているか。カメラを覗けていなければ `.unknown`。
-    public let gaze: GazeState
+    /// 画面を見ているか。カメラを開けていなければ `.none`。
+    public let gaze: GazeObservation
 
     /// 最後に Touch ID の在席スタンプを押してからの秒数。一度も押していなければ `nil`。
     public let secondsSinceStamp: TimeInterval?
@@ -24,7 +24,7 @@ public struct DetectionSignals: Equatable, Sendable {
     public init(
         macIdleSeconds: TimeInterval,
         iphone: SpeechRequest.IPhoneState = .unreachable,
-        gaze: GazeState = .unknown,
+        gaze: GazeObservation = .none,
         secondsSinceStamp: TimeInterval? = nil,
         frontmostApp: String? = nil
     ) {

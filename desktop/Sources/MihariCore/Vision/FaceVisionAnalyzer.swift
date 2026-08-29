@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreVideo
 import Foundation
 import Vision
 import os
@@ -17,8 +18,28 @@ public enum FaceVisionAnalyzer {
     /// - Parameter image: 解析対象の画像。`CaptureService` が撮った写真を想定する。
     /// - Returns: 顔検出の結果。例外は内部で吸収し、失敗時は `.detectionFailed` を返す。
     public static func analyze(_ image: CGImage) -> FaceDetectionOutcome {
+        perform(
+            handler: VNImageRequestHandler(cgImage: image, options: [:]),
+            imageSize: CGSize(width: image.width, height: image.height)
+        )
+    }
+
+    /// カメラのフレームを直接解析する。
+    ///
+    /// 連続監視(`GazeMonitor`)から呼ぶ。PNG への変換を挟まないぶん軽い。
+    public static func analyze(pixelBuffer: CVPixelBuffer) -> FaceDetectionOutcome {
+        let size = CGSize(
+            width: CVPixelBufferGetWidth(pixelBuffer),
+            height: CVPixelBufferGetHeight(pixelBuffer)
+        )
+        return perform(
+            handler: VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:]),
+            imageSize: size
+        )
+    }
+
+    private static func perform(handler: VNImageRequestHandler, imageSize: CGSize) -> FaceDetectionOutcome {
         let request = VNDetectFaceLandmarksRequest()
-        let handler = VNImageRequestHandler(cgImage: image, options: [:])
 
         do {
             try handler.perform([request])
@@ -36,7 +57,7 @@ public enum FaceVisionAnalyzer {
             return .noFaceFound
         }
 
-        return .faceFound(metrics(from: best, imageSize: CGSize(width: image.width, height: image.height)))
+        return .faceFound(metrics(from: best, imageSize: imageSize))
     }
 
     /// 1 件の顔観測から判定用の指標を取り出す。
