@@ -136,9 +136,11 @@ extension GazeMonitor: AVCaptureVideoDataOutputSampleBufferDelegate {
         let state = GazeState.from(outcome: outcome)
         var openness: Double?
         var yaw: Double?
+        var noseOffset: Double?
         if case .faceFound(let metrics) = outcome {
             openness = metrics.averageEyeOpenness
             yaw = metrics.yawRadians
+            noseOffset = metrics.noseOffset
         }
 
         lock.withLock {
@@ -159,6 +161,7 @@ extension GazeMonitor: AVCaptureVideoDataOutputSampleBufferDelegate {
                 notLookingSeconds: duration,
                 eyeOpenness: openness,
                 yawRadians: yaw,
+                noseOffset: noseOffset,
                 updatedAt: now
             )
         }

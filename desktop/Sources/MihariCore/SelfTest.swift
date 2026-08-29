@@ -37,6 +37,7 @@ public enum SelfTest {
         results.append(gaze())
         results.append(await continuousGaze())
         results.append(await eyeThreshold())
+        results.append(await gazeCalibration())
         results.append(await music())
         results.append(await overlay())
         results.append(await headGesture())

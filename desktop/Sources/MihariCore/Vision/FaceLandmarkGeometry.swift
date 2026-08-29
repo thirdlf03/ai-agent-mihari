@@ -42,3 +42,43 @@ public enum FaceLandmarkGeometry {
         return values.reduce(0, +) / Double(values.count)
     }
 }
+
+extension FaceLandmarkGeometry {
+
+    /// 鼻が両目の中心からどれだけ左右に寄っているか(顔向きのプロキシ)。
+    ///
+    /// `VNFaceObservation.yaw` がこの Vision リビジョンでは常に 0 を返すため、
+    /// ランドマークの位置関係から顔の向きを推定する代替指標。
+    /// 正面顔なら 0、横を向くと鼻が片目側へ寄って絶対値が大きくなる。
+    ///
+    /// 両目の重心を結ぶ軸に鼻の重心を射影し、目間距離で割って正規化する。
+    /// 軸に射影するので、首をかしげて座標系が回転していても値は変わらない。
+    ///
+    /// - Returns: 右目側へ寄ると正、左目側で負。いずれかの点群が空、
+    ///   または両目の重心が一致していれば `nil`。
+    public static func noseOffset(
+        leftEye: [CGPoint], rightEye: [CGPoint], nose: [CGPoint]
+    ) -> Double? {
+        guard let left = centroid(of: leftEye),
+            let right = centroid(of: rightEye),
+            let noseCenter = centroid(of: nose)
+        else { return nil }
+
+        let axis = CGPoint(x: right.x - left.x, y: right.y - left.y)
+        let distance = (axis.x * axis.x + axis.y * axis.y).squareRoot()
+        guard distance > 0 else { return nil }
+
+        let mid = CGPoint(x: (left.x + right.x) / 2, y: (left.y + right.y) / 2)
+        let toNose = CGPoint(x: noseCenter.x - mid.x, y: noseCenter.y - mid.y)
+        // 軸方向の成分だけを取り出し、目間距離で正規化する。
+        let projected = (toNose.x * axis.x + toNose.y * axis.y) / distance
+        return Double(projected / distance)
+    }
+
+    /// 点群の重心。空なら `nil`。
+    private static func centroid(of points: [CGPoint]) -> CGPoint? {
+        guard !points.isEmpty else { return nil }
+        let sum = points.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
+        return CGPoint(x: sum.x / CGFloat(points.count), y: sum.y / CGFloat(points.count))
+    }
+}

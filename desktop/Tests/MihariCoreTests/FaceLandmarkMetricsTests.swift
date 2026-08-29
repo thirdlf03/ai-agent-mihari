@@ -26,3 +26,17 @@ struct FaceLandmarkMetricsTests {
         #expect(abs(average - 0.3) < 0.0001)
     }
 }
+
+extension FaceLandmarkMetricsTests {
+
+    @Test("鼻の左右オフセットを保持する(未指定なら nil)")
+    func carriesNoseOffset() {
+        let metrics = FaceLandmarkMetrics(
+            leftEyeOpenness: 0.3, rightEyeOpenness: 0.3, yawRadians: nil, noseOffset: 0.25)
+        #expect(metrics.noseOffset == 0.25)
+
+        let without = FaceLandmarkMetrics(
+            leftEyeOpenness: 0.3, rightEyeOpenness: 0.3, yawRadians: nil)
+        #expect(without.noseOffset == nil)
+    }
+}

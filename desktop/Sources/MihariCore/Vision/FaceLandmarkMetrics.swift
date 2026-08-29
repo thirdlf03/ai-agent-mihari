@@ -14,10 +14,20 @@ public struct FaceLandmarkMetrics: Sendable, Equatable {
     /// `VNFaceObservation.yaw` は検出リビジョンによっては `nil` になることがある。
     public let yawRadians: Double?
 
-    public init(leftEyeOpenness: Double?, rightEyeOpenness: Double?, yawRadians: Double?) {
+    /// 鼻が両目の中心からどれだけ左右に寄っているか(顔向きのプロキシ)。
+    /// yaw が取れない環境でのよそ見判定の候補。詳細は `FaceLandmarkGeometry.noseOffset`。
+    public let noseOffset: Double?
+
+    public init(
+        leftEyeOpenness: Double?,
+        rightEyeOpenness: Double?,
+        yawRadians: Double?,
+        noseOffset: Double? = nil
+    ) {
         self.leftEyeOpenness = leftEyeOpenness
         self.rightEyeOpenness = rightEyeOpenness
         self.yawRadians = yawRadians
+        self.noseOffset = noseOffset
     }
 
     /// 左右の目の開き具合の平均。片方しか取れなければそちらだけを使う。

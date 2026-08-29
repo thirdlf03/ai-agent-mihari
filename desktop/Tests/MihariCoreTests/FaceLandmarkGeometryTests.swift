@@ -47,3 +47,73 @@ struct FaceLandmarkGeometryTests {
         #expect(FaceLandmarkGeometry.averageEyeOpenness(left: nil, right: nil) == nil)
     }
 }
+
+@Suite("鼻の左右オフセット(顔向きプロキシ)")
+struct NoseOffsetTests {
+
+    /// 両目の中心を (40,100)・(60,100) に置いた正面顔。
+    private let leftEye: [CGPoint] = [
+        CGPoint(x: 35, y: 98), CGPoint(x: 45, y: 98),
+        CGPoint(x: 45, y: 102), CGPoint(x: 35, y: 102),
+    ]
+    private let rightEye: [CGPoint] = [
+        CGPoint(x: 55, y: 98), CGPoint(x: 65, y: 98),
+        CGPoint(x: 65, y: 102), CGPoint(x: 55, y: 102),
+    ]
+
+    @Test("正面顔(鼻が両目の中央)なら 0")
+    func frontFaceIsZero() throws {
+        let nose: [CGPoint] = [CGPoint(x: 50, y: 88), CGPoint(x: 50, y: 92)]
+        let offset = try #require(
+            FaceLandmarkGeometry.noseOffset(leftEye: leftEye, rightEye: rightEye, nose: nose))
+        #expect(abs(offset) < 0.0001)
+    }
+
+    @Test("鼻が右目側へ寄ると正、寄りの比率が値になる")
+    func shiftTowardRightEyeIsPositive() throws {
+        // 鼻の重心 x=55。両目の中心 50 から右へ 5、目間距離 20 → 0.25。
+        let nose: [CGPoint] = [CGPoint(x: 55, y: 88), CGPoint(x: 55, y: 92)]
+        let offset = try #require(
+            FaceLandmarkGeometry.noseOffset(leftEye: leftEye, rightEye: rightEye, nose: nose))
+        #expect(abs(offset - 0.25) < 0.0001)
+    }
+
+    @Test("鼻が左目側へ寄ると負")
+    func shiftTowardLeftEyeIsNegative() throws {
+        let nose: [CGPoint] = [CGPoint(x: 45, y: 88), CGPoint(x: 45, y: 92)]
+        let offset = try #require(
+            FaceLandmarkGeometry.noseOffset(leftEye: leftEye, rightEye: rightEye, nose: nose))
+        #expect(abs(offset - (-0.25)) < 0.0001)
+    }
+
+    @Test("首をかしげても(座標系が回転しても)値は変わらない")
+    func rollInvariant() throws {
+        // 正面顔一式を 90 度回転: (x,y) -> (-y,x)。鼻は右目側へ 0.25 寄せてある。
+        let rotate = { (p: CGPoint) in CGPoint(x: -p.y, y: p.x) }
+        let offset = try #require(
+            FaceLandmarkGeometry.noseOffset(
+                leftEye: leftEye.map(rotate),
+                rightEye: rightEye.map(rotate),
+                nose: [CGPoint(x: 55, y: 88), CGPoint(x: 55, y: 92)].map(rotate)
+            ))
+        #expect(abs(offset - 0.25) < 0.0001)
+    }
+
+    @Test("点が 1 つも無い部位があれば nil")
+    func emptyRegionReturnsNil() {
+        #expect(
+            FaceLandmarkGeometry.noseOffset(
+                leftEye: [], rightEye: rightEye, nose: [CGPoint(x: 50, y: 90)]) == nil)
+        #expect(
+            FaceLandmarkGeometry.noseOffset(
+                leftEye: leftEye, rightEye: rightEye, nose: []) == nil)
+    }
+
+    @Test("両目の中心が同じ点なら nil(ゼロ除算を避ける)")
+    func coincidentEyesReturnsNil() {
+        let eye: [CGPoint] = [CGPoint(x: 50, y: 100)]
+        #expect(
+            FaceLandmarkGeometry.noseOffset(
+                leftEye: eye, rightEye: eye, nose: [CGPoint(x: 50, y: 90)]) == nil)
+    }
+}
