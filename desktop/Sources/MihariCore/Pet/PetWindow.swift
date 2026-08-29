@@ -22,7 +22,7 @@ final class PetWindow: NSPanel {
         // ホバー時のツールチップを出すためにマウス移動イベントを受け取る。
         acceptsMouseMovedEvents = true
 
-        let hostingView = NSHostingView(rootView: PetView().environment(controller))
+        let hostingView = NSHostingView(rootView: PetSpriteView().environment(controller))
         hostingView.frame = CGRect(origin: .zero, size: PetSpriteGrid.cellSize)
         contentView = hostingView
     }

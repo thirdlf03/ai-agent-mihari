@@ -10,6 +10,8 @@ final class PetSpeechWindow: NSPanel {
 
     /// いま出しているセリフ。消しているあいだは nil。
     private var currentText: String?
+    /// いま出している問いかけの回答コールバック。ボタンを出していないあいだは nil。
+    private var currentAnswer: ((Bool) -> Void)?
 
     init() {
         super.init(
@@ -27,17 +29,27 @@ final class PetSpeechWindow: NSPanel {
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
         isMovableByWindowBackground = false
-        // クリックはペットや下のウィンドウへそのまま通す。
+        // クリックはペットや下のウィンドウへそのまま通す。問いかけのボタンを出すあいだだけ受け取る。
         ignoresMouseEvents = true
         alphaValue = 0
     }
 
-    override var canBecomeKey: Bool { false }
+    /// 問いかけのボタンを押せるように、ボタンを出しているあいだだけキーウィンドウになれる。
+    /// `.nonactivatingPanel` なのでキーになってもアプリ自体はアクティブにならない。
+    override var canBecomeKey: Bool { currentAnswer != nil }
 
     override var canBecomeMain: Bool { false }
 
     /// セリフを表示する。表示中なら中身と位置を差し替える。
-    func show(text: String, above petWindow: NSWindow, animated: Bool) {
+    /// `onAnswer` を渡すと はい/いいえ のボタンを添え、そのあいだはクリックを受け取る。
+    func show(
+        text: String,
+        above petWindow: NSWindow,
+        animated: Bool,
+        onAnswer: ((Bool) -> Void)? = nil
+    ) {
+        currentAnswer = onAnswer
+        ignoresMouseEvents = onAnswer == nil
         layout(text: text, above: petWindow)
         if parent !== petWindow {
             parent?.removeChildWindow(self)
@@ -50,6 +62,8 @@ final class PetSpeechWindow: NSPanel {
     func hide(animated: Bool) {
         guard currentText != nil else { return }
         currentText = nil
+        currentAnswer = nil
+        ignoresMouseEvents = true
         fade(to: 0, animated: animated) { [weak self] in
             // フェード中に次のセリフが来ていたら片付けない。
             guard let self, currentText == nil else { return }
@@ -69,14 +83,16 @@ final class PetSpeechWindow: NSPanel {
         currentText = text
 
         // しっぽの向きで大きさは変わらないので、下向きで測ってから置き場所を決める。
-        let hostingView = NSHostingView(rootView: PetSpeechBubbleView(text: text, tailAtBottom: true))
+        let hostingView = PetBubbleHostingView(
+            rootView: PetSpeechBubbleView(text: text, tailAtBottom: true, onAnswer: currentAnswer)
+        )
         // SwiftUI の理想サイズでウィンドウが勝手にリサイズされないようにする。大きさはこちらで決める。
         hostingView.sizingOptions = []
-        let size = PetSpeechBubbleView.windowSize(for: text)
+        let size = PetSpeechBubbleView.windowSize(for: text, hasButtons: currentAnswer != nil)
         let bounds = petWindow.screen?.visibleFrame ?? NSScreen.main?.visibleFrame
         let placement = Self.placement(petFrame: petWindow.frame, size: size, in: bounds)
         if !placement.tailAtBottom {
-            hostingView.rootView = PetSpeechBubbleView(text: text, tailAtBottom: false)
+            hostingView.rootView = PetSpeechBubbleView(text: text, tailAtBottom: false, onAnswer: currentAnswer)
         }
         hostingView.frame = CGRect(origin: .zero, size: size)
         contentView = hostingView
@@ -122,5 +138,22 @@ final class PetSpeechWindow: NSPanel {
             return Placement(origin: CGPoint(x: x, y: below), tailAtBottom: false)
         }
         return Placement(origin: CGPoint(x: x, y: above), tailAtBottom: true)
+    }
+}
+
+/// 吹き出しの中身を載せるホスティングビュー。
+///
+/// ペットのウィンドウはキーウィンドウにならないため、既定では 1 クリック目がウィンドウの
+/// アクティブ化だけに使われてボタンに届かない。問いかけのボタンを 1 クリックで押せるようにする。
+private final class PetBubbleHostingView: NSHostingView<PetSpeechBubbleView> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    required init(rootView: PetSpeechBubbleView) {
+        super.init(rootView: rootView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) は使わない")
     }
 }

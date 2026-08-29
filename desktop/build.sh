@@ -33,6 +33,16 @@ cp "${BIN_PATH}" "${APP_DIR}/Contents/MacOS/${APP_NAME}"
 cp "Resources/Info.plist" "${APP_DIR}/Contents/Info.plist"
 printf 'APPL????' > "${APP_DIR}/Contents/PkgInfo"
 
+# ペットのスプライト等は SwiftPM がリソースバンドルにまとめる。.app 直下に置くと
+# codesign --verify --strict が落ちるので、必ず Contents/Resources に入れる。
+BUNDLE_NAME="${APP_NAME}_MihariCore.bundle"
+BUNDLE_PATH="${BIN_DIR}/${BUNDLE_NAME}"
+if [ ! -d "${BUNDLE_PATH}" ]; then
+    echo "error: リソースバンドルが見つからない: ${BUNDLE_PATH}" >&2
+    exit 1
+fi
+cp -R "${BUNDLE_PATH}" "${APP_DIR}/Contents/Resources/${BUNDLE_NAME}"
+
 echo "==> ad-hoc 署名"
 codesign --force --deep --sign - \
     --entitlements "Resources/${APP_NAME}.entitlements" \
