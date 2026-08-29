@@ -9,6 +9,9 @@ final class DeviceListModel {
     var isLoading = false
     var errorMessage: String?
 
+    /// 一覧の取得状況を外へ知らせるコールバック。nil はステータス無しを表す。
+    var onStatusChange: ((PetStatus?) -> Void)?
+
     private let bridge = DeviceBridge()
 
     /// デバイス一覧を取得し直す。
@@ -16,7 +19,10 @@ final class DeviceListModel {
     func reload() async {
         isLoading = true
         errorMessage = nil
+        onStatusChange?(.running)
         defer { isLoading = false }
+
+        let previousCount = devices.count
 
         do {
             devices = try await bridge.listDevices()
@@ -35,6 +41,8 @@ final class DeviceListModel {
             selectedUDID = nil
             errorMessage = error.localizedDescription
         }
+
+        notifyReloadResult(previousCount: previousCount)
     }
 
     /// 選択されたデバイスの詳細を取得する。
@@ -54,10 +62,27 @@ final class DeviceListModel {
             errorMessage = error.localizedDescription
         }
     }
+
+    /// 取得結果をステータスに変換して通知する。デバイスが増えたときだけ完了を知らせる。
+    @MainActor
+    private func notifyReloadResult(previousCount: Int) {
+        if errorMessage != nil {
+            onStatusChange?(.blocked)
+        } else if devices.count > previousCount {
+            onStatusChange?(.ready)
+        } else {
+            onStatusChange?(nil)
+        }
+    }
 }
 
 struct ContentView: View {
+    @Environment(PetController.self) private var pet
     @State private var model = DeviceListModel()
+    @State private var blockedResetTask: Task<Void, Never>?
+
+    /// 失敗をペットに見せておく時間(秒)。
+    private static let blockedDisplaySeconds = 5.0
 
     var body: some View {
         HSplitView {
@@ -68,6 +93,9 @@ struct ContentView: View {
         }
         .frame(minWidth: 640, minHeight: 400)
         .task {
+            model.onStatusChange = { status in
+                apply(status: status)
+            }
             await model.reload()
         }
     }
@@ -78,6 +106,9 @@ struct ContentView: View {
                 Text("デバイス")
                     .font(.headline)
                 Spacer()
+                Button(pet.isAwake ? "ペットをしまう" : "ペットを起こす") {
+                    pet.toggle()
+                }
                 Button("更新") {
                     Task { await model.reload() }
                 }
@@ -147,6 +178,26 @@ struct ContentView: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// 一覧の状態をペットに反映する。失敗表示は一定時間で自動的に解除する。
+    private func apply(status: PetStatus?) {
+        blockedResetTask?.cancel()
+        blockedResetTask = nil
+
+        guard let status else {
+            pet.clearStatus()
+            return
+        }
+
+        pet.setStatus(status)
+        guard status == .blocked else { return }
+
+        blockedResetTask = Task {
+            try? await Task.sleep(for: .seconds(Self.blockedDisplaySeconds))
+            guard !Task.isCancelled else { return }
+            pet.clearStatus()
+        }
     }
 
     private var selectionBinding: Binding<String?> {
