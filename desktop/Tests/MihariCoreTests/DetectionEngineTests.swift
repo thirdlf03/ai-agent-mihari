@@ -25,6 +25,8 @@ final class ActionSpy: @unchecked Sendable {
     var captureSucceeds = true
     /// 送信が失敗する状況を作るためのつまみ。
     var postSucceeds = true
+    /// 発話が失敗する状況を作るためのつまみ。
+    var speechSucceeds = true
 
     func makeActions() -> DetectionEngine.Actions {
         DetectionEngine.Actions(
@@ -38,7 +40,7 @@ final class ActionSpy: @unchecked Sendable {
             },
             speak: { [self] request in
                 lock.withLock { _spoken.append(request) }
-                return "喋った"
+                return speechSucceeds ? "喋った" : nil
             },
             interrupt: { [self] request in
                 lock.withLock { _interrupted.append(request) }
@@ -255,5 +257,78 @@ struct DetectionEngineTests {
 
         #expect(engine.lastSignals?.frontmostApp == "Safari")
         #expect(spy.interrupted.first?.frontmostApp == "Safari")
+    }
+}
+
+@Suite("ペットへの通知")
+@MainActor
+struct DetectionPetNotificationTests {
+
+    /// 受け取った通知を記録する箱。
+    private final class PetSpy: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _events: [PetEvent] = []
+        var events: [PetEvent] { lock.withLock { _events } }
+        func record(_ event: PetEvent) { lock.withLock { _events.append(event) } }
+    }
+
+    private func engine(idle: TimeInterval, spy: ActionSpy, pet: PetSpy) -> DetectionEngine {
+        let engine = DetectionEngine(idleMonitor: MacIdleMonitor(probe: { idle }))
+        engine.actions = spy.makeActions()
+        engine.onEvent = { pet.record($0) }
+        return engine
+    }
+
+    @Test("触っている間はペットに何も届かない")
+    func normalSendsNothing() async {
+        let pet = PetSpy()
+        await engine(idle: 10, spy: ActionSpy(), pet: pet).evaluate()
+        #expect(pet.events.isEmpty)
+    }
+
+    @Test("疑いの段階でペットにセリフが届く")
+    func suspectedReachesPet() async {
+        let pet = PetSpy()
+        await engine(idle: 150, spy: ActionSpy(), pet: pet).evaluate()
+
+        let event = pet.events.first
+        #expect(event?.state == .suspected)
+        #expect(event?.escalationStage == 1)
+        #expect(event?.line.isEmpty == false)
+    }
+
+    @Test("確定して晒すときは段階が上がる")
+    func confirmedRaisesStage() async {
+        let pet = PetSpy()
+        let engine = engine(idle: 600, spy: ActionSpy(), pet: pet)
+        engine.iphoneState = .unreachable
+
+        await engine.evaluate()
+
+        #expect(pet.events.first?.state == .confirmed)
+        #expect(pet.events.first?.escalationStage == 3)
+    }
+
+    @Test("Vision のラベルがペットにも渡る")
+    func visionLabelReachesPet() async {
+        let pet = PetSpy()
+        let engine = engine(idle: 600, spy: ActionSpy(), pet: pet)
+        engine.iphoneState = .unreachable
+
+        await engine.evaluate()
+
+        #expect(pet.events.first?.visionLabel == .asleep)
+    }
+
+    @Test("喋れなくてもペットには判断の根拠が届く")
+    func petStillGetsALineWhenSpeechFails() async {
+        // 声が出ないだけで吹き出しまで消えると、何が起きたのか分からなくなる。
+        let spy = ActionSpy()
+        spy.speechSucceeds = false
+        let pet = PetSpy()
+
+        await engine(idle: 150, spy: spy, pet: pet).evaluate()
+
+        #expect(pet.events.first?.line.isEmpty == false)
     }
 }

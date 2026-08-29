@@ -65,6 +65,10 @@ public final class DetectionEngine: ObservableObject {
     /// iPhone の様子。SSE で流れてくる値を外から入れてもらう。
     public var iphoneState: SpeechRequest.IPhoneState = .unreachable
 
+    /// 判定のたびにペットへ渡す通知口。
+    /// エンジンはペットの中身を知らないので、渡す形だけ決めて外で繋ぐ。
+    public var onEvent: ((PetEvent) -> Void)?
+
     public init(
         idleMonitor: MacIdleMonitor = MacIdleMonitor(),
         frontmostMonitor: FrontmostAppMonitor = FrontmostAppMonitor(),
@@ -148,14 +152,20 @@ public final class DetectionEngine: ObservableObject {
         }
         let request = makeRequest(signals: signals, decision: decision, label: label)
 
+        var line = ""
         if decision.shouldInterrupt {
             await actions.interrupt(request)
+            line = decision.reason
             notes.append("音楽を止めて聞かせた")
         } else if decision.shouldSpeak {
-            if await actions.speak(request) == nil {
+            if let spoken = await actions.speak(request) {
+                line = spoken
+            } else {
+                line = decision.reason
                 notes.append("喋れなかった")
             }
         }
+        notifyPet(decision, label: label, line: line)
 
         if let evidence {
             let sent = await actions.post(decision.reason, evidence, filename(for: decision.evidence))
@@ -163,6 +173,45 @@ public final class DetectionEngine: ObservableObject {
         }
 
         return notes.isEmpty ? "声をかけた" : notes.joined(separator: " / ")
+    }
+
+    /// ペットに状態とセリフを渡す。ペット側の実装は知らない。
+    private func notifyPet(_ decision: DetectionDecision, label: SpeechRequest.VisionLabel, line: String) {
+        onEvent?(
+            PetEvent(
+                state: petState(decision.state),
+                escalationStage: petStage(decision),
+                line: line,
+                visionLabel: petLabel(label),
+                prompt: nil
+            )
+        )
+    }
+
+    private func petState(_ state: DetectionState) -> SaboriState {
+        switch state {
+        case .normal: return .normal
+        case .suspected: return .suspected
+        case .confirmed: return .confirmed
+        }
+    }
+
+    private func petStage(_ decision: DetectionDecision) -> Int {
+        switch (decision.state, decision.evidence) {
+        case (.suspected, _): return 1
+        case (.confirmed, .none): return 2
+        case (.confirmed, _): return 3
+        default: return 0
+        }
+    }
+
+    private func petLabel(_ label: SpeechRequest.VisionLabel) -> VisionLabel {
+        switch label {
+        case .sleeping: return .asleep
+        case .lookingAway: return .lookingAway
+        case .absent: return .absent
+        case .unknown: return .none
+        }
     }
 
     private func collectEvidence(_ kind: EvidenceKind) async -> Data? {

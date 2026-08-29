@@ -12,6 +12,10 @@ public struct RootView: View {
     @StateObject private var attendance = AttendanceModel()
     @StateObject private var detection = DetectionEngine()
     @StateObject private var overlay = OverlayModel(presenter: ScreenSaverOverlayPresenter())
+    @StateObject private var pet = PlaceholderPetPresenter()
+    @StateObject private var headGesture = HeadGestureController()
+    @StateObject private var captureModel = CaptureViewModel()
+    @StateObject private var visionModel = FaceVisionViewModel()
 
     public init() {}
 
@@ -25,6 +29,16 @@ public struct RootView: View {
                 .tabItem { Label("セリフと声", systemImage: "waveform") }
             AttendanceView(model: attendance)
                 .tabItem { Label("在席", systemImage: "touchid") }
+            PetView(presenter: pet)
+                .tabItem { Label("ペット", systemImage: "pawprint") }
+            HeadGestureView(controller: headGesture)
+                .tabItem { Label("首振り", systemImage: "airpodspro") }
+            CaptureView(model: captureModel)
+                .tabItem { Label("撮影", systemImage: "camera") }
+            VisionView(model: visionModel)
+                .tabItem { Label("見立て", systemImage: "face.dashed") }
+            OverlayView()
+                .tabItem { Label("説教", systemImage: "rectangle.inset.filled") }
             OnboardingView(model: permissions)
                 .tabItem { Label("権限", systemImage: "lock.shield") }
             DaemonView(controller: daemon)
@@ -39,6 +53,7 @@ public struct RootView: View {
         .onChange(of: daemon.events.first?.id) { handleLatestEvent() }
         .onDisappear {
             detection.stop()
+            pet.hide()
             daemon.stop()
         }
     }
@@ -68,6 +83,11 @@ public struct RootView: View {
                 Self.visionLabel(for: data)
             }
         )
+        // ペットを出す。検知が発火したらここにセリフと状態が流れる。
+        pet.show()
+        detection.onEvent = { [pet] event in
+            pet.present(event)
+        }
     }
 
     /// SSE で届いた iPhone の状態変化を検知エンジンに反映する。
