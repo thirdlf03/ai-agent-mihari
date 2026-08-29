@@ -81,6 +81,12 @@ public struct RootView: View {
             },
             classify: { data in
                 Self.visionLabel(for: data)
+            },
+            checkGaze: {
+                // 覗くだけ。写真は残さない。
+                guard let data = await Self.photoData(from: capture) else { return .unknown }
+                guard let image = try? CaptureImageCodec.decode(data) else { return .unknown }
+                return GazeState.from(outcome: FaceVisionAnalyzer.analyze(image))
             }
         )
         // ペットを出す。検知が発火したらここにセリフと状態が流れる。

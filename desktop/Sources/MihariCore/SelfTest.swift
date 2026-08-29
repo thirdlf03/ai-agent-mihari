@@ -32,6 +32,7 @@ public enum SelfTest {
         results.append(await screenshot())
         results.append(await camera())
         results.append(contentsOf: vision(from: results))
+        results.append(gaze())
         results.append(await music())
         results.append(await overlay())
 
@@ -73,6 +74,15 @@ public enum SelfTest {
         let label = VisionLabelClassifier.classify(outcome: outcome)
         // 顔が写っていなくても「動いた」ことは分かる。判定内容ではなく、実行できたかを見る。
         return [Result(name: "写真の見立て", ok: true, detail: "\(outcome) → \(label.rawValue)")]
+    }
+
+    /// いま画面を見ているか。判定の入力そのものなので、実機で値を見ておきたい。
+    private static func gaze() -> Result {
+        guard let data = lastPhoto, let image = try? CaptureImageCodec.decode(data) else {
+            return Result(name: "視線の判定", ok: false, detail: "写真が無いので試せない")
+        }
+        let state = GazeState.from(outcome: FaceVisionAnalyzer.analyze(image))
+        return Result(name: "視線の判定", ok: true, detail: state.label)
     }
 
     /// 音楽を止められるか。オートメーション権限が無ければ失敗するが、それも分かってよい情報。

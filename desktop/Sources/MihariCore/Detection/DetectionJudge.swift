@@ -22,7 +22,7 @@ public struct DetectionJudge: Sendable {
         secondsSinceLastEvidence: TimeInterval? = nil
     ) -> DetectionDecision {
         // 手が動いていれば何もしない。ここが一番よくある道なので最初に返す。
-        if signals.macIdleSeconds < thresholds.suspectSeconds {
+        if signals.macIdleSeconds < thresholds.minimumIdleSeconds {
             return .idle(reason: "Mac を \(seconds: signals.macIdleSeconds) 前まで触っている")
         }
 
@@ -31,7 +31,10 @@ public struct DetectionJudge: Sendable {
             return .idle(reason: "\(seconds: sinceStamp) 前に在席スタンプが押されている")
         }
 
-        guard signals.macIdleSeconds >= thresholds.confirmSeconds else {
+        guard let confirmedBy = confirmationCause(signals) else {
+            guard signals.macIdleSeconds >= thresholds.suspectSeconds else {
+                return .idle(reason: "Mac が \(seconds: signals.macIdleSeconds) 無操作")
+            }
             return DetectionDecision(
                 state: .suspected,
                 evidence: .none,
@@ -57,8 +60,22 @@ public struct DetectionJudge: Sendable {
             evidence: evidence(for: signals.iphone),
             shouldSpeak: true,
             shouldInterrupt: true,
-            reason: confirmedReason(signals)
+            reason: confirmedReason(signals, cause: confirmedBy)
         )
+    }
+
+    /// 確定に至った理由。確定しないなら `nil`。
+    ///
+    /// 時間切れだけでなく、**画面を見ていないと確認できた**場合も確定させる。
+    /// 見ていないことが分かっているなら、時間切れまで待つ理由がない。
+    private func confirmationCause(_ signals: DetectionSignals) -> ConfirmationCause? {
+        if signals.gaze == .notLooking, signals.macIdleSeconds >= thresholds.notLookingConfirmSeconds {
+            return .notLookingAtScreen
+        }
+        if signals.macIdleSeconds >= thresholds.confirmSeconds {
+            return .idleTooLong
+        }
+        return nil
     }
 
     /// 「分岐」の本体。Mac が止まっているとき、iPhone を触っているかで撮る先が変わる。
@@ -73,8 +90,13 @@ public struct DetectionJudge: Sendable {
         }
     }
 
-    private func confirmedReason(_ signals: DetectionSignals) -> String {
-        var parts = ["Mac が \(seconds: signals.macIdleSeconds) 無操作"]
+    private func confirmedReason(_ signals: DetectionSignals, cause: ConfirmationCause) -> String {
+        var parts: [String] = []
+        if cause == .notLookingAtScreen {
+            // どちらの条件で引っかかったのかが分からないと、閾値を詰めようがない。
+            parts.append("画面を見ていない")
+        }
+        parts.append("Mac が \(seconds: signals.macIdleSeconds) 無操作")
         switch signals.iphone {
         case .active:
             parts.append("iPhone は操作中")
@@ -88,6 +110,14 @@ public struct DetectionJudge: Sendable {
         }
         return parts.joined(separator: " / ")
     }
+}
+
+/// 何をもって確定としたか。
+private enum ConfirmationCause {
+    /// 無操作が続きすぎた。
+    case idleTooLong
+    /// 画面を見ていないと確認できた。
+    case notLookingAtScreen
 }
 
 extension DefaultStringInterpolation {
