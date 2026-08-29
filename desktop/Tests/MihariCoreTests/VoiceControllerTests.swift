@@ -57,4 +57,24 @@ struct VoiceControllerTests {
         controller.stopSpeaking()
         #expect(controller.isSpeaking == false)
     }
+
+    @Test("最後まで喋り終わったら喋っていない状態に戻る")
+    func playbackFinishedClearsSpeaking() {
+        let controller = VoiceController()
+        controller.markSpeakingForTesting()
+
+        controller.handlePlaybackFinished(priority: .detection)
+
+        #expect(controller.isSpeaking == false)
+    }
+
+    @Test("ひとりごとが終わっただけでは喋っている状態は変わらない")
+    func chatterPlaybackFinishedKeepsSpeaking() {
+        let controller = VoiceController()
+        controller.markSpeakingForTesting()
+
+        controller.handlePlaybackFinished(priority: .chatter)
+
+        #expect(controller.isSpeaking == true)
+    }
 }
