@@ -2,7 +2,8 @@
 
 サボり監視ペットの macOS アプリ本体。SwiftUI / Swift 6 / Swift Package Manager 製。macOS 14+ が必要。
 
-現時点で入っているのは、`.app` バンドルの組み立てと権限オンボーディング画面（#3）、および Python 常駐デーモンの起動と接続（#4）まで。
+検知・撮影・Vision・説教・Discord・在席スタンプ・AirPods 首振り・デスクトップペットまでを 1 つのアプリに統合してある。
+起動すると（必須権限が揃っていれば）ウィンドウを出さず、ペットが出て見張り始める。
 
 ## なぜ `swift run` ではなく `.app` を作るのか
 
@@ -17,8 +18,9 @@ TCC（カメラ / マイク / 画面収録 / 入力監視 / モーション）�
 
 ```sh
 make build   # Mihari.app をビルドして ad-hoc 署名する
-make run     # ビルドして Mihari.app を起動する
-make test    # テストを実行する
+make run     # Mihari.app をビルドして起動する
+make test    # Swift / Python のテストを実行する
+make lint    # Swift / Python のフォーマットと lint を検査する
 ```
 
 `desktop/` で直接叩く場合:
@@ -44,8 +46,16 @@ swift test
 | オートメーション | 説教中に再生中の音楽を止める | `AEDeterminePermissionToAutomateTarget(com.apple.Music)` |
 | モーション | AirPods の首振りを はい/いいえ として受け取る | `CMHeadphoneMotionManager.authorizationStatus()` |
 
-初回起動時だけ、要求できる権限（カメラ / マイク / 画面収録 / 入力監視）をまとめてプロンプトする。
-2 回目以降は勝手に出さず、「まとめて許可を求める」ボタンを押したときだけ要求する。
+カメラ / マイク / 画面収録 / 入力監視の 4 つは**必須**で、揃うまで見張り始めない。
+撮れも送れもしない状態で常駐しても、黙って失敗し続けるだけになるため。
+オートメーションとモーションは任意で、欠けていても始められる。
+
+初回、または必須のどれかが欠けているときだけ「権限の確認」ウィンドウが出る。初回起動時は
+要求できる権限（カメラ / マイク / 画面収録 / 入力監視）をまとめてプロンプトし、2 回目以降は
+勝手に出さず「まとめて許可を求める」ボタンを押したときだけ要求する。必須が揃うと「始める」が
+押せるようになり、押すとウィンドウが閉じてペットが出て、デーモンが起動し、見張りが始まる。
+2 回目以降で必須が揃っていれば、ウィンドウを出さずに起動と同時に見張り始める。
+画面収録だけは、システム設定で許可したあとにアプリを再起動しないと反映されない。
 
 ### 開発中にハマりやすい点
 
@@ -84,10 +94,10 @@ Discord Bot・セリフ生成・iPhone の取得は `bridge/` の Python プロ�
 
 ## ペット連携インターフェース
 
-サボり検知の状態機械（#9）とペット本体（担当は別メンバー）の間は、`Pet/` の型と
-protocol だけでつながる。**ペット本体を差し替えても、検知側のコードは一切触らずに済む**
-ことがこの節のゴール。現時点で `Pet/` に入っているのは、暫定の画像1枚実装
-（`PlaceholderPetPresenter`）と、これから本実装が差し込まれるための箱だけ。
+サボり検知の状態機械（#9）とペット本体の間は、`Pet/` の型と protocol だけでつながる。
+**ペット本体を差し替えても、検知側のコードは一切触らずに済む**ことがこの節のゴール。
+本実装は `LivePetPresenter` で、`PetPresenting` に適合している。検知側が知っているのは
+`PetEvent` を組み立てて `PetPresenting` に渡すことだけで、スプライトも吹き出しもメニューも知らない。
 
 ### 渡すイベント: `PetEvent`
 
@@ -118,46 +128,43 @@ public struct PetEvent: Sendable {
 ```swift
 @MainActor
 public protocol PetPresenting: AnyObject {
-    func present(_ event: PetEvent)  // イベントを反映する
-    func show()                       // 常駐ウィンドウを表示する
-    func hide()                       // 常駐ウィンドウを隠す
+    func present(_ event: PetEvent)               // イベントを反映する
+    func show()                                   // 常駐ウィンドウを表示する
+    func hide()                                   // 常駐ウィンドウを隠す
+    func dismissPrompt()                          // 出している問いかけを捨てる
+    func setMonitoring(_ mode: PetMonitoringMode)  // 監視の状態を伝える
 }
 ```
 
-検知側はこの protocol の型（`any PetPresenting` や、具体型を渡すなら
-`PlaceholderPetPresenter`）だけを知っていればよく、ペットの中身を一切知らなくてよい。
+- `dismissPrompt()` は、AirPods の首振りや無反応で検知側が問いかけを終えたときに呼ぶ。
+  吹き出しの はい/いいえ を閉じるだけで、回答は起こさない。
+- `setMonitoring(_:)` は `watching` / `paused` / `onBreak` の 3 値。監視停止中と休憩中は
+  ペットを静止させる。
 
-### 差し替え手順
+### `PetEvent` からペットの動きへ
 
-1. `PetPresenting` に適合する新しい型（例: `LivePetPresenter`）を `Pet/` 以下に作る。
-   `present(_:)` / `show()` / `hide()` を実装すればよく、シグネチャは変えない。
-2. 検知エンジン（#9）やアプリ起動処理が `PlaceholderPetPresenter` を生成している箇所を、
-   新しい型の生成に差し替える（この配線は本 Issue の範囲外で、統合時に行う）。
-3. `PlaceholderPetPresenter` や `Pet/` 配下の他ファイルは削除してよい。`PetEvent` /
-   `PetPresenting` はそのまま使い続けられるはずなので、変更が要る場合は検知側に影響が
-   出ないか確認すること。
+`LivePetPresenter` がイベントを `PetDirective`（固定するアニメーション / 1 回だけ挟む
+アニメーション / 吹き出しのセリフ）に落とし、`PetController` に渡す。
 
-### 暫定実装（`PlaceholderPetPresenter`）の中身
+| イベント | 固定 | 1 回だけ挟む | 吹き出し |
+| --- | --- | --- | --- |
+| `normal` | 解除（自律行動に戻る） | 直前が `normal` でなければ `waving` | 出さない |
+| `suspected` | `waiting` | — | `line` |
+| `confirmed` | `failed` | 段階が上がったときだけ `jumping` | `line` |
+| `prompt` 付き | `waiting` | — | 問いかけ + はい/いいえ のボタン |
 
-- 画像は `PetConfiguration.imagePath` で差し替え可能。未設定、または指定パスにファイルが
-  無ければ SF Symbols のプレースホルダ（既定 `cat.fill`）を描く
-  （判定ロジックは `PetImageResolver`）。
-- ウィンドウは `NSPanel`（`.borderless, .nonactivatingPanel`、背景透過、`level = .floating`、
-  `isMovableByWindowBackground = true`）。キーウィンドウにならないため、クリックやドラッグで
-  他アプリからフォーカスを奪わない。`collectionBehavior` は既定のまま
-  （全 Space には追随させない）にしてあり、全画面アプリの Space まで追いかけて
-  鬱陶しく出続けることを避けている。
-- セリフは `PetSpeechQueue` に積んで順番に吹き出しへ出す。直前と全く同じセリフの連投は
-  積まない。表示時間は `PetBubbleDurationPolicy`（文字数に応じて 2.5〜8 秒）が決める。
-- `PetView`（`desktop/Sources/MihariCore/Views/PetView.swift`）は表示/非表示の切り替えと
-  画像パスの設定、サンプルイベントでの動作確認ができる画面。`RootView` には未統合。
+- 跳ねるのは**段階が上がったときだけ**。同じエピソード内で 3→2→3 と往復しても跳ねない。
+  正常に戻ったところで段階を忘れる。
+- 問いかけを出しているあいだに届いたセリフは溜めておき、問いかけが閉じてから出す。
+- 問いかけを出している最中に新しい問いかけが来たら**新しい方を捨てる**。先に出している方の
+  回答経路を生かして、答えたのに何も起きない状態を作らない。
+- 音声は検知側（`Voice/VoiceController`）が鳴らすので、ここでは吹き出しだけを出す。
 
 ### テストから NSWindow は作らない
 
-`PlaceholderPetPresenter` は `show()` を呼ぶまで `NSPanel` を生成しない。テストは
-`present(_:)` / `answerPrompt(_:)` / `configuration` の更新だけを呼び、`show()` は
-呼ばないことで、CI 上でもウィンドウを一切開かずに検証できる
-（`Tests/MihariCoreTests/PlaceholderPetPresenterTests.swift` ほか）。
+`LivePetPresenter` は `show()` を呼ぶまでウィンドウを生成しない。テストは `present(_:)` /
+`answerPrompt(_:)` だけを呼び、結果を `lastDirective` で確かめることで、CI 上でもウィンドウを
+一切開かずに検証できる（`Tests/MihariCoreTests/LivePetPresenterTests.swift`）。
 
 ## 構成
 
@@ -169,12 +176,22 @@ desktop/
 │   ├── Info.plist            # 用途文字列（TCC のプロンプト本文）
 │   └── Mihari.entitlements   # apple-events
 ├── Sources/
-│   ├── Mihari/               # @main だけ。中身は MihariCore に置く
+│   ├── Mihari/               # @main とメニューバーの「ペット」メニューだけ
 │   └── MihariCore/
+│       ├── App/              # AppCoordinator（全機能の取りまとめ）/ MihariAppDelegate / AuxiliaryWindows
+│       ├── Detection/        # 判定の状態機械・閾値・BreakPromptSession（「休憩中?」の問いかけ）
+│       ├── Capture/          # カメラ / 画面のスクショ
+│       ├── Vision/           # 撮った写真のラベル付け
+│       ├── Overlay/          # 説教の全画面オーバーレイと音楽の停止
+│       ├── Voice/            # SpeechPlayer（唯一の音の出口）と VoiceController
 │       ├── Daemon/           # Python 常駐プロセスの起動・REST・SSE
+│       ├── Discord/          # 証拠の投稿とチャンネル選択
+│       ├── Attendance/       # 在席スタンプ（Touch ID）
+│       ├── HeadGesture/      # AirPods の首振り
 │       ├── Permissions/
-│       ├── Pet/              # ペット連携イベント・protocol・暫定の画像1枚実装
-│       └── Views/            # PetView.swift はペットの設定・動作確認画面
+│       ├── Pet/              # 連携イベント・protocol と、スプライトのペット本体
+│       ├── Resources/pets/   # 同梱ペットの素材（pet.json + スプライトシート）
+│       └── Views/            # 権限画面と、MIHARI_DEBUG_UI=1 で開く検証用の 10 タブ画面
 └── Tests/MihariCoreTests/
 ```
 
@@ -237,11 +254,17 @@ Swift ──POST /voice/speak（状況）──▶ Python
 | `ANTHROPIC_API_KEY` | なし | セリフ生成。未設定なら固定文言 |
 | `MIHARI_LLM_MODEL` | `claude-haiku-4-5` | 喋り出しの速さを優先した既定。品質重視なら `claude-opus-5` |
 | `MIHARI_VOICEVOX_URL` | `http://127.0.0.1:50021` | エンジンの場所 |
-| `MIHARI_VOICEVOX_SPEAKER` | `1` | 話者 ID。`/speakers` で一覧を引ける。**どのキャラにするかは未定** |
+| `MIHARI_VOICEVOX_SPEAKER` | `14` | 話者 ID。`/speakers` で一覧を引ける。既定の 14 は冥鳴ひまり |
 
 `bridge/.env` は `.gitignore` 済み。**API キーは絶対にコミットしない。**
 
 同じセリフの音声は合成結果を覚えておくので、2 回目以降は待たされずに鳴る。
+
+音を出す口はアプリで 1 つ（`Voice/SpeechPlayer`）だけで、検知のセリフとペットのひとりごと
+（クリック・待機・ドラッグ。bridge を通さず `Pet/PetVoice` が直接 VOICEVOX を叩く）が
+これを共有する。どちらを鳴らすかは優先度で決まり（`SpeechPriority` / `SpeechPlaybackArbiter`）、
+**検知のセリフは鳴っているものを止めてでも必ず鳴る。** 逆にひとりごとは検知のセリフにかぶせず、
+鳴らせないときは溜めずに捨てる（吹き出しは出る）。メニューの「声を出す」はひとりごとにだけ効く。
 
 ### キャラの口調を変える
 
@@ -358,10 +381,9 @@ OverlayModel.show()
   └─ dismiss(reason:) はどの経路からも呼べて、2 回目以降は何もしない(冪等)
 ```
 
-`VoiceController.isSpeaking` は再生開始時に `true` になったきり、自然終了では `false` に戻らない
-(`stopSpeaking()` を呼んだときだけ戻る)ため、実際の読み上げ完了をそこから検知することはできない。
-代わりにセリフの文字数から所要時間を見積もり、それを「読み上げ完了」とみなしている。
-見積もりが外れて長引いても、上限秒数のタイマーが必ず先に効く。
+`VoiceController.isSpeaking` は `SpeechPlayer` の再生完了通知を受けているので、自然に喋り終わっても
+`false` に戻る。ただしオーバーレイの解除判定は従来どおりで、セリフの文字数から所要時間を見積もり、
+それを「読み上げ完了」とみなしている。見積もりが外れて長引いても、上限秒数のタイマーが必ず先に効く。
 
 `NSWindow` の生成と `NSApplication.presentationOptions` の変更は `OverlayWindowPresenting`
 プロトコルの裏に隠してあり、テストではスタブに差し替えて実際の全画面表示を発生させない。
@@ -413,21 +435,21 @@ Sources/MihariCore/HeadGesture/
 `HeadGestureRecognizer` は CoreMotion を一切知らない純粋なロジックで、
 `Tests/MihariCoreTests/HeadGestureRecognizerTests.swift` で疑似的な角度の時系列を流してテストしている。
 
-### 他モジュールとの接続（#16 向け）
+### 検知への接続
 
-ペットの問いかけ UI（#16）は `HeadGestureQuestioner` だけに依存すればよい。内部実装や
-`HeadGestureView` の型は一切知らなくてよい設計にしてある。
+「休憩中?」の問いかけ（`DetectionEngine.Actions.askHeadGesture`）に配線済み。
+`AppCoordinator` が `HeadGestureQuestioner` を差し込んでいるだけなので、検知エンジンは
+`HeadGestureQuestioner` の存在も `HeadGestureView` の型も知らない。
 
 ```swift
-let questioner = HeadGestureQuestioner()
-let response = await questioner.ask(prompt: "休憩する？")
-switch response {
-case .yes: // うなずいた
-case .no: // 首を振った
-case .timedOut: // 反応がなかった
-case .unavailable(let reason): // AirPods未接続などで質問自体をスキップした
+askHeadGesture: { [questioner] question, answerWindow in
+    await questioner.ask(prompt: question, answerWindow: answerWindow)
 }
 ```
+
+うなずけば はい、首を振れば いいえ として休憩の返事になる。`.timedOut` / `.unavailable` は
+回答として扱わない——AirPods が無いことを「いいえ」と読み替える理由がないし、時間切れは
+検知側の無反応タイマー（`promptTimeoutSeconds`）が面倒を見る。
 
 ### 判定の閾値と根拠
 
@@ -546,10 +568,25 @@ Mac の無操作時間と iPhone の様子から、声をかけるか・証拠�
 
 どちらも声はかける。撮って送るところだけを抑える。
 
+### 休憩
+
+疑いに入ったとき、ペットの吹き出しで「休憩中?」と**1 回だけ**聞く。返事は 3 か所から来る
+（吹き出しのボタン・AirPods の首振り・無反応タイマー）が、**採用するのは先に来た 1 つだけ**で、
+残りは捨てて待っているタスクも畳む（`Detection/BreakPromptSession`）。閉じたあとに届いた
+古い返事はセッション ID が違うので通らない。二重に休憩へ入らないための番人。
+
+- **はい** … `breakDurationSeconds`（既定 15 分）休憩に入る。**休憩中は材料を集める前に評価を
+  打ち切るので、カメラも開かない。**撮らない・送らない・説教しない・声もかけない。
+  時間が明ければ何もしなくても見張りに戻る
+- **いいえ / `promptTimeoutSeconds`（既定 20 秒）無反応** … 問いかけを閉じて見張りを続ける
+
+メニューの「休憩する(15 分)」からも同じ休憩に入る。「監視を止める」は休憩に触れず、
+「監視を再開する」は休憩中ならその休憩も打ち切る。
+
 ### 閾値
 
 すべて `DetectionThresholds` にあり、**全部要調整**。デモしながら詰める前提。
-「検知」タブに現在値と、いま何を根拠に判断したかが出る。
+`MIHARI_DEBUG_UI=1` で開く「検知」タブに現在値と、いま何を根拠に判断したかが出る。
 
 | 名前 | 既定 | 意味 |
 | --- | --- | --- |
@@ -560,11 +597,14 @@ Mac の無操作時間と iPhone の様子から、声をかけるか・証拠�
 | `gazeFreshnessSeconds` | 10 | 視線の見立てを信じる期間（カメラ停止直後の古い値で判定しない） |
 | `stampGraceSeconds` | 300 | 在席スタンプ直後の猶予 |
 | `cooldownSeconds` | 180 | 次に撮るまで空ける |
+| `breakDurationSeconds` | 900 | 「休憩中?」に はい と答えたときの休憩の長さ |
+| `promptTimeoutSeconds` | 20 | 「休憩中?」の返事を待つ時間 |
 
 ### いつ見張り始めるか
 
 **アプリを起動したら自動で見張り始める。** 常駐して見張るアプリなので、ボタンを押すまで
-何も起きないのでは監視にならない。「検知」タブから手で止め / 再開もできる。
+何も起きないのでは監視にならない。メニューバーの「ペット」かペットの右クリックメニューの
+「監視を止める / 監視を再開する」から手で止め / 再開もできる。
 
 Discord の `/watch start` `/watch at HH:MM` `/watch stop` からも操作できる。
 Python 側のスケジューラが SSE に `watch.start` / `watch.stop` を流し、アプリがそれを受ける。
@@ -578,8 +618,9 @@ make build
 MIHARI_FAST_THRESHOLDS=1 ./desktop/Mihari.app/Contents/MacOS/Mihari
 ```
 
-疑い 10 秒 / 確定 25 秒 / 視線 5 秒から 8 秒継続、まで縮まる。
-判断の様子は「検知」タブの記録か、次のログで見られる。
+疑い 10 秒 / 確定 25 秒 / 視線 5 秒から 8 秒継続、休憩 60 秒 / 返事待ち 8 秒、まで縮まる。
+判断の様子は次のログで見られる。`MIHARI_DEBUG_UI=1` も付けて起動すると検証用の 10 タブ画面が
+開き、「検知」タブの記録でも追える。
 
 ```sh
 log stream --info --predicate 'subsystem == "com.thirdlf03.mihari"' --style compact
