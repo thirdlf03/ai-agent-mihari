@@ -122,6 +122,14 @@ public struct DaemonClient: Sendable {
         try await post("discord/schedule", body: WatchScheduleRequest(at: time, requestedBy: "app"))
     }
 
+    /// iPhone の状態を 1 回取りに行く。
+    ///
+    /// デーモン側の iPhone 監視ループはこの GET が初めて呼ばれたときに始まるので、
+    /// 一度も呼ばないと `iphone.state` の SSE イベントが流れてこない。
+    public func iphoneState() async throws -> IPhoneStateResponse {
+        try await get("iphone/state")
+    }
+
     /// iPhone の画面を 1 枚撮る。PNG のバイト列がそのまま返る。
     public func iphoneScreenshot() async throws -> Data {
         var request = try makeRequest(path: "iphone/screenshot", authenticated: true)
@@ -285,4 +293,21 @@ public struct DeviceSummary: Decodable, Equatable, Sendable, Identifiable {
 
 public struct DeviceListResponse: Decodable, Equatable, Sendable {
     public let devices: [DeviceSummary]
+}
+
+/// `GET /iphone/state` の応答。SSE の `iphone.state` と同じ中身を 1 回だけ取ってくる。
+public struct IPhoneStateResponse: Decodable, Sendable {
+    public let activity: String
+    public let udid: String?
+    public let batteryLevel: Double?
+    public let batteryCharging: Bool?
+    public let updatedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case activity
+        case udid
+        case batteryLevel = "battery_level"
+        case batteryCharging = "battery_charging"
+        case updatedAt = "updated_at"
+    }
 }
