@@ -349,6 +349,36 @@ struct DetectionBreakTests {
         #expect(pet.dismissals == 1)
     }
 
+    @Test("疑いの途中で監視を止めると、エピソードもそこで終わる")
+    func stopFinishesTheEpisode() async {
+        let pet = PetSpy()
+        let engine = engine(idle: IdleClock(1), spy: ActionSpy(), pet: pet, thresholds: thresholds())
+
+        await engine.evaluate()
+        #expect(engine.state == .suspected)
+        #expect(pet.returnSignals == 0)
+
+        engine.stop()
+
+        // 固定アニメを解く合図。問いかけを閉じるのは 1 回だけ。
+        #expect(pet.returnSignals == 1)
+        #expect(pet.dismissals == 1)
+    }
+
+    @Test("正常のまま監視を止めても、ペットには何も流れない")
+    func stopWhileNormalSaysNothing() async {
+        let pet = PetSpy()
+        let engine = engine(idle: IdleClock(0), spy: ActionSpy(), pet: pet, thresholds: thresholds())
+
+        await engine.evaluate()
+        #expect(engine.state == .normal)
+
+        engine.stop()
+
+        #expect(pet.events.isEmpty)
+        #expect(pet.dismissals == 0)
+    }
+
     // MARK: - 首振り
 
     @Test("うなずきでも休憩に入る")

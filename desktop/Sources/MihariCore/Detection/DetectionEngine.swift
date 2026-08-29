@@ -134,13 +134,22 @@ public final class DetectionEngine: ObservableObject {
         loop?.cancel()
         loop = nil
         isWatching = false
+        let previous = state
         state = .normal
         gazeMonitor.stop()
         gaze = .none
         music = .silent
         // 見張りを止めたのに問いかけだけ画面に残しても、答えようがない。
         // 休憩(`breakUntil`)は消さない。休憩と監視の開始 / 停止は別の話。
-        dismissPrompt()
+        //
+        // 疑い / 確定の途中で止めたなら、エピソードもここで終わらせる。
+        // 黙って `state` だけ戻すと、ペットは固定アニメのまま取り残される
+        // (再開後の評価は正常 → 正常で、解除のイベントが出ない)。
+        if previous == .normal {
+            dismissPrompt()
+        } else {
+            finishEpisode()
+        }
     }
 
     /// いまの材料を集める。必要なら途中でカメラを覗く。
