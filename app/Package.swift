@@ -10,7 +10,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "MacApp",
-            path: "Sources/MacApp"
+            path: "Sources/MacApp",
+            resources: [
+                .copy("Resources/pets")
+            ]
         )
     ]
 )
