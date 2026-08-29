@@ -36,6 +36,7 @@ public enum SelfTest {
         results.append(contentsOf: vision(from: results))
         results.append(gaze())
         results.append(await continuousGaze())
+        results.append(await eyeThreshold())
         results.append(await music())
         results.append(await overlay())
         results.append(await headGesture())
@@ -191,6 +192,56 @@ public enum SelfTest {
             ok: true,
             detail: "見ている \(looking) / 見ていない \(notLooking) · 目の開き \(spread) · \(yawSpread)"
         )
+    }
+
+    /// 目を開けたときと閉じたときで、目の開き具合がどれだけ離れるかを測る。
+    ///
+    /// しきい値は「開けている値」だけを見て決めており、**閉じたときの値を測っていない**。
+    /// 2 つが十分離れていなければ、しきい値をどこに置いても誤判定する。
+    /// `MIHARI_SELFTEST_EYES=1` を付けたときだけ実行する。
+    @MainActor
+    private static func eyeThreshold() async -> Result {
+        guard ProcessInfo.processInfo.environment["MIHARI_SELFTEST_EYES"] == "1" else {
+            return Result(name: "目の開きの分離", ok: true, detail: "省略（MIHARI_SELFTEST_EYES=1 で測る）")
+        }
+
+        let monitor = GazeMonitor()
+        monitor.start()
+        defer { monitor.stop() }
+        // 露出が落ち着くまで待つ。
+        try? await Task.sleep(for: .seconds(2))
+
+        var measured: [String: [Double]] = [:]
+        for (instruction, key) in [("目を開けて画面を見て", "開"), ("目を閉じて", "閉")] {
+            FileHandle.standardOutput.write(Data("\n>>> 5 秒間 \(instruction) いてください\n".utf8))
+            var values: [Double] = []
+            for _ in 0..<20 {
+                try? await Task.sleep(for: .milliseconds(250))
+                if let openness = monitor.observation.eyeOpenness { values.append(openness) }
+            }
+            measured[key] = values
+        }
+
+        guard let open = measured["開"], let closed = measured["閉"], !open.isEmpty, !closed.isEmpty else {
+            return Result(name: "目の開きの分離", ok: false, detail: "顔を検出できず測れなかった")
+        }
+
+        let openMin = open.min() ?? 0
+        let closedMax = closed.max() ?? 0
+        // 開けた値の下限と閉じた値の上限が離れていれば、その間にしきい値を置ける。
+        let separated = openMin > closedMax
+        let detail = String(
+            format: "開いた %.3f〜%.3f / 閉じた %.3f〜%.3f · いまのしきい値 %.2f%@",
+            openMin,
+            open.max() ?? 0,
+            closed.min() ?? 0,
+            closedMax,
+            VisionLabelClassifier.defaultClosedEyeOpennessThreshold,
+            separated
+                ? String(format: " → 推奨 %.3f", (openMin + closedMax) / 2)
+                : " → 重なっていて分離できない"
+        )
+        return Result(name: "目の開きの分離", ok: separated, detail: detail)
     }
 
     /// いま音楽が鳴っているか。**説教を出すかどうかの条件そのもの。**
