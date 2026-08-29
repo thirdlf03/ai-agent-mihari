@@ -136,7 +136,6 @@ public enum SelfTest {
     private static func continuousGaze() async -> Result {
         let monitor = GazeMonitor()
         monitor.start()
-        defer { monitor.stop() }
 
         var samples: [GazeState] = []
         var openings: [Double] = []
@@ -156,6 +155,10 @@ public enum SelfTest {
                 yaws.append(yaw)
             }
         }
+
+        // 次のテストが同じカメラを開き直すので、解放が終わるまで待ってから返す。
+        // 解放前に開くと新しいセッションにフレームが流れてこないことがある。
+        await monitor.stopAndWait()
 
         guard !samples.isEmpty else {
             return Result(name: "視線の連続監視", ok: false, detail: "フレームが 1 枚も解析されなかった")
@@ -208,7 +211,6 @@ public enum SelfTest {
 
         let monitor = GazeMonitor()
         monitor.start()
-        defer { monitor.stop() }
         // 露出が落ち着くまで待つ。
         try? await Task.sleep(for: .seconds(2))
 
@@ -222,6 +224,9 @@ public enum SelfTest {
             }
             measured[key] = values
         }
+
+        // 次のテストが同じカメラを開き直すので、解放が終わるまで待ってから返す。
+        await monitor.stopAndWait()
 
         guard let open = measured["開"], let closed = measured["閉"], !open.isEmpty, !closed.isEmpty else {
             return Result(name: "目の開きの分離", ok: false, detail: "顔を検出できず測れなかった")

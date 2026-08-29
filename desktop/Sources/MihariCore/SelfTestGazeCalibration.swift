@@ -41,9 +41,17 @@ extension SelfTest {
 
         let monitor = GazeMonitor()
         monitor.start()
-        defer { monitor.stop() }
-        // 露出が落ち着くまで待つ。
-        try? await Task.sleep(for: .seconds(2))
+
+        // フレームが流れ始めるまで待つ(露出の安定待ちを兼ねる)。
+        // 1 枚も来ないままフェーズを回すと 70 秒無駄にするので、来なければ即失敗にする。
+        guard await waitForFirstFrame(monitor, timeoutSeconds: 10) else {
+            await monitor.stopAndWait()
+            return Result(
+                name: "視線の分離",
+                ok: false,
+                detail: "カメラからフレームが 1 枚も来ない。直前のカメラ解放との競合か、カメラが使えない"
+            )
+        }
 
         // 「見る」を毎回挟み、フェーズ間で指標がちゃんと復帰するかも見る。
         let cycle: [GazePhase] = [.look, .phone, .look, .side, .look, .leave]
@@ -56,8 +64,23 @@ extension SelfTest {
             samples[phase, default: []].append(contentsOf: collected)
         }
 
+        // 後続のテストが同じカメラを開き直す可能性があるので、解放を待ってから返す。
+        await monitor.stopAndWait()
+
         emit("\n" + report(samples))
         return Result(name: "視線の分離", ok: true, detail: verdictLine(samples))
+    }
+
+    /// 最初のフレームが解析されるまで待つ。時間内に来なければ `false`。
+    private static func waitForFirstFrame(
+        _ monitor: GazeMonitor, timeoutSeconds: TimeInterval
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if monitor.observation.updatedAt != nil { return true }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return false
     }
 
     /// バッファリングで指示が遅れて出ないよう、標準出力へ直接書く。

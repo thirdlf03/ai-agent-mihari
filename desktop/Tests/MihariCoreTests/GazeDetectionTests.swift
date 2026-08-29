@@ -260,3 +260,22 @@ private final class IdleBox: @unchecked Sendable {
     func set(_ seconds: TimeInterval) { lock.withLock { value = seconds } }
     func read() -> TimeInterval { lock.withLock { value } }
 }
+
+@Suite("GazeMonitor の停止待ち")
+struct GazeMonitorStopTests {
+
+    @Test("開始していないモニタでも stopAndWait はハングせず戻る")
+    func stopAndWaitReturnsWithoutStart() async {
+        let monitor = GazeMonitor()
+        await monitor.stopAndWait()
+        #expect(!monitor.isRunning)
+    }
+
+    @Test("start 直後に stopAndWait しても戻る(キューに積まれた処理を追い越さない)")
+    func stopAndWaitAfterStartReturns() async {
+        let monitor = GazeMonitor()
+        monitor.start()
+        await monitor.stopAndWait()
+        #expect(!monitor.isRunning)
+    }
+}

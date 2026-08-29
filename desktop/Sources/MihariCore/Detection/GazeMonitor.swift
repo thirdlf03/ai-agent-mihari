@@ -71,6 +71,19 @@ public class GazeMonitor: NSObject, @unchecked Sendable {
         }
     }
 
+    /// 停止が完了する(カメラが解放される)まで待つ。
+    ///
+    /// 同じカメラを続けて開き直す場合はこちらを使う。`stop()` は投げっぱなしなので、
+    /// 解放が終わる前に次のセッションを開くと、新しいセッションにフレームが
+    /// 一切流れてこないことがある(SelfTest の連続実行で実測)。
+    /// 直列キューに後から積んだ処理は `stop()` の本体を追い越さない。
+    public func stopAndWait() async {
+        stop()
+        await withCheckedContinuation { continuation in
+            queue.async { continuation.resume() }
+        }
+    }
+
     /// 呼び出し元は必ず `queue` 上にいる。
     private func configure() -> Bool {
         guard !configured else { return true }
