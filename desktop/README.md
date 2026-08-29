@@ -107,3 +107,48 @@ desktop/
 
 `codesign --sign -` による ad-hoc 署名で、ローカル実機検証専用。
 Developer ID による署名・公証はしておらず、配布は想定していない。
+
+## セリフと声
+
+ペットの発話は `bridge/` 側で作る。macOS 側は「状況を渡す」「返ってきた WAV を鳴らす」だけ。
+
+```
+Swift ──POST /voice/speak（状況）──▶ Python
+                                    ├ Claude API でセリフ生成
+                                    └ VOICEVOX で WAV 合成
+      ◀── {text, audio(base64), ...} ─┘
+```
+
+**片方が欠けても止まらないことを最優先にしている。** サボりを検知したのに、喋れないせいで
+撮影も送信も起きない、という壊れ方をさせない。
+
+| 欠けているもの | どうなるか |
+| --- | --- |
+| `ANTHROPIC_API_KEY` 未設定 | 状況別の固定文言で喋る（`from_llm: false`） |
+| Claude API が遅い / 失敗 | 待たずに固定文言へ切り替える（既定 4 秒で打ち切り） |
+| VOICEVOX が未起動 | 音声は `null`。セリフは返るので吹き出しには出る |
+
+### セットアップ
+
+1. [VOICEVOX](https://voicevox.hiroshiba.jp/) をインストールして起動する（既定 `http://127.0.0.1:50021`）
+2. `cp bridge/.env.example bridge/.env` して `ANTHROPIC_API_KEY` を入れる
+
+どちらも任意。入れなくてもアプリは動く。「セリフと声」タブに、いま何が足りないかが出る。
+
+### 設定（`bridge/.env`）
+
+| 変数 | 既定 | 用途 |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` | なし | セリフ生成。未設定なら固定文言 |
+| `MIHARI_LLM_MODEL` | `claude-haiku-4-5` | 喋り出しの速さを優先した既定。品質重視なら `claude-opus-5` |
+| `MIHARI_VOICEVOX_URL` | `http://127.0.0.1:50021` | エンジンの場所 |
+| `MIHARI_VOICEVOX_SPEAKER` | `1` | 話者 ID。`/speakers` で一覧を引ける。**どのキャラにするかは未定** |
+
+`bridge/.env` は `.gitignore` 済み。**API キーは絶対にコミットしない。**
+
+同じセリフの音声は合成結果を覚えておくので、2 回目以降は待たされずに鳴る。
+
+### キャラの口調を変える
+
+`bridge/src/device_bridge/voice/generator.py` の `SYSTEM_PROMPT` を書き換える。
+固定文言は `bridge/src/device_bridge/voice/fallback.py`。

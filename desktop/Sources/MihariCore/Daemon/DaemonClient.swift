@@ -53,12 +53,26 @@ public struct DaemonClient: Sendable {
 
     /// 経路が通っているかを確かめるために、イベントを 1 件流させる。
     @discardableResult
-    public func publishTestEvent(name: String, payload: [String: String] = [:]) async throws -> PublishResponse {
-        var request = try makeRequest(path: "events/publish", authenticated: true)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(PublishRequest(name: name, payload: payload))
-        return try await send(request)
+    public func publishTestEvent(
+        name: String,
+        payload: [String: String] = [:]
+    ) async throws -> PublishResponse {
+        try await post("events/publish", body: PublishRequest(name: name, payload: payload))
+    }
+
+    /// セリフを作り、読み上げ用の音声まで用意させる。
+    public func speak(_ request: SpeechRequest) async throws -> SpokenLine {
+        try await post("voice/speak", body: request)
+    }
+
+    /// セリフだけを作る。読み上げはしない。
+    public func line(for request: SpeechRequest) async throws -> SpokenLine {
+        try await post("voice/line", body: request)
+    }
+
+    /// セリフ生成と読み上げが使える状態かを問い合わせる。
+    public func voiceStatus() async throws -> VoiceStatus {
+        try await get("voice/status")
     }
 
     /// SSE の接続に使うリクエスト。
@@ -85,6 +99,14 @@ public struct DaemonClient: Sendable {
 
     private func get<T: Decodable>(_ path: String, authenticated: Bool = true) async throws -> T {
         try await send(makeRequest(path: path, authenticated: authenticated))
+    }
+
+    private func post<Body: Encodable, T: Decodable>(_ path: String, body: Body) async throws -> T {
+        var request = try makeRequest(path: path, authenticated: true)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(body)
+        return try await send(request)
     }
 
     private func makeRequest(path: String, authenticated: Bool) throws -> URLRequest {

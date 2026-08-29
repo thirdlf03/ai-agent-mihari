@@ -17,10 +17,13 @@ import asyncio
 import json
 import os
 import socket
+import stat
 import sys
 import threading
+from pathlib import Path
 
 import uvicorn
+from dotenv import load_dotenv
 
 from device_bridge.daemon.app import create_app
 from device_bridge.daemon.config import DaemonConfig
@@ -44,8 +47,25 @@ def _announce(port: int) -> None:
     print(json.dumps({"port": port, "pid": os.getpid()}, ensure_ascii=False), flush=True)
 
 
+def stdin_is_parent_pipe() -> bool:
+    """stdin が親プロセスとつながったパイプかどうか。
+
+    パイプのときだけ EOF を「親が死んだ」と読んでよい。
+    ``&`` でバックグラウンド起動した場合や nohup 下では stdin が /dev/null になり、
+    read() が即座に EOF を返す。これを親の死と誤認すると、起動した直後に自殺してしまう。
+    端末につながっている場合も、読むとユーザーの入力を横取りしてしまうので監視しない。
+    """
+    try:
+        mode = os.fstat(sys.stdin.fileno()).st_mode
+    except (OSError, ValueError, AttributeError):
+        return False
+    return stat.S_ISFIFO(mode)
+
+
 def _exit_when_stdin_closes(server: uvicorn.Server) -> None:
     """親プロセスが死んで stdin が閉じたら、自分も終了する。"""
+    if not stdin_is_parent_pipe():
+        return
 
     def watch() -> None:
         try:
@@ -61,6 +81,9 @@ def _exit_when_stdin_closes(server: uvicorn.Server) -> None:
 
 def serve(config: DaemonConfig, *, watch_stdin: bool = True) -> None:
     """デーモンを起動し、終了するまでブロックする。"""
+    # API キーなどは bridge/.env から読む。無くても起動する(セリフが固定文言になるだけ)。
+    load_dotenv(Path(__file__).resolve().parents[3] / ".env")
+
     sock = _bind_socket(config)
     port = sock.getsockname()[1]
 
