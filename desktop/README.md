@@ -107,3 +107,21 @@ desktop/
 
 `codesign --sign -` による ad-hoc 署名で、ローカル実機検証専用。
 Developer ID による署名・公証はしておらず、配布は想定していない。
+
+## 在席スタンプ(Touch ID)
+
+`Sources/MihariCore/Attendance/` に、Touch ID(または非搭載機ではパスワード)で在席を
+証明する「スタンプ」の仕組みが入っている(#19)。UI は `Views/AttendanceView.swift` に単体で
+動く `View` として用意してあり、`RootView` への組み込みは別途行う。
+
+- `TouchIDAuthenticating`: `LocalAuthentication` を抽象化するプロトコル。本番実装は
+  `LocalAuthenticationTouchIDAuthenticator`(SaboriLab の `TouchIDModule` を踏襲)。
+  テストではこれをスタブに差し替え、実行だけで Touch ID のダイアログが出ないようにしている。
+- `AttendanceModel`: `canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics)` が
+  使えなければ `.deviceOwnerAuthentication`(パスワード)へ自動でフォールバックする。
+  認証のキャンセル・失敗は例外を投げず、`lastMessage` に文言を残すだけ。
+- `AttendanceStore`: スタンプ履歴を `UserDefaults` に JSON で永続化する。保存先は
+  `PermissionsModel` と同じく注入可能で、上限件数(`historyLimit`)を超えた分は古いものから捨てる。
+- `AttendanceGrace`: 「直近のスタンプから何秒経ったか」「いま猶予期間中か」を返す純粋なロジック。
+  猶予秒数は `defaultGracePeriod`(既定 5 分)で、呼び出し側から上書きできる。
+  サボり検知の状態機械(#9)はここを参照して、スタンプ直後の誤検知を避ける想定。
