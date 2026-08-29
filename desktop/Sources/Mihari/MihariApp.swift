@@ -26,7 +26,7 @@ struct MihariApp: App {
                 CommandMenu("ペット") {
                     PetMenuContent(
                         actions: delegate.coordinator,
-                        pet: delegate.coordinator.pet.controller
+                        presenter: delegate.coordinator.pet
                     )
                 }
             }

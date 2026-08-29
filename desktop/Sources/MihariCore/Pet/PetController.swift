@@ -105,8 +105,8 @@ public final class PetController {
         static let originY = "pet.originY"
     }
 
-    /// 歩く速さ(pt/秒)。
-    private static let walkSpeed: CGFloat = 60
+    /// 歩く速さ(pt/秒)。コマ送りをゆっくりにした分、足の動きと移動が合うように落とした。
+    private static let walkSpeed: CGFloat = 40
     /// 1 回の歩行距離の範囲(pt)。
     private static let walkDistanceRange: ClosedRange<CGFloat> = 80...240
     /// idle のまま待つ時間の範囲(秒)。

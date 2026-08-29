@@ -20,6 +20,8 @@
 
 セリフを出すのは `state != .normal` かつ `line` が空でないときだけ。正常のイベントに乗ってきたセリフは吹き出しに出さない。
 
+各コマの表示時間は `PetAtlas.swift` に書いた基準値へ `PetAnimation.frameTempo`(現在 1.5)を一律に掛けたもの。全アニメーションをゆっくり / 速くしたいときは、この定数だけを変えればよい。
+
 ### escalationStage
 
 `DetectionEngine.petStage(_:)` が決める。`PetEvent` は 0 未満を 0 に丸める。
@@ -47,7 +49,7 @@
 1. `idle` で 4〜10 秒(`idleDurationRange`)のランダムな時間だけ待つ。待機に入るたび、ひとりごとの抽選をする
 2. 待ち終わったら 30%(`reviewProbability`)で `review`、残り 70% で歩行を選ぶ
 3. `review` は 1 周したら `idle` に戻る
-4. 歩行は向きをランダムに決め、80〜240 pt(`walkDistanceRange`)を 60 pt/秒(`walkSpeed`)で進む。1 コマごとに `min(walkSpeed × コマ時間, 残り距離)` だけ動く
+4. 歩行は向きをランダムに決め、80〜240 pt(`walkDistanceRange`)を 40 pt/秒(`walkSpeed`)で進む。1 コマごとに `min(walkSpeed × コマ時間, 残り距離)` だけ動く
 5. 歩行の行き先が `visibleFrame` の左右端を超えるときは向きを反転する。位置自体は端でクランプする
 6. 残り距離が尽きたら位置を保存して `idle` に戻る
 
@@ -73,7 +75,7 @@
 
 ### メニュー
 
-右クリックメニュー(`PetContextMenu`)とメニューバーの「ペット」(`PetMenuContent`)は `PetMenuEntries.make` から作るので中身が同じ。現行は 8 項目。
+右クリックメニュー(`PetContextMenu`)とメニューバーの「ペット」(`PetMenuContent`)は `PetMenuEntries.make` から作るので中身が同じ。現行は 8 項目と「デバッグ」サブメニュー。
 
 | 項目 | 内容 |
 | --- | --- |
@@ -86,7 +88,24 @@
 | 声を出す | チェック式。`pet.setVoiceEnabled(!isVoiceEnabled)` |
 | 状態パネルを表示 | チェック式。`toggleStatusPanel()` |
 
-区切り線は「休憩する」の後と「権限の確認…」の後の 2 本。`autoenablesItems = false`。
+区切り線は「休憩する」の後、「権限の確認…」の後、「状態パネルを表示」の後(デバッグの手前)の 3 本。`autoenablesItems = false`。
+
+#### デバッグ
+
+`PetDebugMenuEntries.make` が作るサブメニュー。検知が起きるのを待たずにペットの見た目を確かめるためのもので、環境変数などでは出し分けず常に出る。
+
+| 項目 | 内容 |
+| --- | --- |
+| 検知の状態を再現(サブメニュー) | 正常に戻す / 疑い(段階 1) / サボり確定・声だけ(段階 2) / サボり確定・撮影(段階 3) / (区切り線) / 問いかけ(はい / いいえ) / 問いかけを閉じる。前の 4 つは `presenter.state` に対するチェック式 |
+| アニメーションを固定(サブメニュー) | 「固定しない(自律行動)」と `PetAnimation` の 9 種。`setFixedAnimation(_:)`。チェック式 |
+| 1 回だけ再生(サブメニュー) | `PetAnimation` の 9 種。`playOnce(_:)` |
+| ひとりごとを喋る(声あり) | `say("デバッグのテストです。聞こえていますか?")`。読み上げも通る |
+
+アニメーションの項目名は `waiting(待つ)` のように `rawValue` と日本語ラベル(`PetAnimation.debugLabel`)を並べる。
+
+「検知の状態を再現」は `LivePetPresenter.present(_:)` に偽の `PetEvent` を流すだけなので、検知エンジンの状態機械・撮影・Discord への送信はどれも動かない。「問いかけ」の回答も休憩には入らず、受け取った答えを吹き出しに出すだけ。
+
+静止中(監視停止中・休憩中)は `playOnce` が無視されるので、「1 回だけ再生」を押しても何も起きない。
 
 README にあった「しゃべる」「しまう / 起こす」「ペット」の 3 項目は現行コードに無い。`PetController.conceal()` / `LivePetPresenter.hide()` は残っているが、呼び出し元が無い。
 
@@ -109,7 +128,7 @@ README にあった「しゃべる」「しまう / 起こす」「ペット」�
 
 しまっている間(`isAwake == false`)は `say()` が何もしない。`hideWindow()` で保留中のセリフを捨て、音声も止める。しまわれている間に来た問いかけは `promptQuestion` に残り、次に出したときに改めて表示する。
 
-見た目の寸法(`PetSpeechBubbleView`): margin 8 pt、角丸 14 pt、しっぽ 14 × 9 pt、ボタン領域 24 pt(間隔 6 pt)、テキスト幅の上限 240 pt、テキストの余白 縦 9 pt / 横 14 pt、フォント `.system(size: 14, weight: .medium)`。
+見た目の寸法(`PetSpeechBubbleView`): margin 8 pt、角丸 14 pt、しっぽ 14 × 9 pt、ボタン領域 24 pt(間隔 6 pt、ボタン列の最低幅 120 pt)、テキスト幅の上限 240 pt、テキストの余白 縦 9 pt / 横 14 pt、フォント `.system(size: 14, weight: .medium)`。
 
 ## 声
 

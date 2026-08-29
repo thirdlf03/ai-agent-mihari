@@ -6,15 +6,15 @@ import SwiftUI
 /// 右クリックメニューは同じ並びから `PetContextMenu` が `NSMenu` を作る。
 public struct PetMenuContent<Actions: PetMenuActions>: View {
     @ObservedObject public var actions: Actions
-    public let pet: PetController
+    public let presenter: LivePetPresenter
 
-    public init(actions: Actions, pet: PetController) {
+    public init(actions: Actions, presenter: LivePetPresenter) {
         self.actions = actions
-        self.pet = pet
+        self.presenter = presenter
     }
 
     public var body: some View {
-        PetMenuEntryList(entries: PetMenuEntries.make(actions: actions, pet: pet))
+        PetMenuEntryList(entries: PetMenuEntries.make(actions: actions, presenter: presenter))
     }
 }
 
