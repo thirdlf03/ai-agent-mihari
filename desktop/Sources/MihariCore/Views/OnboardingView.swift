@@ -7,6 +7,9 @@ import SwiftUI
 /// 「どの権限が何に使われるか」を最初に見せることを画面の役割の中心に置いている。
 public struct OnboardingView: View {
     @ObservedObject var model: PermissionsModel
+    /// iPhone スクショに必要な tunneld の常駐状態。TCC の権限ではないが、
+    /// 「最初に 1 回だけ承認する」という意味でこの画面に並べる。
+    @StateObject private var tunneld = TunneldModel()
     /// 「始める」を押したときの処理。必須権限が揃うまでボタンは押せない。
     private let onStart: (() -> Void)?
     /// 「閉じる」を押したときの処理。すでに見張っている状態で開き直したときに使う。
@@ -28,11 +31,13 @@ public struct OnboardingView: View {
         }
         .task {
             model.refresh()
+            await tunneld.refresh()
             await model.requestOnFirstLaunchIfNeeded()
         }
         // システム設定で許可してから戻ってきたときに、押し直さなくても反映されるようにする。
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
             model.refresh()
+            Task { await tunneld.refresh() }
         }
     }
 
@@ -54,6 +59,8 @@ public struct OnboardingView: View {
                 }
             }
             .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+
+            tunneldSection
 
             if let message = model.lastMessage {
                 Text(message)
@@ -93,6 +100,39 @@ public struct OnboardingView: View {
                 Spacer()
             }
         }
+    }
+
+    /// iPhone スクショ(iOS 17+)に必要な tunneld の常駐を、この画面から登録できるようにする。
+    /// tunneld は root でしか動かせないため、管理者パスワードダイアログを 1 回だけ出して
+    /// launchd(LaunchDaemon)に任せる。以後は再起動しても自動で立ち上がる。
+    private var tunneldSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("iPhone スクショの常駐(tunneld)").font(.headline)
+                    Text("iOS 17+ のスクショに必要なトンネルを OS に常駐させる。登録は管理者パスワードで 1 回だけ")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                switch tunneld.status {
+                case .running:
+                    Label("常駐中", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                case .installing:
+                    ProgressView().controlSize(.small)
+                case .checking, .unknown:
+                    Text("確認中…").font(.callout).foregroundStyle(.secondary)
+                case .notRunning:
+                    Button("登録する…") { Task { await tunneld.install() } }
+                }
+            }
+            if let message = tunneld.message {
+                Text(message).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var header: some View {

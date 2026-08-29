@@ -40,11 +40,17 @@ public struct CaptureView: View {
         HStack(spacing: 10) {
             Button("カメラで撮る") { Task { await model.capturePhoto() } }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.isCapturingPhoto || model.isCapturingScreenshot)
+                .disabled(isBusy)
 
             Button("スクショを撮る") { Task { await model.captureScreenshot() } }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.isCapturingPhoto || model.isCapturingScreenshot)
+                .disabled(isBusy)
+
+            if model.canCaptureIPhone {
+                Button("iPhone のスクショを撮る") { Task { await model.captureIPhoneScreenshot() } }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isBusy)
+            }
 
             if model.lastArtifact != nil {
                 Button("削除", role: .destructive) { model.deleteLastArtifact() }
@@ -52,10 +58,15 @@ public struct CaptureView: View {
 
             Spacer()
 
-            if model.isCapturingPhoto || model.isCapturingScreenshot {
+            if isBusy {
                 ProgressView().controlSize(.small)
             }
         }
+    }
+
+    /// どれか 1 つでも撮影中なら、全部のボタンを止める(結果の置き場が 1 つしかないため)。
+    private var isBusy: Bool {
+        model.isCapturingPhoto || model.isCapturingScreenshot || model.isCapturingIPhone
     }
 
     private func errorBox(_ message: String) -> some View {
