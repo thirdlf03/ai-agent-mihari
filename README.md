@@ -23,7 +23,20 @@ app/Sources/MacApp/
 ├── App/MacApp.swift          # @main
 ├── Views/ContentView.swift   # 一覧 + 詳細
 ├── Models/Device.swift       # JSON に対応する Codable 型
-└── Bridge/DeviceBridge.swift # Process で device-bridge を起動
+├── Bridge/DeviceBridge.swift # Process で device-bridge を起動
+├── Pet/
+│   ├── PetManifest.swift         # pet.json に対応する型
+│   ├── PetLibrary.swift          # 同梱ペットと ~/.codex/pets の列挙
+│   ├── PetAtlas.swift            # スプライトシートのコマ切り出し
+│   ├── PetStatus.swift           # 外部向けステータスとアニメーションの対応
+│   ├── PetSpeech.swift           # セリフ集と speech.json の読み込み
+│   ├── PetVoice.swift            # VOICEVOX でセリフを読み上げる
+│   ├── PetController.swift       # 表示状態とふるまいの管理
+│   ├── PetWindow.swift           # 浮遊表示する NSPanel
+│   ├── PetView.swift             # コマ表示・ドラッグ・メニュー
+│   ├── PetSpeechWindow.swift     # 吹き出しを出すペットの子ウィンドウ
+│   └── PetSpeechBubbleView.swift # 吹き出しの見た目
+└── Resources/pets/mauve/     # 同梱ペットの素材
 
 bridge/src/device_bridge/
 ├── cli.py                    # argparse・JSON 出力
@@ -51,6 +64,14 @@ make lint    # フォーマットと lint を検査する
 | `clean` | `rm -rf app/.build` |
 
 Swift の整形設定は `app/.swift-format`、Python の設定は `bridge/pyproject.toml` の `[tool.ruff]` にある。
+
+## 音声
+
+ローカルで VOICEVOX(`http://127.0.0.1:50021`)が起動していれば、ペットのセリフを冥鳴ひまり(speaker 14)の声で読み上げる。
+
+起動していないときは音声を出さず、吹き出しだけを表示する(30 秒ごとに接続を試み直す)。
+
+メニュー「ペット > 声を出す」(ペットの右クリックメニューにもある)で読み上げを切ると、再生中の音声もその場で止まる。この設定は次の起動にも引き継ぐ。
 
 ## bridge
 

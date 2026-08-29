@@ -39,6 +39,8 @@ final class PetController {
     private(set) var status: PetStatus?
     /// いま吹き出しに出しているセリフ。非 nil のあいだ吹き出しを表示する。
     private(set) var speechText: String?
+    /// セリフを VOICEVOX で読み上げるか。
+    private(set) var isVoiceEnabled: Bool
     /// スプライトシートの読み込みに失敗したときの理由。
     private(set) var loadErrorMessage: String?
 
@@ -47,7 +49,10 @@ final class PetController {
     @ObservationIgnored private var window: PetWindow?
     @ObservationIgnored private var speechWindow: PetSpeechWindow?
     @ObservationIgnored private var speechLines: PetSpeechLines = .builtIn
+    @ObservationIgnored private let voice = PetVoice()
     @ObservationIgnored private var speechTimer: Timer?
+    /// いま喋っているあいだに来たセリフ。言い終わってから続けて言う。
+    @ObservationIgnored private var pendingSpeech: (text: String, duration: TimeInterval)?
     @ObservationIgnored private var lastSpeechAt: Date?
     @ObservationIgnored private var lastSpokenStatus: PetStatus?
     @ObservationIgnored private var frameIndex = 0
@@ -83,6 +88,7 @@ final class PetController {
     private enum DefaultsKey {
         static let petID = "pet.selectedPetID"
         static let isAwake = "pet.isAwake"
+        static let isVoiceEnabled = "pet.isVoiceEnabled"
         static let scale = "pet.scale"
         static let originX = "pet.originX"
         static let originY = "pet.originY"
@@ -108,6 +114,8 @@ final class PetController {
     private static let speechBaseSeconds: TimeInterval = 1.5
     /// セリフの表示時間の下限と上限(秒)。
     private static let speechDurationRange: ClosedRange<TimeInterval> = 2...6
+    /// 音声を読み上げるとき、その長さに上乗せして吹き出しを残す時間(秒)。
+    private static let speechAudioTrailingSeconds: TimeInterval = 0.5
     /// ドラッグを始めたときにセリフを言う確率。
     private static let dragSpeechProbability = 0.3
     /// 待機に入ったときにひとりごとを言う確率。
@@ -121,6 +129,7 @@ final class PetController {
         self.pets = pets
         self.currentPet = PetLibrary.pet(id: defaults.string(forKey: DefaultsKey.petID), in: pets)
         self.isAwake = defaults.object(forKey: DefaultsKey.isAwake) as? Bool ?? true
+        self.isVoiceEnabled = defaults.object(forKey: DefaultsKey.isVoiceEnabled) as? Bool ?? true
         self.scale = Self.restoredScale(from: defaults)
         self.speechLines = PetSpeechLines.load(from: self.currentPet?.speechURL)
     }
@@ -159,6 +168,13 @@ final class PetController {
         } else {
             wake()
         }
+    }
+
+    /// セリフを読み上げるかを切り替える。止めたときは再生中の音声もその場で止める。
+    func setVoiceEnabled(_ enabled: Bool) {
+        isVoiceEnabled = enabled
+        defaults.set(enabled, forKey: DefaultsKey.isVoiceEnabled)
+        if !enabled { voice.stop() }
     }
 
     /// 表示するペットを切り替える。セリフもそのペットのものに読み替える。
@@ -292,10 +308,16 @@ final class PetController {
 
     // MARK: - セリフ
 
-    /// 指定したセリフを吹き出しに出す。表示中のセリフは差し替えて、時間を計り直す。
+    /// 指定したセリフを吹き出しに出す。喋っている途中なら言い終わるまで待たせ、待っているあいだは最新の 1 つだけ残す。
     func say(_ text: String, duration: TimeInterval = 3) {
         let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard isAwake, !line.isEmpty, let window else { return }
+
+        // 喋っている最中は割り込まず、言い終わってから続けて言う。
+        guard speechText == nil else {
+            pendingSpeech = (line, duration)
+            return
+        }
 
         speechText = line
         lastSpeechAt = Date()
@@ -305,6 +327,18 @@ final class PetController {
         // 「視差効果を減らす」ときは吹き出し自体は出し、フェードだけ省く。
         panel.show(text: line, above: window, animated: !isReduceMotionEnabled)
         scheduleSpeechTimer(duration: duration)
+
+        // 読み上げを切っているあいだは吹き出しだけ出す。
+        guard isVoiceEnabled else { return }
+
+        Task { [weak self] in
+            guard let self else { return }
+            guard let audioDuration = await voice.speak(line) else { return }
+            // 吹き出しが音声より先に消えないよう、音声の長さに合わせて表示時間を延ばす。
+            guard speechText == line else { return }
+            let extended = audioDuration + Self.speechAudioTrailingSeconds
+            if extended > duration { scheduleSpeechTimer(duration: extended) }
+        }
     }
 
     /// 種類に応じたセリフをランダムに 1 つ選んで言う。候補が無ければ何もしない。
@@ -321,13 +355,17 @@ final class PetController {
         say(.idle)
     }
 
-    /// 吹き出しを消す。
+    /// 吹き出しを消す。待たせているセリフがあれば続けて言う。
     private func endSpeech() {
         speechTimer?.invalidate()
         speechTimer = nil
         guard speechText != nil else { return }
         speechText = nil
         speechWindow?.hide(animated: !isReduceMotionEnabled)
+
+        guard isAwake, let next = pendingSpeech else { return }
+        pendingSpeech = nil
+        say(next.text, duration: next.duration)
     }
 
     /// 表示時間が過ぎたら吹き出しを消すタイマーを張り直す。
@@ -376,7 +414,10 @@ final class PetController {
     private func hideWindow() {
         frameTimer?.invalidate()
         frameTimer = nil
+        // しまったあとに喋り出さないよう、待たせているセリフは捨てる。
+        pendingSpeech = nil
         endSpeech()
+        voice.stop()
         window?.orderOut(nil)
     }
 

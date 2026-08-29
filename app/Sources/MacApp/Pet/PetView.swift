@@ -86,6 +86,7 @@ struct PetView: View {
         Button("しゃべる") {
             pet.say(.greeting)
         }
+        PetVoiceToggle(pet: pet)
         Button("しまう") {
             pet.tuckAway()
         }
@@ -132,6 +133,22 @@ struct PetChoiceMenus: View {
                 guard isOn else { return }
                 pet.setScale(item.rawValue)
             }
+        )
+    }
+}
+
+/// セリフの読み上げを切り替えるトグル。メインメニューと右クリックメニューで共有する。
+struct PetVoiceToggle: View {
+    let pet: PetController
+
+    var body: some View {
+        Toggle("声を出す", isOn: voiceBinding)
+    }
+
+    private var voiceBinding: Binding<Bool> {
+        Binding(
+            get: { pet.isVoiceEnabled },
+            set: { pet.setVoiceEnabled($0) }
         )
     }
 }

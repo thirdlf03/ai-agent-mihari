@@ -29,6 +29,8 @@ struct MacApp: App {
                     pet.say(.greeting)
                 }
 
+                PetVoiceToggle(pet: pet)
+
                 Divider()
 
                 PetChoiceMenus(pet: pet)
