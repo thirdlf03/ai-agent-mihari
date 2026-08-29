@@ -27,6 +27,7 @@ async def voice_status(request: Request) -> dict[str, Any]:
         "llm_model": generator.model,
         "voicevox_url": voicevox.base_url,
         "voicevox_speaker": voicevox.speaker,
+        "voicevox_tuning": voicevox.tuning.as_dict(),
         "voicevox_reachable": await voicevox.is_reachable(),
         "cached_audio": voicevox.cached_count,
     }

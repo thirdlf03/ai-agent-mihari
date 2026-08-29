@@ -154,6 +154,7 @@ README にあった「しゃべる」「しまう / 起こす」「ペット」�
 | 話者 | 14 |
 | `audio_query` のタイムアウト | 2 秒 |
 | `synthesis` のタイムアウト | 8 秒 |
+| クエリの調整値 | `VoicevoxQueryTuning.standard`（速さ 1.1 / 抑揚 1.3 / 前後の無音 0.05 秒 / 間 0.9 倍） |
 | 失敗後に接続を試みない時間 | 30 秒(`retryInterval`) |
 
 合成に失敗してもログに残すだけで、UI には何も出さない。`nil` を返すので吹き出しの表示時間は文字数ベースのまま。合成の待ち時間中に次のセリフが来たら、古い音声は鳴らさない(`generation` で判定)。
@@ -171,8 +172,9 @@ README にあった「しゃべる」「しまう / 起こす」「ペット」�
 | VOICEVOX のベース URL | `http://127.0.0.1:50021`(`MIHARI_VOICEVOX_URL` で上書き) |
 | 合成のタイムアウト | 10.0 秒。疎通確認は 1.5 秒 |
 | 音声キャッシュ | `(text, speaker)` をキーにした LRU、容量 64 |
+| クエリの調整値 | `VoiceTuning`。既定はひとりごと側と同じ値で、`MIHARI_VOICEVOX_SPEED` など 6 つの環境変数で上書きできる |
 
-固定文言に落ちる条件: API キー未設定 / `APITimeoutError` / `RateLimitError` / `APIStatusError` / `APIConnectionError` / 空応答。速度・ピッチは指定せず、`audio_query` の既定をそのまま `synthesis` へ渡す。
+固定文言に落ちる条件: API キー未設定 / `APITimeoutError` / `RateLimitError` / `APIStatusError` / `APIConnectionError` / 空応答。`audio_query` の結果は素通しにせず、両経路とも同じ調整値を載せてから `synthesis` へ渡すので、声の印象は揃う。
 
 ## セリフ集
 

@@ -5,24 +5,32 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 import httpx
 import pytest
 
 from device_bridge.voice import voicevox as voicevox_module
 from device_bridge.voice.voicevox import (
     DEFAULT_SPEAKER,
+    VoiceTuning,
     VoicevoxClient,
     VoicevoxUnavailableError,
 )
 
 WAV = b"RIFF....WAVE"
 
+#: `/audio_query` が返す JSON。調整で消えては困るキーを混ぜてある。
+QUERY = {"accent_phrases": [{"moras": []}], "outputSamplingRate": 24000}
+
 
 class _Recorder:
-    """呼ばれたパスを記録しつつ、決めた応答を返す。"""
+    """呼ばれたパスと送られたボディを記録しつつ、決めた応答を返す。"""
 
     def __init__(self, *, status: int = 200, fail: Exception | None = None) -> None:
         self.paths: list[str] = []
+        self.bodies: dict[str, Any] = {}
         self._status = status
         self._fail = fail
 
@@ -30,10 +38,12 @@ class _Recorder:
         if self._fail is not None:
             raise self._fail
         self.paths.append(request.url.path)
+        if request.content:
+            self.bodies[request.url.path] = json.loads(request.content)
         if self._status != 200:
             return httpx.Response(self._status)
         if request.url.path == "/audio_query":
-            return httpx.Response(200, json={"accent_phrases": []})
+            return httpx.Response(200, json=QUERY)
         if request.url.path == "/version":
             return httpx.Response(200, json="0.0.0")
         return httpx.Response(200, content=WAV)
@@ -142,3 +152,74 @@ def test_speaker_comes_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_bad_speaker_env_falls_back_to_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MIHARI_VOICEVOX_SPEAKER", "ずんだもん")
     assert VoicevoxClient("http://engine").speaker == DEFAULT_SPEAKER
+
+
+async def test_synthesis_receives_the_tuned_query(install) -> None:
+    recorder = _Recorder()
+    install(recorder)
+
+    await VoicevoxClient("http://engine").synthesize("やあ")
+
+    tuning = VoiceTuning()
+    body = recorder.bodies["/synthesis"]
+    assert body["speedScale"] == tuning.speed
+    assert body["intonationScale"] == tuning.intonation
+    assert body["pitchScale"] == tuning.pitch
+    assert body["prePhonemeLength"] == tuning.pre_phoneme
+    assert body["postPhonemeLength"] == tuning.post_phoneme
+    assert body["pauseLengthScale"] == tuning.pause_length
+
+
+async def test_tuned_query_keeps_the_other_keys(install) -> None:
+    recorder = _Recorder()
+    install(recorder)
+
+    await VoicevoxClient("http://engine").synthesize("やあ")
+
+    body = recorder.bodies["/synthesis"]
+    assert body["accent_phrases"] == QUERY["accent_phrases"]
+    assert body["outputSamplingRate"] == QUERY["outputSamplingRate"]
+
+
+def test_apply_does_not_touch_the_original_query() -> None:
+    query = {"accent_phrases": [], "speedScale": 1.0}
+
+    tuned = VoiceTuning().apply(query)
+
+    assert query["speedScale"] == 1.0
+    assert tuned["speedScale"] == VoiceTuning().speed
+
+
+def test_tuning_comes_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIHARI_VOICEVOX_SPEED", "1.4")
+    monkeypatch.setenv("MIHARI_VOICEVOX_INTONATION", "0.8")
+    monkeypatch.setenv("MIHARI_VOICEVOX_PITCH", "0.02")
+    monkeypatch.setenv("MIHARI_VOICEVOX_PRE_PHONEME", "0.2")
+    monkeypatch.setenv("MIHARI_VOICEVOX_POST_PHONEME", "0.3")
+    monkeypatch.setenv("MIHARI_VOICEVOX_PAUSE_LENGTH", "1.2")
+
+    tuning = VoicevoxClient("http://engine").tuning
+
+    assert tuning == VoiceTuning(
+        speed=1.4,
+        intonation=0.8,
+        pitch=0.02,
+        pre_phoneme=0.2,
+        post_phoneme=0.3,
+        pause_length=1.2,
+    )
+
+
+def test_bad_tuning_env_falls_back_to_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIHARI_VOICEVOX_SPEED", "はやく")
+    monkeypatch.setenv("MIHARI_VOICEVOX_PAUSE_LENGTH", "")
+
+    assert VoicevoxClient("http://engine").tuning == VoiceTuning()
+
+
+def test_tuning_given_to_the_constructor_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIHARI_VOICEVOX_SPEED", "1.4")
+
+    tuning = VoiceTuning(speed=0.5)
+
+    assert VoicevoxClient("http://engine", tuning=tuning).tuning == tuning
