@@ -17,6 +17,20 @@ public enum PermissionKind: String, Sendable, CaseIterable, Identifiable {
         [.camera, .microphone, .screenRecording, .inputMonitoring]
     }
 
+    /// 見張りを始めるのに欠かせない権限か。
+    ///
+    /// これが下りていないと「サボりを見つけて証拠を撮る」が成り立たないため、
+    /// 揃うまでは監視を始めない。オートメーションとモーションは無くても中核は動くので任意にする。
+    public var isRequired: Bool {
+        switch self {
+        case .camera, .microphone, .screenRecording, .inputMonitoring: return true
+        case .automation, .motion: return false
+        }
+    }
+
+    /// 見張りを始めるのに欠かせない権限の一覧。
+    public static let required: [PermissionKind] = allCases.filter(\.isRequired)
+
     public var title: String {
         switch self {
         case .camera: return "カメラ"

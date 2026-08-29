@@ -4,6 +4,9 @@ import os
 
 /// ローカルの VOICEVOX エンジンでセリフを読み上げる。
 /// エンジンが動いていないときは何も鳴らさず、ユーザーには何も見せない。
+///
+/// 音を出す口はアプリで 1 つ(`SpeechPlayer`)しかない。ここはひとりごと(`.chatter`)として
+/// 借りるだけで、検知のセリフが鳴っていれば譲るし、止めるときも検知のセリフには手を出さない。
 @MainActor
 final class PetVoice {
     /// VOICEVOX エンジンのアドレス。
@@ -22,8 +25,8 @@ final class PetVoice {
         category: "PetVoice"
     )
 
-    /// 再生中のプレイヤー。新しいセリフが来たら差し替える。
-    private var player: AVAudioPlayer?
+    /// アプリで唯一の音の出口。検知のセリフと共有する。
+    private let player: SpeechPlayer
     /// セリフの世代。合成のあいだに次のセリフが来たかを判定するために使う。
     private var generation = 0
     /// この時刻まではエンジンへ接続しに行かない。エンジンが無いときに毎回待たされるのを防ぐ。
@@ -36,13 +39,20 @@ final class PetVoice {
         return URLSession(configuration: configuration)
     }()
 
+    /// - Parameter player: 音を出す口。検知のセリフと同じものを渡す。
+    init(player: SpeechPlayer) {
+        self.player = player
+    }
+
     /// セリフを合成して再生する。再生を始められたら音声の長さを返し、鳴らせなければ nil を返す。
+    ///
+    /// 検知のセリフが鳴っているときは譲って何も鳴らさない。その場合も nil を返すので、
+    /// 吹き出しの表示時間は文字数から決めた既定のままになる。
     func speak(_ text: String) async -> TimeInterval? {
         generation += 1
         let currentGeneration = generation
-        // 前のセリフが残っていても、新しいセリフで差し替える。
-        player?.stop()
-        player = nil
+        // 前のひとりごとが残っていても、新しいセリフで差し替える。検知のセリフは止めない。
+        player.stop(priority: .chatter)
 
         if let unavailableUntil, Date() < unavailableUntil { return nil }
 
@@ -52,10 +62,10 @@ final class PetVoice {
             // 通信のあいだに次のセリフが来ていたら、古い音声は鳴らさない。
             guard currentGeneration == generation else { return nil }
 
-            let player = try AVAudioPlayer(data: wave)
-            guard player.play() else { throw VoiceError.playbackFailed }
-            self.player = player
-            return player.duration
+            guard player.play(wav: wave, priority: .chatter) else { return nil }
+            // `SpeechPlayer` は長さを返さないので、鳴らせたときだけ別に測る。
+            // 再生はしないので二重には鳴らない。
+            return (try? AVAudioPlayer(data: wave))?.duration
         } catch {
             // エンジンが動いていないことは珍しくないので、ログに残すだけにする。
             Self.logger.debug("VOICEVOX で読み上げられなかった: \(error.localizedDescription, privacy: .public)")
@@ -64,11 +74,10 @@ final class PetVoice {
         }
     }
 
-    /// 再生中の音声を止める。合成中の結果も捨てる。
+    /// 再生中のひとりごとを止める。合成中の結果も捨てる。検知のセリフは止めない。
     func stop() {
         generation += 1
-        player?.stop()
-        player = nil
+        player.stop(priority: .chatter)
     }
 
     /// テキストから音声合成用のクエリ(JSON)を作る。
@@ -133,15 +142,12 @@ final class PetVoice {
         case badResponse
         /// エンジンが 2xx 以外を返した。
         case badStatus(Int)
-        /// 音声を再生できなかった。
-        case playbackFailed
 
         var errorDescription: String? {
             switch self {
             case .invalidURL: return "リクエスト URL を組み立てられなかった"
             case .badResponse: return "HTTP のレスポンスではなかった"
             case .badStatus(let code): return "エンジンが HTTP \(code) を返した"
-            case .playbackFailed: return "音声を再生できなかった"
             }
         }
     }

@@ -58,7 +58,7 @@ public final class PetController {
     @ObservationIgnored private var window: PetWindow?
     @ObservationIgnored private var speechWindow: PetSpeechWindow?
     @ObservationIgnored private var speechLines: PetSpeechLines = .builtIn
-    @ObservationIgnored private let voice = PetVoice()
+    @ObservationIgnored private let voice: PetVoice
     @ObservationIgnored private var speechTimer: Timer?
     /// いま喋っているあいだに来たセリフ。言い終わってから続けて言う。
     @ObservationIgnored private var pendingSpeech: (text: String, duration: TimeInterval, voiced: Bool)?
@@ -132,8 +132,11 @@ public final class PetController {
     /// ひとりごとを言うために空けておく、直前のセリフからの間隔(秒)。
     private static let idleSpeechInterval: TimeInterval = 20
 
-    public init(defaults: UserDefaults = .standard) {
+    /// - Parameter speechPlayer: 音を出す口。検知のセリフと同じものを渡すと、
+    ///   ひとりごとと検知のセリフが二重に鳴らなくなる。
+    public init(defaults: UserDefaults = .standard, speechPlayer: SpeechPlayer = SpeechPlayer()) {
         self.defaults = defaults
+        self.voice = PetVoice(player: speechPlayer)
         let pets = PetLibrary.availablePets()
         self.pets = pets
         self.currentPet = PetLibrary.pet(id: defaults.string(forKey: DefaultsKey.petID), in: pets)

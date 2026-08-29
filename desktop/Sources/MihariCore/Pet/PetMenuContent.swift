@@ -46,8 +46,12 @@ public struct PetMenuContent<Actions: PetMenuActions>: View {
         Button("しゃべる") {
             pet.say(.greeting)
         }
-        Button("しまう") {
-            pet.conceal()
+        Button(pet.isAwake ? "しまう" : "起こす") {
+            if pet.isAwake {
+                pet.conceal()
+            } else {
+                pet.reveal()
+            }
         }
         .keyboardShortcut("p", modifiers: [.command, .shift])
         Menu("ペット") {
