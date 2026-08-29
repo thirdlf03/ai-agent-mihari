@@ -19,6 +19,8 @@ final class PetVoice {
     private static let synthesisTimeout: TimeInterval = 8
     /// 失敗してから次に接続を試みるまでの間隔(秒)。
     private static let retryInterval: TimeInterval = 30
+    /// 合成前にクエリへ載せる調整値。bridge 側と揃えてある。
+    private static let tuning = VoicevoxQueryTuning.standard
 
     private static let logger = Logger(
         subsystem: "com.thirdlf03.mihari",
@@ -58,7 +60,8 @@ final class PetVoice {
 
         do {
             let query = try await audioQuery(text: text)
-            let wave = try await synthesis(query: query)
+            // 既定のクエリのままだと棒読みになるので、抑揚と速さを調整してから合成する。
+            let wave = try await synthesis(query: try Self.tuning.apply(to: query))
             // 通信のあいだに次のセリフが来ていたら、古い音声は鳴らさない。
             guard currentGeneration == generation else { return nil }
 

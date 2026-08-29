@@ -18,8 +18,12 @@ public enum PetMenuEntries {
 
     /// メニューの並びを組み立てる。呼ぶたびに、そのときの状態でチェックと文言を決める。
     @MainActor
-    public static func make<Actions: PetMenuActions>(actions: Actions, pet: PetController) -> [PetMenuEntry] {
-        [
+    public static func make<Actions: PetMenuActions>(
+        actions: Actions,
+        presenter: LivePetPresenter
+    ) -> [PetMenuEntry] {
+        let pet = presenter.controller
+        return [
             .item(
                 title: actions.isWatching ? "監視を止める" : "監視を再開する",
                 action: {
@@ -73,6 +77,11 @@ public enum PetMenuEntries {
                 title: "状態パネルを表示",
                 isChecked: actions.isStatusPanelVisible,
                 action: { actions.toggleStatusPanel() }
+            ),
+            .separator,
+            .submenu(
+                title: "デバッグ",
+                entries: PetDebugMenuEntries.make(presenter: presenter)
             ),
         ]
     }

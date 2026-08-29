@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from device_bridge.voice.context import Escalation, IPhoneState, SpeechContext, VisionLabel
 from device_bridge.voice.generator import GeneratedLine
-from device_bridge.voice.voicevox import VoicevoxUnavailableError
+from device_bridge.voice.voicevox import VoiceTuning, VoicevoxUnavailableError
 
 WAV = b"RIFF....WAVE"
 
@@ -31,6 +31,7 @@ class _StubVoicevox:
         self._audio = audio
         self.base_url = "http://engine"
         self.speaker = 1
+        self.tuning = VoiceTuning()
         self.cached_count = 0
 
     async def is_reachable(self) -> bool:

@@ -57,8 +57,16 @@ public enum PetAnimation: String, CaseIterable, Sendable {
         }
     }
 
-    /// 各コマの表示時間(秒)。要素数がそのままコマ数になる。
+    /// コマ送りの倍率。1 より大きいほどゆっくり動く。全アニメーションに一律に掛ける。
+    static let frameTempo: TimeInterval = 1.5
+
+    /// 各コマの表示時間(秒)。基準値に `frameTempo` を掛けたもの。要素数がそのままコマ数になる。
     var frameDurations: [TimeInterval] {
+        baseFrameDurations.map { $0 * Self.frameTempo }
+    }
+
+    /// 各コマの表示時間の基準値(秒)。実際の表示時間は `frameDurations` が `frameTempo` を掛けて決める。
+    private var baseFrameDurations: [TimeInterval] {
         switch self {
         case .idle: return [0.280, 0.110, 0.110, 0.140, 0.140, 0.320]
         case .runningRight, .runningLeft: return [0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.220]
@@ -72,7 +80,7 @@ public enum PetAnimation: String, CaseIterable, Sendable {
     }
 
     /// コマ数。
-    var frameCount: Int { frameDurations.count }
+    var frameCount: Int { baseFrameDurations.count }
 }
 
 /// ペットのスプライトシートを読み込み、アニメーションごとのコマ画像に切り出して保持する。

@@ -305,10 +305,21 @@ Swift ──POST /voice/speak（状況）──▶ Python
 | `MIHARI_LLM_MODEL` | `claude-haiku-4-5` | 喋り出しの速さを優先した既定。品質重視なら `claude-opus-5` |
 | `MIHARI_VOICEVOX_URL` | `http://127.0.0.1:50021` | エンジンの場所 |
 | `MIHARI_VOICEVOX_SPEAKER` | `14` | 話者 ID。`/speakers` で一覧を引ける。既定の 14 は冥鳴ひまり |
+| `MIHARI_VOICEVOX_SPEED` | `1.1` | 話す速さ（`speedScale`）。1.0 がエンジンの既定 |
+| `MIHARI_VOICEVOX_INTONATION` | `1.3` | 抑揚の強さ（`intonationScale`）。大きいほど高低の差がつく |
+| `MIHARI_VOICEVOX_PITCH` | `0.0` | 声の高さ（`pitchScale`）。話者の印象を変えたくないので既定のまま |
+| `MIHARI_VOICEVOX_PRE_PHONEME` | `0.05` | 発話前の無音（秒、`prePhonemeLength`） |
+| `MIHARI_VOICEVOX_POST_PHONEME` | `0.05` | 発話後の無音（秒、`postPhonemeLength`） |
+| `MIHARI_VOICEVOX_PAUSE_LENGTH` | `0.9` | 句読点などの間の倍率（`pauseLengthScale`）。1.0 未満で間が詰まる |
 
 `bridge/.env` は `.gitignore` 済み。**API キーは絶対にコミットしない。**
 
 同じセリフの音声は合成結果を覚えておくので、2 回目以降は待たされずに鳴る。
+
+`audio_query` の既定値のままだと棒読みに聞こえるので、`synthesis` に渡す前に上表の調整値を
+載せている。**検知のセリフ（bridge）とペットのひとりごと（`Pet/PetVoice`）で同じ値を使う**ので、
+どちらの経路で喋っても声の印象は揃う。bridge 側は上の環境変数で変えられるが、
+ひとりごと側は定数（`Voice/VoicevoxQueryTuning.swift` の `standard`）なのでコードを直す。
 
 音を出す口はアプリで 1 つ（`Voice/SpeechPlayer`）だけで、検知のセリフとペットのひとりごと
 （クリック・待機・ドラッグ。bridge を通さず `Pet/PetVoice` が直接 VOICEVOX を叩く）が

@@ -15,6 +15,8 @@ struct PetSpeechBubbleView: View {
     static let buttonsHeight: CGFloat = 24
     /// セリフとボタン行のあいだの余白(pt)。
     static let buttonsSpacing: CGFloat = 6
+    /// はい/いいえ のボタン列に確保する幅(pt)。短い質問でもボタンが切れないようにする。
+    static let buttonsRowWidth: CGFloat = 120
 
     /// 文字を折り返す幅(pt)。
     private static let maxTextWidth: CGFloat = 240
@@ -34,9 +36,11 @@ struct PetSpeechBubbleView: View {
             attributes: [.font: textFont]
         )
         let textSize = CGSize(width: ceil(bounding.width), height: ceil(bounding.height))
+        // 短い質問だと文字幅よりボタン列のほうが広いので、広いほうを内容の幅とする。
+        let contentWidth = hasButtons ? max(textSize.width, Self.buttonsRowWidth) : textSize.width
         let buttonsHeight = hasButtons ? Self.buttonsSpacing + Self.buttonsHeight : 0
         return CGSize(
-            width: textSize.width + horizontalTextPadding * 2 + margin * 2,
+            width: contentWidth + horizontalTextPadding * 2 + margin * 2,
             height: textSize.height + buttonsHeight + verticalTextPadding * 2 + tailSize.height + margin * 2
         )
     }
@@ -76,6 +80,7 @@ struct PetSpeechBubbleView: View {
                     Button("いいえ") { onAnswer(false) }
                 }
                 .frame(height: Self.buttonsHeight)
+                .frame(minWidth: Self.buttonsRowWidth)
             }
         } else {
             label
