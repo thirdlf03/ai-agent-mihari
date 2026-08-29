@@ -1,13 +1,18 @@
 # progate-online-hackathon0829
 
-macOS アプリ(Swift)が Python 側の CLI をサブプロセス起動し、stdout の JSON を受け取って iOS デバイス情報を表示する。
+**Mihari** — サボりを検知して声で絡み、証拠を Discord に晒す macOS 常駐アプリ。
+全体像と設計の決定事項は [Issue #2 (Epic)](https://github.com/thirdlf03/progate-online-hackathon0829/issues/2) にまとめてある。
 
 ## 構成
 
 | ディレクトリ | 内容 |
 | --- | --- |
-| `app/` | SwiftUI 製 macOS アプリ(SwiftPM executable パッケージ、ターゲット `MacApp`) |
-| `bridge/` | pymobiledevice3 を使う CLI `device-bridge`(uv 管理) |
+| `desktop/` | アプリ本体 `Mihari`(SwiftUI / SwiftPM)。詳細は [desktop/README.md](desktop/README.md) |
+| `bridge/` | Python 側。`device-bridge` CLI と、アプリが常駐させる HTTP デーモン(uv 管理) |
+| `app/` | **参照用に凍結。** 旧 macOS アプリ(`MacApp`)。Wi-Fi 経由の lockdown 接続の実装を読むために残している |
+
+アプリは起動時に `bridge/` のデーモンを子プロセスとして立ち上げる。
+Swift → Python は `127.0.0.1` の REST、Python → Swift は SSE。
 
 ```
 app/Sources/MacApp/

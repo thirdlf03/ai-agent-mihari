@@ -16,7 +16,6 @@ public struct OnboardingView: View {
         ScrollView {
             content
         }
-        .frame(minWidth: 880, minHeight: 560)
         .task {
             model.refresh()
             await model.requestOnFirstLaunchIfNeeded()

@@ -2,7 +2,7 @@
 
 サボり監視ペットの macOS アプリ本体。SwiftUI / Swift 6 / Swift Package Manager 製。macOS 14+ が必要。
 
-現時点で入っているのは、`.app` バンドルの組み立てと権限オンボーディング画面まで（Issue #3）。
+現時点で入っているのは、`.app` バンドルの組み立てと権限オンボーディング画面（#3）、および Python 常駐デーモンの起動と接続（#4）まで。
 
 ## なぜ `swift run` ではなく `.app` を作るのか
 
@@ -58,6 +58,30 @@ swift test
   プロンプトは実際に命令を送った瞬間にしか出ないので、この画面からは要求できない。
 - **モーション**は AirPods が接続されていないとプロンプトが出ないため、初回のまとめ要求からは外してある。
 
+## デーモン
+
+Discord Bot・セリフ生成・iPhone の取得は `bridge/` の Python プロセスが受け持つ。
+アプリは起動時にこれを子プロセスとして立ち上げ、終了時に落とす。
+
+- Swift → Python: `127.0.0.1` へ REST
+- Python → Swift: SSE（`/events`）でイベントを push
+- 認証: 起動のたびにアプリが生成したトークンを `X-Mihari-Token` ヘッダで送る
+- ポート: `0` で起動して OS に空きを選ばせ、子プロセスが stdout に出す 1 行
+  `{"port": ..., "pid": ...}` でアプリが接続先を知る
+
+「デーモン」タブから起動 / 停止 / 再起動と、iPhone の探索、テストイベントの往復ができる。
+
+### ハマりどころ
+
+- **`URLSession.AsyncBytes.lines` は空行を捨てる。** SSE はフレームの区切りが空行なので、
+  これを使うと「接続は成功しているのにイベントが 1 件も届かない」という症状になる。
+  `LineAccumulator` で自前に行を切っている。
+- **SSE は専用の `URLSession` を使う。** 既定のセッションはキャッシュを挟むため、終わらない応答だと
+  バイトが手元まで降りてこない。また `timeoutInterval` に `.infinity` を入れると期限の計算が
+  壊れるので、長い有限値にする。
+- アプリが異常終了しても孤児のデーモンが残らないよう、Python 側は stdin の EOF を監視して
+  自分から終了する。
+
 ## 構成
 
 ```
@@ -70,6 +94,7 @@ desktop/
 ├── Sources/
 │   ├── Mihari/               # @main だけ。中身は MihariCore に置く
 │   └── MihariCore/
+│       ├── Daemon/           # Python 常駐プロセスの起動・REST・SSE
 │       ├── Permissions/
 │       └── Views/
 └── Tests/MihariCoreTests/

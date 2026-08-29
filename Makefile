@@ -4,7 +4,7 @@ help:
 	@echo "make setup         - bridge/ の Python 依存を同期する(初回セットアップ)"
 	@echo "make build         - Mihari.app をビルドして ad-hoc 署名する"
 	@echo "make run           - Mihari.app をビルドして起動する"
-	@echo "make test          - desktop/ のテストを実行する"
+	@echo "make test          - Swift / Python のテストを実行する"
 	@echo "make fmt           - Swift / Python のコードを整形する"
 	@echo "make lint          - Swift / Python のフォーマットと lint を検査する"
 	@echo "make clean         - ビルド成果物を削除する"
@@ -23,6 +23,7 @@ run:
 
 test:
 	cd desktop && swift test
+	cd bridge && uv run pytest -q
 
 fmt:
 	cd desktop && swift format --in-place --recursive Sources Tests
