@@ -1,7 +1,7 @@
 import Foundation
 
 /// ペットのセリフ集。種類ごとに候補を持ち、その中から 1 つを選んで喋らせる。
-struct PetSpeechLines: Codable {
+struct PetSpeechLines: Codable, Sendable {
     /// セリフの種類。`speech.json` のキー名と一致する。
     enum Kind: String, CaseIterable, CodingKey {
         /// クリックされたときの挨拶。

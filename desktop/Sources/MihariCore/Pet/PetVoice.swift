@@ -18,7 +18,7 @@ final class PetVoice {
     private static let retryInterval: TimeInterval = 30
 
     private static let logger = Logger(
-        subsystem: Bundle.main.bundleIdentifier ?? "MacApp",
+        subsystem: "com.thirdlf03.mihari",
         category: "PetVoice"
     )
 

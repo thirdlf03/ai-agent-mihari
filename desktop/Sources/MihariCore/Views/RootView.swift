@@ -12,7 +12,7 @@ public struct RootView: View {
     @StateObject private var attendance = AttendanceModel()
     @StateObject private var detection = DetectionEngine()
     @StateObject private var overlay = OverlayModel(presenter: ScreenSaverOverlayPresenter())
-    @StateObject private var pet = PlaceholderPetPresenter()
+    @StateObject private var pet = LivePetPresenter()
     @StateObject private var headGesture = HeadGestureController()
     @StateObject private var captureModel = CaptureViewModel()
     @StateObject private var visionModel = FaceVisionViewModel()
@@ -29,8 +29,6 @@ public struct RootView: View {
                 .tabItem { Label("セリフと声", systemImage: "waveform") }
             AttendanceView(model: attendance)
                 .tabItem { Label("在席", systemImage: "touchid") }
-            PetView(presenter: pet)
-                .tabItem { Label("ペット", systemImage: "pawprint") }
             HeadGestureView(controller: headGesture)
                 .tabItem { Label("首振り", systemImage: "airpodspro") }
             CaptureView(model: captureModel)

@@ -25,7 +25,11 @@ enum PetLibrary {
 
     /// アプリに同梱したペット(`Resources/pets/`)。
     private static func bundledPets() -> [PetDefinition] {
-        guard let root = Bundle.module.url(forResource: "pets", withExtension: nil) else { return [] }
+        guard let bundle = PetResourceBundle.locate(),
+            let root = bundle.url(forResource: "pets", withExtension: nil)
+        else {
+            return []
+        }
         return loadPets(inRoot: root)
     }
 

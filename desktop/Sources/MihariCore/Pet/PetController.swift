@@ -20,29 +20,38 @@ enum PetScale: CGFloat, CaseIterable, Identifiable {
 }
 
 /// デスクトップペットの表示状態とふるまいをまとめて管理する。
+///
+/// 検知エンジンからのイベントは `LivePetPresenter` が解釈し、ここへは
+/// 「このアニメーションに固定する」「1 回だけ再生する」「セリフを出す」という形で降りてくる。
 @Observable
 @MainActor
-final class PetController {
+public final class PetController {
     /// 選択できるペットの一覧。同梱ペットとユーザーのカスタムペットを含む。
-    private(set) var pets: [PetDefinition]
+    public private(set) var pets: [PetDefinition]
     /// いま表示しているペット。
-    private(set) var currentPet: PetDefinition?
+    public private(set) var currentPet: PetDefinition?
     /// いま表示すべきコマ。
     private(set) var currentFrame: CGImage?
     /// 再生中のアニメーション。
     private(set) var animation: PetAnimation = .idle
     /// ペットを画面に出しているか。
-    private(set) var isAwake: Bool
+    public private(set) var isAwake: Bool
     /// 表示倍率。セルサイズにこれを掛けたものがウィンドウの大きさになる。
-    private(set) var scale: CGFloat
-    /// 外部から与えられたステータス。nil のときは自律行動する。
-    private(set) var status: PetStatus?
+    public private(set) var scale: CGFloat
+    /// 外から固定されたアニメーション。nil のときは自律行動する。
+    private(set) var fixedAnimation: PetAnimation?
+    /// 静止しているか。監視停止中・休憩中は idle の 1 コマ目で止める。
+    private(set) var isFrozen = false
     /// いま吹き出しに出しているセリフ。非 nil のあいだ吹き出しを表示する。
-    private(set) var speechText: String?
+    public private(set) var speechText: String?
+    /// いま吹き出しに出している問いかけ。非 nil のあいだ はい/いいえ のボタンを出す。
+    public private(set) var promptQuestion: String?
     /// セリフを VOICEVOX で読み上げるか。
-    private(set) var isVoiceEnabled: Bool
+    public private(set) var isVoiceEnabled: Bool
     /// スプライトシートの読み込みに失敗したときの理由。
     private(set) var loadErrorMessage: String?
+    /// ペットを右クリックしたときに出すメニューの中身。アプリ側が `PetMenuContent` を差し込む。
+    public var contextMenuBuilder: (@MainActor () -> AnyView)?
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private var atlas: PetAtlas?
@@ -52,9 +61,10 @@ final class PetController {
     @ObservationIgnored private let voice = PetVoice()
     @ObservationIgnored private var speechTimer: Timer?
     /// いま喋っているあいだに来たセリフ。言い終わってから続けて言う。
-    @ObservationIgnored private var pendingSpeech: (text: String, duration: TimeInterval)?
+    @ObservationIgnored private var pendingSpeech: (text: String, duration: TimeInterval, voiced: Bool)?
     @ObservationIgnored private var lastSpeechAt: Date?
-    @ObservationIgnored private var lastSpokenStatus: PetStatus?
+    /// 問いかけの回答を受け取るコールバック。答えた時点で捨てて、二度は呼ばない。
+    @ObservationIgnored private var promptAnswer: ((Bool) -> Void)?
     @ObservationIgnored private var frameIndex = 0
     @ObservationIgnored private var frameTimer: Timer?
     @ObservationIgnored private var gesture: PetAnimation?
@@ -63,9 +73,8 @@ final class PetController {
     @ObservationIgnored private var isDragging = false
     @ObservationIgnored private var dragMotion: DragMotion = .still
     @ObservationIgnored private var lastDragMoveAt: Date?
-    @ObservationIgnored private var hasAppliedLaunchState = false
 
-    /// ステータス指定が無いときの自律行動。
+    /// 固定アニメーションが無いときの自律行動。
     private enum Autonomy {
         /// その場で待機している。
         case idle
@@ -123,7 +132,7 @@ final class PetController {
     /// ひとりごとを言うために空けておく、直前のセリフからの間隔(秒)。
     private static let idleSpeechInterval: TimeInterval = 20
 
-    init(defaults: UserDefaults = .standard) {
+    public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let pets = PetLibrary.availablePets()
         self.pets = pets
@@ -136,49 +145,31 @@ final class PetController {
 
     // MARK: - 表示
 
-    /// 起動時に一度だけ呼ぶ。前回しまわれていなければペットを出し直す。
-    func applyLaunchState() {
-        guard !hasAppliedLaunchState else { return }
-        hasAppliedLaunchState = true
-        guard isAwake else { return }
-        showWindow()
-    }
-
-    /// ペットを表示する。
-    func wake() {
-        guard !isAwake else { return }
+    /// ペットを画面に出す。しまわれていても出す。
+    public func reveal() {
+        let wasAwake = isAwake
         isAwake = true
         defaults.set(true, forKey: DefaultsKey.isAwake)
         showWindow()
-        say(.wake)
+        if !wasAwake { say(.wake) }
     }
 
-    /// ペットをしまう。
-    func tuckAway() {
+    /// ペットをしまう。見た目だけで、次にどう出すかは呼び出し側が決める。
+    public func conceal() {
         guard isAwake else { return }
         isAwake = false
-        defaults.set(false, forKey: DefaultsKey.isAwake)
         hideWindow()
     }
 
-    /// 表示・非表示を切り替える。
-    func toggle() {
-        if isAwake {
-            tuckAway()
-        } else {
-            wake()
-        }
-    }
-
     /// セリフを読み上げるかを切り替える。止めたときは再生中の音声もその場で止める。
-    func setVoiceEnabled(_ enabled: Bool) {
+    public func setVoiceEnabled(_ enabled: Bool) {
         isVoiceEnabled = enabled
         defaults.set(enabled, forKey: DefaultsKey.isVoiceEnabled)
         if !enabled { voice.stop() }
     }
 
     /// 表示するペットを切り替える。セリフもそのペットのものに読み替える。
-    func select(pet: PetDefinition) {
+    public func select(pet: PetDefinition) {
         guard pet.id != currentPet?.id else { return }
         currentPet = pet
         defaults.set(pet.id, forKey: DefaultsKey.petID)
@@ -189,7 +180,7 @@ final class PetController {
     }
 
     /// 表示倍率を変える。ウィンドウは左下を保ったまま拡縮する。
-    func setScale(_ newScale: CGFloat) {
+    public func setScale(_ newScale: CGFloat) {
         guard newScale != scale else { return }
         scale = newScale
         defaults.set(Double(newScale), forKey: DefaultsKey.scale)
@@ -204,36 +195,33 @@ final class PetController {
         speechWindow?.reposition(above: window)
     }
 
-    /// メインウィンドウを前面に出す。
-    func showMainWindow() {
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.windows.first { $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
+    // MARK: - 外から指示される動き
+
+    /// アニメーションを固定する。nil を渡すと自律行動に戻す。
+    public func setFixedAnimation(_ animation: PetAnimation?) {
+        guard animation != fixedAnimation else { return }
+        fixedAnimation = animation
+        gesture = nil
+        if animation == nil { beginIdle() }
+        restartAnimation()
     }
 
-    // MARK: - ステータス
-
-    /// 外部ステータスを設定する。`ready` は 1 周だけ再生してから自動で解除される。
-    func setStatus(_ newStatus: PetStatus) {
-        gesture = nil
-        // 同じステータスが続けて来たときは言い直さない。
-        if newStatus != lastSpokenStatus {
-            lastSpokenStatus = newStatus
-            say(newStatus.speechKind)
-        }
-        // アニメーションを止めている間は 1 周分を再生できないので、一度きりのステータスはその場で解除する。
-        status = (isReduceMotionEnabled && newStatus.isMomentary) ? nil : newStatus
-        if status == nil {
+    /// 静止させる。監視停止中・休憩中は idle の 1 コマ目で止めて自律行動もしない。
+    public func setFrozen(_ frozen: Bool) {
+        guard frozen != isFrozen else { return }
+        isFrozen = frozen
+        if frozen {
+            gesture = nil
+        } else if fixedAnimation == nil {
             beginIdle()
         }
         restartAnimation()
     }
 
-    /// 外部ステータスを解除し、自律行動に戻す。
-    func clearStatus() {
-        lastSpokenStatus = nil
-        guard status != nil else { return }
-        status = nil
-        beginIdle()
+    /// 一度きりのアニメーションを割り込ませる。1 周したら元の状態へ戻る。
+    public func playOnce(_ animation: PetAnimation) {
+        guard isAwake, !isMotionStopped else { return }
+        gesture = animation
         restartAnimation()
     }
 
@@ -256,7 +244,7 @@ final class PetController {
         dragMotion = .still
         lastDragMoveAt = nil
         gesture = nil
-        if status == nil {
+        if fixedAnimation == nil {
             beginIdle()
         }
         // 毎回だとうるさいので、たまにだけ声を出す。
@@ -309,13 +297,19 @@ final class PetController {
     // MARK: - セリフ
 
     /// 指定したセリフを吹き出しに出す。喋っている途中なら言い終わるまで待たせ、待っているあいだは最新の 1 つだけ残す。
-    func say(_ text: String, duration: TimeInterval = 3) {
+    ///
+    /// - Parameters:
+    ///   - duration: 吹き出しを出しておく時間。nil なら文字数から決める。
+    ///   - voiced: VOICEVOX で読み上げるか。検知エンジンのセリフは音声を別経路で鳴らすので false にする。
+    public func say(_ text: String, duration: TimeInterval? = nil, voiced: Bool = true) {
         let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard isAwake, !line.isEmpty, let window else { return }
+        let duration = duration ?? Self.speechDuration(for: line)
 
-        // 喋っている最中は割り込まず、言い終わってから続けて言う。
-        guard speechText == nil else {
-            pendingSpeech = (line, duration)
+        // 問いかけを出しているあいだは割り込まず、閉じてから言う。
+        // 喋っている最中も同じく、言い終わってから続けて言う。
+        guard promptQuestion == nil, speechText == nil else {
+            pendingSpeech = (line, duration, voiced)
             return
         }
 
@@ -328,8 +322,8 @@ final class PetController {
         panel.show(text: line, above: window, animated: !isReduceMotionEnabled)
         scheduleSpeechTimer(duration: duration)
 
-        // 読み上げを切っているあいだは吹き出しだけ出す。
-        guard isVoiceEnabled else { return }
+        // 読み上げを切っているあいだ、または音声を別経路で鳴らすときは吹き出しだけ出す。
+        guard isVoiceEnabled, voiced else { return }
 
         Task { [weak self] in
             guard let self else { return }
@@ -344,7 +338,46 @@ final class PetController {
     /// 種類に応じたセリフをランダムに 1 つ選んで言う。候補が無ければ何もしない。
     func say(_ kind: PetSpeechLines.Kind) {
         guard let line = speechLines.randomLine(for: kind) else { return }
-        say(line, duration: Self.speechDuration(for: line))
+        say(line)
+    }
+
+    /// はい/いいえ の問いかけを吹き出しに出す。時間では消さず、答えるか捨てるまで残す。
+    public func showPrompt(question: String, onAnswer: @escaping (Bool) -> Void) {
+        let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        promptQuestion = text
+        promptAnswer = onAnswer
+
+        // 出していたセリフは問いかけで置き換える。時間で消えないようタイマーも止める。
+        speechTimer?.invalidate()
+        speechTimer = nil
+        speechText = nil
+
+        guard isAwake, let window else { return }
+        let panel = speechWindow ?? PetSpeechWindow()
+        speechWindow = panel
+        panel.show(text: text, above: window, animated: !isReduceMotionEnabled) { [weak self] answer in
+            self?.answerPrompt(answer)
+        }
+    }
+
+    /// 問いかけを捨てて吹き出しを閉じる。`onAnswer` は呼ばない。
+    public func dismissPrompt() {
+        guard promptQuestion != nil else { return }
+        promptQuestion = nil
+        promptAnswer = nil
+        speechWindow?.hide(animated: !isReduceMotionEnabled)
+        speakPendingSpeech()
+    }
+
+    /// ボタンが押されたときの回答。コールバックは一度しか呼ばない。
+    private func answerPrompt(_ answer: Bool) {
+        guard let handler = promptAnswer else { return }
+        promptQuestion = nil
+        promptAnswer = nil
+        speechWindow?.hide(animated: !isReduceMotionEnabled)
+        handler(answer)
+        speakPendingSpeech()
     }
 
     /// 待機に入ったときのひとりごと。うるさくならないよう確率と間隔で絞る。
@@ -362,10 +395,14 @@ final class PetController {
         guard speechText != nil else { return }
         speechText = nil
         speechWindow?.hide(animated: !isReduceMotionEnabled)
+        speakPendingSpeech()
+    }
 
+    /// 待たせているセリフがあれば言う。
+    private func speakPendingSpeech() {
         guard isAwake, let next = pendingSpeech else { return }
         pendingSpeech = nil
-        say(next.text, duration: next.duration)
+        say(next.text, duration: next.duration, voiced: next.voiced)
     }
 
     /// 表示時間が過ぎたら吹き出しを消すタイマーを張り直す。
@@ -407,8 +444,21 @@ final class PetController {
         panel.orderFrontRegardless()
 
         gesture = nil
-        beginIdle()
+        if fixedAnimation == nil { beginIdle() }
         restartAnimation()
+
+        // しまっているあいだに来ていた問いかけは、出し直したときに改めて出す。
+        if let promptQuestion {
+            let speechPanel = speechWindow ?? PetSpeechWindow()
+            speechWindow = speechPanel
+            speechPanel.show(
+                text: promptQuestion,
+                above: panel,
+                animated: !isReduceMotionEnabled
+            ) { [weak self] answer in
+                self?.answerPrompt(answer)
+            }
+        }
     }
 
     private func hideWindow() {
@@ -496,11 +546,16 @@ final class PetController {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
-    /// いま再生すべきアニメーション。ドラッグ中 > クリック操作 > 外部ステータス > 自律行動 の順に優先する。
+    /// コマ送りを止めているか。「視差効果を減らす」設定と、監視停止・休憩中の静止を同じ扱いにする。
+    private var isMotionStopped: Bool {
+        isReduceMotionEnabled || isFrozen
+    }
+
+    /// いま再生すべきアニメーション。ドラッグ中 > クリック操作 > 固定 > 自律行動 の順に優先する。
     private var intendedAnimation: PetAnimation {
         if isDragging { return draggingAnimation }
         if let gesture { return gesture }
-        if let status { return status.animation }
+        if let fixedAnimation { return fixedAnimation }
         switch autonomy {
         case .idle: return .idle
         case .walking(let towardRight, _): return towardRight ? .runningRight : .runningLeft
@@ -529,13 +584,6 @@ final class PetController {
         scheduleFrameTimer()
     }
 
-    /// 一度きりのアニメーションを割り込ませる。1 周したら元の状態へ戻る。
-    private func playOnce(_ animation: PetAnimation) {
-        guard isAwake, !isReduceMotionEnabled else { return }
-        gesture = animation
-        restartAnimation()
-    }
-
     /// 望ましいアニメーションをコマ 0 から再生し直す。
     private func restartAnimation() {
         animation = intendedAnimation
@@ -557,14 +605,14 @@ final class PetController {
             currentFrame = nil
             return
         }
-        currentFrame = isReduceMotionEnabled ? atlas.frame(.idle, at: 0) : atlas.frame(animation, at: frameIndex)
+        currentFrame = isMotionStopped ? atlas.frame(.idle, at: 0) : atlas.frame(animation, at: frameIndex)
     }
 
     /// いま表示しているコマの表示時間が過ぎたら `tick` を呼ぶタイマーを張り直す。
     private func scheduleFrameTimer() {
         frameTimer?.invalidate()
         frameTimer = nil
-        guard isAwake, !isReduceMotionEnabled else { return }
+        guard isAwake, !isMotionStopped else { return }
 
         let duration = animation.frameDurations[min(frameIndex, animation.frameCount - 1)]
         let timer = Timer(timeInterval: duration, repeats: false) { [weak self] _ in
@@ -595,7 +643,7 @@ final class PetController {
 
     /// 経過時間ぶんだけ自律行動を進める。
     private func advanceAutonomy(elapsed: TimeInterval) {
-        guard gesture == nil, status == nil, !isDragging else { return }
+        guard gesture == nil, fixedAnimation == nil, !isDragging, !isFrozen else { return }
         switch autonomy {
         case .idle:
             if let idleDeadline, Date() >= idleDeadline {
@@ -612,11 +660,6 @@ final class PetController {
     private func finishAnimationLoop() {
         if gesture != nil {
             gesture = nil
-            return
-        }
-        if let status, status.isMomentary {
-            self.status = nil
-            beginIdle()
             return
         }
         if case .reviewing = autonomy {

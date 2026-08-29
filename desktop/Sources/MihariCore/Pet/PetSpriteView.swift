@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// ペットのコマ画像を表示し、ドラッグ・クリック・右クリックメニューを受け付けるビュー。
-struct PetView: View {
+struct PetSpriteView: View {
     @Environment(PetController.self) private var pet
 
     /// ドラッグ開始時点の、マウス位置からウィンドウ原点までのずれ(スクリーン座標)。
@@ -81,74 +81,11 @@ struct PetView: View {
         }
     }
 
+    /// 右クリックメニュー。中身はアプリ側が `PetController.contextMenuBuilder` に差し込む。
     @ViewBuilder
     private var contextMenuItems: some View {
-        Button("しゃべる") {
-            pet.say(.greeting)
+        if let builder = pet.contextMenuBuilder {
+            builder()
         }
-        PetVoiceToggle(pet: pet)
-        Button("しまう") {
-            pet.tuckAway()
-        }
-        Divider()
-        PetChoiceMenus(pet: pet)
-        Divider()
-        Button("アプリを表示") {
-            pet.showMainWindow()
-        }
-    }
-}
-
-/// ペットの切り替えとサイズ変更のサブメニュー。メインメニューと右クリックメニューで共有する。
-struct PetChoiceMenus: View {
-    let pet: PetController
-
-    var body: some View {
-        Menu("ペット") {
-            ForEach(pet.pets) { candidate in
-                Toggle(candidate.displayName, isOn: petBinding(for: candidate))
-            }
-        }
-        Menu("サイズ") {
-            ForEach(PetScale.allCases) { item in
-                Toggle(item.label, isOn: scaleBinding(for: item))
-            }
-        }
-    }
-
-    private func petBinding(for candidate: PetDefinition) -> Binding<Bool> {
-        Binding(
-            get: { pet.currentPet?.id == candidate.id },
-            set: { isOn in
-                guard isOn else { return }
-                pet.select(pet: candidate)
-            }
-        )
-    }
-
-    private func scaleBinding(for item: PetScale) -> Binding<Bool> {
-        Binding(
-            get: { pet.scale == item.rawValue },
-            set: { isOn in
-                guard isOn else { return }
-                pet.setScale(item.rawValue)
-            }
-        )
-    }
-}
-
-/// セリフの読み上げを切り替えるトグル。メインメニューと右クリックメニューで共有する。
-struct PetVoiceToggle: View {
-    let pet: PetController
-
-    var body: some View {
-        Toggle("声を出す", isOn: voiceBinding)
-    }
-
-    private var voiceBinding: Binding<Bool> {
-        Binding(
-            get: { pet.isVoiceEnabled },
-            set: { pet.setVoiceEnabled($0) }
-        )
     }
 }

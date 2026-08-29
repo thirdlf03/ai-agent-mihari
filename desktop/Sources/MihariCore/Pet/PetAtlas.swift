@@ -22,7 +22,7 @@ enum PetSpriteGrid {
 }
 
 /// スプライトシートの 1 行に対応するアニメーション。いずれも末尾まで進んだら先頭へ戻ってループする。
-enum PetAnimation: String, CaseIterable {
+public enum PetAnimation: String, CaseIterable, Sendable {
     /// 待機。
     case idle
     /// 右へ歩く。
