@@ -38,6 +38,8 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
 
     /// 音を出す口。検知のセリフとペットのひとりごとで 1 つを共有する。
     private let speechPlayer: SpeechPlayer
+    /// アプリの外(Claude Code のフックなど)からの合図の受け口。
+    private let externalTrigger = ExternalTriggerListener()
     private let windows = AuxiliaryWindows()
     private let statusPanel = StatusPanelController()
     private var cancellables: Set<AnyCancellable> = []
@@ -90,6 +92,13 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         statusPanel.restore { statusPanelView }
         observeDetection()
         observeDaemonEvents()
+
+        // Claude Code の Stop フック(notifyutil -p)からの「応答を終えた」合図。
+        externalTrigger.listen(name: ExternalTriggerListener.claudeDoneName) { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.pet.controller.say("終わったよー")
+            }
+        }
 
         Task { [weak self] in
             guard let self else { return }
