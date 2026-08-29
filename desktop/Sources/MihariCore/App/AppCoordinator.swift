@@ -83,8 +83,8 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
 
         // 右クリックメニューはウィンドウを作る前に差し込む。
         pet.controller.contextMenuBuilder = { [weak self] in
-            guard let self else { return AnyView(EmptyView()) }
-            return AnyView(PetMenuContent(actions: self, pet: pet.controller))
+            guard let self else { return NSMenu() }
+            return PetContextMenu.makeMenu(PetMenuEntries.make(actions: self, pet: pet.controller))
         }
         pet.show()
         statusPanel.restore { statusPanelView }

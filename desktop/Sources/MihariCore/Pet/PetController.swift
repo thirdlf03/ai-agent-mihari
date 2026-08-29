@@ -50,8 +50,8 @@ public final class PetController {
     public private(set) var isVoiceEnabled: Bool
     /// スプライトシートの読み込みに失敗したときの理由。
     private(set) var loadErrorMessage: String?
-    /// ペットを右クリックしたときに出すメニューの中身。アプリ側が `PetMenuContent` を差し込む。
-    public var contextMenuBuilder: (@MainActor () -> AnyView)?
+    /// ペットを右クリックしたときに出すメニュー。アプリ側が `PetContextMenu` で組み立てて差し込む。
+    public var contextMenuBuilder: (@MainActor () -> NSMenu)?
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private var atlas: PetAtlas?

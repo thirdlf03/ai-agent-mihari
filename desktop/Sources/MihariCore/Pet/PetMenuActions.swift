@@ -2,7 +2,7 @@ import Foundation
 
 /// ペットのメニューから呼ぶアプリ全体の操作。
 ///
-/// メニュー（`PetMenuContent`）はこの protocol と `PetController` だけを知っていればよく、
+/// メニュー（`PetMenuEntries`）はこの protocol と `PetController` だけを知っていればよく、
 /// 監視・在席・休憩・設定画面の実体を知らなくてよい。アプリ側の取りまとめ役が適合する。
 @MainActor
 public protocol PetMenuActions: AnyObject, ObservableObject {

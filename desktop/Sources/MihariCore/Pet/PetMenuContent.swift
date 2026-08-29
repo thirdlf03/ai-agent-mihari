@@ -1,9 +1,9 @@
 import SwiftUI
 
-/// ペットの右クリックメニューと、メニューバーの「ペット」メニューで共有する中身。
+/// メニューバーの「ペット」メニューの中身。
 ///
-/// 上半分（監視・在席・休憩・設定）はアプリ側の `PetMenuActions` を呼び、
-/// 下半分（しゃべる・しまう・見た目）は `PetController` を直接操作する。
+/// 並びは `PetMenuEntries` が 1 か所で決める。ここはそれを SwiftUI のメニュー項目として描くだけで、
+/// 右クリックメニューは同じ並びから `PetContextMenu` が `NSMenu` を作る。
 public struct PetMenuContent<Actions: PetMenuActions>: View {
     @ObservedObject public var actions: Actions
     public let pet: PetController
@@ -14,91 +14,27 @@ public struct PetMenuContent<Actions: PetMenuActions>: View {
     }
 
     public var body: some View {
-        Button(actions.isWatching ? "監視を止める" : "監視を再開する") {
-            if actions.isWatching {
-                actions.stopWatching()
-            } else {
-                actions.startWatching()
-            }
-        }
-        Button("在席スタンプを押す") {
-            actions.stampAttendance()
-        }
-        Button(actions.isOnBreak ? "休憩を終える" : "休憩する(15 分)") {
-            if actions.isOnBreak {
-                actions.endBreak()
-            } else {
-                actions.startBreak()
-            }
-        }
-
-        Divider()
-
-        Button("Discord 設定…") {
-            actions.openDiscordSettings()
-        }
-        Button("権限の確認…") {
-            actions.openPermissions()
-        }
-
-        Divider()
-
-        Button("しゃべる") {
-            pet.say(.greeting)
-        }
-        Button(pet.isAwake ? "しまう" : "起こす") {
-            if pet.isAwake {
-                pet.conceal()
-            } else {
-                pet.reveal()
-            }
-        }
-        .keyboardShortcut("p", modifiers: [.command, .shift])
-        Menu("ペット") {
-            ForEach(pet.pets) { candidate in
-                Toggle(candidate.displayName, isOn: petBinding(for: candidate))
-            }
-        }
-        Menu("サイズ") {
-            ForEach(PetScale.allCases) { item in
-                Toggle(item.label, isOn: scaleBinding(for: item))
-            }
-        }
-        Toggle("声を出す", isOn: voiceBinding)
-        Toggle("状態パネルを表示", isOn: statusPanelBinding)
+        PetMenuEntryList(entries: PetMenuEntries.make(actions: actions, pet: pet))
     }
+}
 
-    private func petBinding(for candidate: PetDefinition) -> Binding<Bool> {
-        Binding(
-            get: { pet.currentPet?.id == candidate.id },
-            set: { isOn in
-                guard isOn else { return }
-                pet.select(pet: candidate)
+/// `PetMenuEntry` の並びをメニュー項目として描く。サブメニューのために自分を入れ子にする。
+private struct PetMenuEntryList: View {
+    let entries: [PetMenuEntry]
+
+    var body: some View {
+        ForEach(Array(entries.enumerated()), id: \.offset) { _, entry in
+            switch entry {
+            case .item(let title, let isChecked, let action):
+                // チェックの有無をそのまま出すため、押されたら `action` を呼ぶだけの Toggle にする。
+                Toggle(title, isOn: Binding(get: { isChecked }, set: { _ in action() }))
+            case .submenu(let title, let entries):
+                Menu(title) {
+                    PetMenuEntryList(entries: entries)
+                }
+            case .separator:
+                Divider()
             }
-        )
-    }
-
-    private func scaleBinding(for item: PetScale) -> Binding<Bool> {
-        Binding(
-            get: { pet.scale == item.rawValue },
-            set: { isOn in
-                guard isOn else { return }
-                pet.setScale(item.rawValue)
-            }
-        )
-    }
-
-    private var voiceBinding: Binding<Bool> {
-        Binding(
-            get: { pet.isVoiceEnabled },
-            set: { pet.setVoiceEnabled($0) }
-        )
-    }
-
-    private var statusPanelBinding: Binding<Bool> {
-        Binding(
-            get: { actions.isStatusPanelVisible },
-            set: { _ in actions.toggleStatusPanel() }
-        )
+        }
     }
 }

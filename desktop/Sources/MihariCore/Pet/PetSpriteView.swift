@@ -1,7 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// ペットのコマ画像を表示し、ドラッグ・クリック・右クリックメニューを受け付けるビュー。
+/// ペットのコマ画像を表示し、ドラッグとクリックを受け付けるビュー。
+///
+/// 右クリックメニューは、コマ送りの再描画で閉じてしまわないよう `PetWindow` が `NSMenu` で出す。
 struct PetSpriteView: View {
     @Environment(PetController.self) private var pet
 
@@ -20,7 +22,6 @@ struct PetSpriteView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
             .gesture(dragGesture)
-            .contextMenu { contextMenuItems }
             .help(pet.currentPet?.displayName ?? "ペット")
     }
 
@@ -78,14 +79,6 @@ struct PetSpriteView: View {
             guard !Task.isCancelled else { return }
             pendingClick = nil
             pet.wave()
-        }
-    }
-
-    /// 右クリックメニュー。中身はアプリ側が `PetController.contextMenuBuilder` に差し込む。
-    @ViewBuilder
-    private var contextMenuItems: some View {
-        if let builder = pet.contextMenuBuilder {
-            builder()
         }
     }
 }
