@@ -9,7 +9,14 @@ from fastapi import FastAPI
 
 from device_bridge.daemon.config import DaemonConfig
 from device_bridge.daemon.events import EventBus
-from device_bridge.daemon.routers import devices, discord, events, health, voice
+from device_bridge.daemon.routers import (
+    devices,
+    discord,
+    events,
+    health,
+    iphone_state,
+    voice,
+)
 from device_bridge.discord_bot.bot import DiscordService
 from device_bridge.discord_bot.scheduler import WatchScheduler
 from device_bridge.voice.generator import LineGenerator
@@ -52,4 +59,5 @@ def create_app(config: DaemonConfig) -> FastAPI:
     app.include_router(events.router)
     app.include_router(voice.router)
     app.include_router(discord.router)
+    app.include_router(iphone_state.router)
     return app
