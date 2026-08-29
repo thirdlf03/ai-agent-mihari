@@ -2,7 +2,7 @@
 
 help:
 	@echo "make setup         - bridge/ の Python 依存を同期する(初回セットアップ)"
-	@echo "make build         - Mihari.app をビルドして ad-hoc 署名する"
+	@echo "make build         - Mihari.app をビルドして署名する(証明書があれば使う。desktop/README.md 参照)"
 	@echo "make run           - Mihari.app をビルドして起動する"
 	@echo "make test          - Swift / Python のテストを実行する"
 	@echo "                     (test-swift / test-python で片側だけ実行できる)"

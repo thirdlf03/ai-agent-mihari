@@ -10,14 +10,15 @@
 TCC（カメラ / マイク / 画面収録 / 入力監視 / モーション）のプロンプトを正しく出すには、
 用途文字列を持つ `Info.plist` 入りの**署名済み `.app` バンドル**である必要がある。
 `swift build` の生成物をそのまま実行してもプロンプトは出ず、権限は黙って失敗する。
-`build.sh` はビルド生成物を `Mihari.app` に組み立て、`Resources/Mihari.entitlements` を付けて ad-hoc 署名する。
+`build.sh` はビルド生成物を `Mihari.app` に組み立て、`Resources/Mihari.entitlements` を付けて署名する
+（証明書があればそれを使い、無ければ ad-hoc。「[署名について](#署名について)」を参照）。
 
 ## ビルド / 実行
 
 リポジトリルートから:
 
 ```sh
-make build   # Mihari.app をビルドして ad-hoc 署名する
+make build   # Mihari.app をビルドして署名する
 make run     # Mihari.app をビルドして起動する
 make test    # Swift / Python のテストを実行する
 make lint    # Swift / Python のフォーマットと lint を検査する
@@ -26,7 +27,7 @@ make lint    # Swift / Python のフォーマットと lint を検査する
 `desktop/` で直接叩く場合:
 
 ```sh
-./build.sh   # swift build -c release → .app 組み立て → ad-hoc 署名 → 署名の検証
+./build.sh   # swift build -c release → .app 組み立て → 署名 → 署名の検証
 ./run.sh     # build.sh を実行してから open ./Mihari.app
 swift test
 ```
@@ -61,6 +62,8 @@ swift test
 
 - **ad-hoc 署名は再ビルドのたびに署名が変わりうるため、一度許可した権限が再ビルド後に忘れられる。**
   画面の「まとめて許可を求める」を押し直すか、システム設定から一度削除して登録し直す。
+  **Apple Development 証明書で署名していればこれは起きない**（TCC の照合が cdhash ではなく
+  Team ID を含む要件になるため）。作り方は「[署名について](#署名について)」を参照。
 - **画面収録**は事前照会の API が `CGPreflightScreenCaptureAccess` しかなく、未決定と拒否済みを区別できない。
   false のときは赤ではなく灰色（未決定）で出る。また `CGRequestScreenCaptureAccess` のプロンプトは初回だけで、
   2 回目以降はシステム設定から許可してアプリを再起動する必要がある。
@@ -200,8 +203,49 @@ desktop/
 
 ## 署名について
 
-`codesign --sign -` による ad-hoc 署名で、ローカル実機検証専用。
-Developer ID による署名・公証はしておらず、配布は想定していない。
+ローカル実機検証専用。Developer ID による署名・公証はしておらず、配布は想定していない。
+`build.sh` は次の順で署名に使う identity を決め、どれを使ったかを必ず 1 行出力する。
+
+1. 環境変数 `CODESIGN_IDENTITY` が設定されていればそれを使う（`security find-identity -v -p codesigning`
+   に出る 40 桁のハッシュでも `Apple Development: ...` の名前でもよい）。
+   その identity が見つからない場合は **ad-hoc に落ちずに codesign のエラーで止まる**
+2. 未設定なら、キーチェーンにある最初の **Apple Development 証明書**を自動検出して使う
+   （同名の証明書が複数あっても一意に決まるよう、名前ではなく SHA-1 ハッシュを渡している）
+3. どちらも無ければ従来どおり **ad-hoc**（`codesign --sign -`）で署名し、stderr に警告を 1 行出す
+
+Hardened Runtime（`--options runtime`）は付けていない。付けるとカメラ / マイクに
+`com.apple.security.device.*` の entitlements が別途必要になるため。
+
+### なぜ証明書で署名したいのか
+
+TCC はアプリの同一性を、証明書署名なら **Team ID を含む designated requirement** で、
+ad-hoc なら **cdhash** で照合する。cdhash はコードが変われば変わるので、**ad-hoc だと再ビルドの
+たびに別のアプリと見なされ、一度許可したカメラ / マイク / 入力監視が無効になる。**
+システム設定の一覧では ON のままなのに実際のチェックだけが拒否される、という分かりにくい壊れ方をする。
+`build.sh` の最後に出る `designated => ...` の行が、いまどちらで照合されているかを示している。
+
+### Apple Development 証明書の作り方（無料の Apple ID でよい）
+
+有料の Developer Program は要らない。
+
+1. Xcode > Settings… > Accounts で Apple ID を追加する
+2. 追加した Apple ID を選んで **Manage Certificates…**
+3. 左下の **＋** > **Apple Development**
+4. `security find-identity -v -p codesigning` に出れば準備完了。
+   以降は `make build` するだけで自動的にこの証明書が使われる
+
+### ad-hoc から証明書署名に切り替えた直後
+
+**TCC から見ると別のアプリになるので、ad-hoc 時代の許可の記録が残っていると噛み合わない。**
+一度リセットしてから取り直す。
+
+```sh
+tccutil reset All com.thirdlf03.mihari
+make build
+make run   # 「権限の確認」ウィンドウが出るので、まとめて許可し直す
+```
+
+画面収録だけは、システム設定で許可したあとにアプリを再起動しないと反映されない。
 
 ## 撮影(カメラ / スクリーンショット)
 
@@ -640,6 +684,16 @@ confirmed: 7秒 前に証拠を取ったばかり → 声をかけた
 
 **Discord が失敗しても検知が止まらない**ことと、**クールダウンが効いて撮り直さない**ことが
 この 1 回で確かめられる。
+
+メニューバーの「ペット > 状態パネルを表示」(ペットの右クリックメニューにもある)で、いま何を見て
+どう判断しているかをデスクトップの小さなパネルに出せる。`MIHARI_DEBUG_UI=1` を付けて起動したときは
+保存値によらず最初から出る。行は上から順に、状態と段階(丸の色は 正常 = 緑 / 疑い = 橙 / 確定 = 赤 /
+停止・休憩 = 灰)と 監視中 / 休憩中(残り) / 停止中、Mac の無操作秒数と確定までのバー(右は実際の閾値で、
+`MIHARI_FAST_THRESHOLDS=1` なら縮んだ値がそのまま出る)、視線と目の開き(カメラを開ける秒数に届いて
+いなければ「不明(カメラ閉)」)、iPhone、音楽、前面アプリ、在席スタンプからの経過(猶予中かどうか)と
+次に撮れるまでのクールダウン、最後の判断の根拠 → 結果とその時刻、デーモンの接続状態とポート。
+まだ一度も評価していない行は「—」になる。パネルはドラッグで動かせて、置いた場所と表示の有無は
+次の起動にも引き継ぐ。
 
 ### 判断の記録
 
