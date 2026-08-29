@@ -152,3 +152,47 @@ Swift ──POST /voice/speak（状況）──▶ Python
 
 `bridge/src/device_bridge/voice/generator.py` の `SYSTEM_PROMPT` を書き換える。
 固定文言は `bridge/src/device_bridge/voice/fallback.py`。
+
+## 説教オーバーレイ
+
+サボりが確定したときに、音楽を止めて全画面オーバーレイを出し、説教を最後まで聞かせる機能。
+`Sources/MihariCore/Overlay/` と `Views/OverlayView.swift` に実装している。
+
+**最優先の要件は「解除されないと Mac が操作不能になる」を絶対に起こさないこと。**
+そのため `OverlayModel.show()` は、音楽停止やセリフ取得より先に上限秒数のタイマーを仕込む。
+以降の処理がどれだけ失敗・停滞しても、このタイマーだけは動き続けて必ず解除する。
+
+| 解除の経路 | 条件 |
+| --- | --- |
+| 読み上げ完了(推定) | セリフの文字数から見積もった時間が経過 |
+| 上限秒数 | `maxDurationSeconds`(既定 90 秒)が経過。最後の安全策 |
+| 緊急解除 | Esc キー |
+| 手動 | 画面の「いますぐ解除」ボタン |
+
+```
+OverlayModel.show()
+  ├─ 1. 上限秒数タイマーを仕込む(他の何より先)
+  ├─ 2. 音楽を止める(AppleScript → 失敗したらメディアキーにフォールバック。例外は投げない)
+  ├─ 3. セリフを取得する(VoiceController.speak。失敗・例外は固定文言に倒す)
+  ├─ 4. 全画面オーバーレイを表示し、読み上げ完了推定タイマーを仕込む
+  └─ dismiss(reason:) はどの経路からも呼べて、2 回目以降は何もしない(冪等)
+```
+
+`VoiceController.isSpeaking` は再生開始時に `true` になったきり、自然終了では `false` に戻らない
+(`stopSpeaking()` を呼んだときだけ戻る)ため、実際の読み上げ完了をそこから検知することはできない。
+代わりにセリフの文字数から所要時間を見積もり、それを「読み上げ完了」とみなしている。
+見積もりが外れて長引いても、上限秒数のタイマーが必ず先に効く。
+
+`NSWindow` の生成と `NSApplication.presentationOptions` の変更は `OverlayWindowPresenting`
+プロトコルの裏に隠してあり、テストではスタブに差し替えて実際の全画面表示を発生させない。
+`presentationOptions` は無効な組み合わせを代入すると Swift では catch できない ObjC 例外で
+アプリごと落ちるため、選択式 UI は持たず `OverlayPresentationPolicy.sermonOptions`
+(`hideDock` + `hideMenuBar` + `disableProcessSwitching`)という検証済みの固定値だけを使う。
+`disableForceQuit` はあえて含めていない。自動解除も Esc もすべて壊れた最悪のケースでも、
+Cmd+Option+Esc の強制終了でユーザーが自力で抜け出せる経路を残すため。
+
+音楽の停止は Music / Spotify に `player state` を聞いて再生中のものを探し、`pause` を送る。
+`pause` コマンド自体が失敗した(オートメーション権限が無いなど)場合に限り、メディアキー
+(`NX_KEYTYPE_PLAY` の `CGEvent`)にフォールバックする。メディアキーは再生/一時停止のトグルなので、
+「何も再生していない」または「状態そのものが分からない」ときには送らない。誤って再生を
+始めてしまうリスクを避けるため。
