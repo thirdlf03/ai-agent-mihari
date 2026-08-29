@@ -75,7 +75,8 @@ extension SelfTest {
 
     /// 最初のフレームが解析されるまで待つ。時間内に来なければ `false`。
     private static func waitForFirstFrame(
-        _ monitor: GazeMonitor, timeoutSeconds: TimeInterval
+        _ monitor: GazeMonitor,
+        timeoutSeconds: TimeInterval
     ) async -> Bool {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         while Date() < deadline {
@@ -93,7 +94,9 @@ extension SelfTest {
     /// 指定秒数のあいだ、新しいフレームが来るたびに記録する。
     /// `discardFirstSeconds` のあいだのフレームは、動作の途中とみなして捨てる。
     private static func collect(
-        from monitor: GazeMonitor, seconds: TimeInterval, discardFirstSeconds: TimeInterval = 0
+        from monitor: GazeMonitor,
+        seconds: TimeInterval,
+        discardFirstSeconds: TimeInterval = 0
     ) async -> [GazeSample] {
         var collected: [GazeSample] = []
         var lastSeen: Date?
@@ -113,7 +116,8 @@ extension SelfTest {
                     noseOffset: observation.noseOffset,
                     noseDrop: observation.noseDrop,
                     yaw: observation.yawRadians
-                ))
+                )
+            )
         }
         return collected
     }
@@ -164,7 +168,10 @@ extension SelfTest {
                 lines.append(
                     String(
                         format: "  %@ → 顔検出率 %.0f%% に落ちる。現行の「顔なし=見ていない」で拾える",
-                        phase.rawValue, faceRate * 100))
+                        phase.rawValue,
+                        faceRate * 100
+                    )
+                )
                 continue
             }
 
@@ -198,7 +205,10 @@ extension SelfTest {
                     separable.append(
                         String(
                             format: "鼻の縦の乖離(基準 %.3f から %.3f 以上ずれたら)",
-                            baseline, (awayLow + lookHigh) / 2))
+                            baseline,
+                            (awayLow + lookHigh) / 2
+                        )
+                    )
                 }
             }
 
@@ -233,6 +243,9 @@ extension SelfTest {
         let sorted = values.sorted()
         return String(
             format: "min %.3f / 中央 %.3f / max %.3f",
-            sorted[0], sorted[sorted.count / 2], sorted[sorted.count - 1])
+            sorted[0],
+            sorted[sorted.count / 2],
+            sorted[sorted.count - 1]
+        )
     }
 }

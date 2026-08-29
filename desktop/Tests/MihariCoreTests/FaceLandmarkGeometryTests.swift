@@ -65,7 +65,8 @@ struct NoseOffsetTests {
     func frontFaceIsZero() throws {
         let nose: [CGPoint] = [CGPoint(x: 50, y: 88), CGPoint(x: 50, y: 92)]
         let offset = try #require(
-            FaceLandmarkGeometry.noseOffset(leftEye: leftEye, rightEye: rightEye, nose: nose))
+            FaceLandmarkGeometry.noseOffset(leftEye: leftEye, rightEye: rightEye, nose: nose)
+        )
         #expect(abs(offset) < 0.0001)
     }
 
@@ -74,7 +75,8 @@ struct NoseOffsetTests {
         // 鼻の重心 x=55。両目の中心 50 から右へ 5、目間距離 20 → 0.25。
         let nose: [CGPoint] = [CGPoint(x: 55, y: 88), CGPoint(x: 55, y: 92)]
         let offset = try #require(
-            FaceLandmarkGeometry.noseOffset(leftEye: leftEye, rightEye: rightEye, nose: nose))
+            FaceLandmarkGeometry.noseOffset(leftEye: leftEye, rightEye: rightEye, nose: nose)
+        )
         #expect(abs(offset - 0.25) < 0.0001)
     }
 
@@ -82,7 +84,8 @@ struct NoseOffsetTests {
     func shiftTowardLeftEyeIsNegative() throws {
         let nose: [CGPoint] = [CGPoint(x: 45, y: 88), CGPoint(x: 45, y: 92)]
         let offset = try #require(
-            FaceLandmarkGeometry.noseOffset(leftEye: leftEye, rightEye: rightEye, nose: nose))
+            FaceLandmarkGeometry.noseOffset(leftEye: leftEye, rightEye: rightEye, nose: nose)
+        )
         #expect(abs(offset - (-0.25)) < 0.0001)
     }
 
@@ -95,7 +98,8 @@ struct NoseOffsetTests {
                 leftEye: leftEye.map(rotate),
                 rightEye: rightEye.map(rotate),
                 nose: [CGPoint(x: 55, y: 88), CGPoint(x: 55, y: 92)].map(rotate)
-            ))
+            )
+        )
         #expect(abs(offset - 0.25) < 0.0001)
     }
 
@@ -103,10 +107,18 @@ struct NoseOffsetTests {
     func emptyRegionReturnsNil() {
         #expect(
             FaceLandmarkGeometry.noseOffset(
-                leftEye: [], rightEye: rightEye, nose: [CGPoint(x: 50, y: 90)]) == nil)
+                leftEye: [],
+                rightEye: rightEye,
+                nose: [CGPoint(x: 50, y: 90)]
+            ) == nil
+        )
         #expect(
             FaceLandmarkGeometry.noseOffset(
-                leftEye: leftEye, rightEye: rightEye, nose: []) == nil)
+                leftEye: leftEye,
+                rightEye: rightEye,
+                nose: []
+            ) == nil
+        )
     }
 
     @Test("両目の中心が同じ点なら nil(ゼロ除算を避ける)")
@@ -114,7 +126,11 @@ struct NoseOffsetTests {
         let eye: [CGPoint] = [CGPoint(x: 50, y: 100)]
         #expect(
             FaceLandmarkGeometry.noseOffset(
-                leftEye: eye, rightEye: eye, nose: [CGPoint(x: 50, y: 90)]) == nil)
+                leftEye: eye,
+                rightEye: eye,
+                nose: [CGPoint(x: 50, y: 90)]
+            ) == nil
+        )
     }
 }
 
@@ -136,7 +152,8 @@ struct NoseDropTests {
         // 鼻の重心は目の線から 10 下(y=90)。目間距離 20 → -0.5。
         let nose: [CGPoint] = [CGPoint(x: 50, y: 88), CGPoint(x: 50, y: 92)]
         let drop = try #require(
-            FaceLandmarkGeometry.noseDrop(leftEye: leftEye, rightEye: rightEye, nose: nose))
+            FaceLandmarkGeometry.noseDrop(leftEye: leftEye, rightEye: rightEye, nose: nose)
+        )
         #expect(abs(drop - (-0.5)) < 0.0001)
     }
 
@@ -148,7 +165,8 @@ struct NoseDropTests {
                 leftEye: leftEye.map(rotate),
                 rightEye: rightEye.map(rotate),
                 nose: [CGPoint(x: 50, y: 88), CGPoint(x: 50, y: 92)].map(rotate)
-            ))
+            )
+        )
         #expect(abs(drop - (-0.5)) < 0.0001)
     }
 
@@ -156,7 +174,8 @@ struct NoseDropTests {
     func independentOfHorizontalShift() throws {
         let nose: [CGPoint] = [CGPoint(x: 55, y: 88), CGPoint(x: 55, y: 92)]
         let drop = try #require(
-            FaceLandmarkGeometry.noseDrop(leftEye: leftEye, rightEye: rightEye, nose: nose))
+            FaceLandmarkGeometry.noseDrop(leftEye: leftEye, rightEye: rightEye, nose: nose)
+        )
         #expect(abs(drop - (-0.5)) < 0.0001)
     }
 
@@ -164,7 +183,11 @@ struct NoseDropTests {
     func emptyRegionReturnsNil() {
         #expect(
             FaceLandmarkGeometry.noseDrop(
-                leftEye: [], rightEye: rightEye, nose: [CGPoint(x: 50, y: 90)]) == nil)
+                leftEye: [],
+                rightEye: rightEye,
+                nose: [CGPoint(x: 50, y: 90)]
+            ) == nil
+        )
     }
 
     @Test("両目の中心が同じ点なら nil(ゼロ除算を避ける)")
@@ -172,6 +195,10 @@ struct NoseDropTests {
         let eye: [CGPoint] = [CGPoint(x: 50, y: 100)]
         #expect(
             FaceLandmarkGeometry.noseDrop(
-                leftEye: eye, rightEye: eye, nose: [CGPoint(x: 50, y: 90)]) == nil)
+                leftEye: eye,
+                rightEye: eye,
+                nose: [CGPoint(x: 50, y: 90)]
+            ) == nil
+        )
     }
 }

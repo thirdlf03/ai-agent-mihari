@@ -80,9 +80,15 @@ public enum FaceVisionAnalyzer {
             let rightPoints = rightEye.pointsInImage(imageSize: imageSize)
             let nosePoints = nose.pointsInImage(imageSize: imageSize)
             noseOffset = FaceLandmarkGeometry.noseOffset(
-                leftEye: leftPoints, rightEye: rightPoints, nose: nosePoints)
+                leftEye: leftPoints,
+                rightEye: rightPoints,
+                nose: nosePoints
+            )
             noseDrop = FaceLandmarkGeometry.noseDrop(
-                leftEye: leftPoints, rightEye: rightPoints, nose: nosePoints)
+                leftEye: leftPoints,
+                rightEye: rightPoints,
+                nose: nosePoints
+            )
         }
 
         if landmarks == nil {

@@ -57,7 +57,9 @@ extension FaceLandmarkGeometry {
     /// - Returns: 右目側へ寄ると正、左目側で負。いずれかの点群が空、
     ///   または両目の重心が一致していれば `nil`。
     public static func noseOffset(
-        leftEye: [CGPoint], rightEye: [CGPoint], nose: [CGPoint]
+        leftEye: [CGPoint],
+        rightEye: [CGPoint],
+        nose: [CGPoint]
     ) -> Double? {
         guard let face = eyeAxis(leftEye: leftEye, rightEye: rightEye, nose: nose) else { return nil }
         // 軸方向の成分だけを取り出し、目間距離で正規化する。
@@ -74,7 +76,9 @@ extension FaceLandmarkGeometry {
     /// - Returns: 目間距離で正規化した符号付きの距離。いずれかの点群が空、
     ///   または両目の重心が一致していれば `nil`。
     public static func noseDrop(
-        leftEye: [CGPoint], rightEye: [CGPoint], nose: [CGPoint]
+        leftEye: [CGPoint],
+        rightEye: [CGPoint],
+        nose: [CGPoint]
     ) -> Double? {
         guard let face = eyeAxis(leftEye: leftEye, rightEye: rightEye, nose: nose) else { return nil }
         // 軸との外積 = 垂直方向の成分。目間距離で正規化する。
@@ -84,7 +88,9 @@ extension FaceLandmarkGeometry {
 
     /// 両目の重心を結ぶ軸と、その中点から鼻の重心へのベクトル。noseOffset / noseDrop の共通部品。
     private static func eyeAxis(
-        leftEye: [CGPoint], rightEye: [CGPoint], nose: [CGPoint]
+        leftEye: [CGPoint],
+        rightEye: [CGPoint],
+        nose: [CGPoint]
     ) -> (axis: CGPoint, toNose: CGPoint, distance: CGFloat)? {
         guard let left = centroid(of: leftEye),
             let right = centroid(of: rightEye),

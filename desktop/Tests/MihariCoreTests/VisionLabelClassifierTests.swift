@@ -90,8 +90,11 @@ struct LookingAwayClassifierTests {
 
     private func metrics(eyeOpenness: Double? = 0.3, noseOffset: Double?) -> FaceLandmarkMetrics {
         FaceLandmarkMetrics(
-            leftEyeOpenness: eyeOpenness, rightEyeOpenness: eyeOpenness,
-            yawRadians: nil, noseOffset: noseOffset)
+            leftEyeOpenness: eyeOpenness,
+            rightEyeOpenness: eyeOpenness,
+            yawRadians: nil,
+            noseOffset: noseOffset
+        )
     }
 
     @Test("鼻が大きく横に寄っていれば lookingAway")
@@ -123,7 +126,10 @@ struct LookingAwayClassifierTests {
         #expect(VisionLabelClassifier.classify(metrics: slightlyTurned) == .unknown)
         #expect(
             VisionLabelClassifier.classify(
-                metrics: slightlyTurned, lookingAwayNoseOffsetThreshold: 0.1) == .lookingAway)
+                metrics: slightlyTurned,
+                lookingAwayNoseOffsetThreshold: 0.1
+            ) == .lookingAway
+        )
     }
 
     @Test("よそ見なら GazeState は notLooking になる")
