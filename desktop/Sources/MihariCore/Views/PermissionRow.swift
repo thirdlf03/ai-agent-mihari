@@ -16,12 +16,22 @@ struct PermissionRow: View {
                 .accessibilityLabel(indicatorLabel)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(kind.title).font(.body).bold()
+                HStack(spacing: 6) {
+                    Text(kind.title).font(.body).bold()
+                    badge
+                }
                 Text(kind.purpose)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if state.grant != .granted {
                     Text("未許可だと: \(kind.consequenceIfDenied)")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                // 画面収録は許可した瞬間には効かず、次に起動したプロセスからしか使えない。
+                // ここに書いておかないと「許可したのに撮れない」で詰まる。
+                if kind == .screenRecording, state.grant != .granted {
+                    Text("許可後はアプリの再起動が必要")
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
@@ -44,13 +54,27 @@ struct PermissionRow: View {
                     Button(title, action: onRequest)
                         .controlSize(.small)
                 }
-                Button("システム設定", action: onOpenSettings)
+                Button("システム設定を開く", action: onOpenSettings)
                     .controlSize(.small)
             }
             .fixedSize()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
+    }
+
+    /// 必須か任意か。必須が 1 つでも欠けていると監視を始められないので、ひと目で分かるようにする。
+    private var badge: some View {
+        Text(kind.isRequired ? "必須" : "任意")
+            .font(.system(size: 10))
+            .bold()
+            .foregroundStyle(kind.isRequired ? Color.orange : Color.secondary)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(
+                (kind.isRequired ? Color.orange : Color.secondary).opacity(0.15),
+                in: RoundedRectangle(cornerRadius: 4)
+            )
     }
 
     private var indicatorColor: Color {

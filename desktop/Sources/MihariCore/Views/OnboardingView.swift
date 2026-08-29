@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// 起動時に出す権限オンボーディング。
@@ -6,9 +7,18 @@ import SwiftUI
 /// 「どの権限が何に使われるか」を最初に見せることを画面の役割の中心に置いている。
 public struct OnboardingView: View {
     @ObservedObject var model: PermissionsModel
+    /// 「始める」を押したときの処理。必須権限が揃うまでボタンは押せない。
+    private let onStart: (() -> Void)?
+    /// 「閉じる」を押したときの処理。すでに見張っている状態で開き直したときに使う。
+    private let onClose: (() -> Void)?
 
-    public init(model: PermissionsModel) {
+    /// - Parameters:
+    ///   - onStart: 渡すと「始める」ボタンを出す。必須権限が揃うまで押せない。
+    ///   - onClose: 渡すと「閉じる」ボタンを出す。`onStart` を渡したときはそちらが優先される。
+    public init(model: PermissionsModel, onStart: (() -> Void)? = nil, onClose: (() -> Void)? = nil) {
         self.model = model
+        self.onStart = onStart
+        self.onClose = onClose
     }
 
     public var body: some View {
@@ -19,6 +29,10 @@ public struct OnboardingView: View {
         .task {
             model.refresh()
             await model.requestOnFirstLaunchIfNeeded()
+        }
+        // システム設定で許可してから戻ってきたときに、押し直さなくても反映されるようにする。
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            model.refresh()
         }
     }
 
@@ -48,10 +62,37 @@ public struct OnboardingView: View {
                     .textSelection(.enabled)
             }
 
+            footer
+
             notes
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// 画面を閉じて先へ進むためのボタン。呼び出し側が渡した処理に応じて出し分ける。
+    @ViewBuilder private var footer: some View {
+        if let onStart {
+            HStack(spacing: 10) {
+                Button("始める", action: onStart)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(!model.isRequiredSatisfied)
+
+                if !model.isRequiredSatisfied {
+                    Text("必須の権限が足りない: \(model.missingRequired.map(\.title).joined(separator: " / "))")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
+                Spacer()
+            }
+        } else if let onClose {
+            HStack {
+                Button("閉じる", action: onClose)
+                    .controlSize(.large)
+                Spacer()
+            }
+        }
     }
 
     private var header: some View {

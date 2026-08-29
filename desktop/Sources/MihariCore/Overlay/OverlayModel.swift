@@ -166,10 +166,9 @@ public final class OverlayModel: ObservableObject {
 
     /// 文字数から読み上げの所要時間を見積もる。
     ///
-    /// `VoiceController.isSpeaking` は再生開始時に `true` になったきり、自然終了では
-    /// `false` に戻らない(`stopSpeaking()` を呼んだときだけ戻る)ため、実際の読み上げ完了を
-    /// ここから検知することはできない。代わりに文字数から所要時間を見積もり、
-    /// それを「読み上げ完了」とみなす。見積もりが外れて長引いても、上限秒数のタイマーが必ず先に効く。
+    /// `VoiceController.isSpeaking` は自然に喋り終わっても `false` に戻るが、解除の判定は
+    /// 従来どおり文字数からの見積もりで行う。見積もった時間を「読み上げ完了」とみなし、
+    /// 見積もりが外れて長引いても、上限秒数のタイマーが必ず先に効く。
     static func estimatedReadingSeconds(for text: String) -> Int {
         let raw = Double(text.count) / charactersPerSecondEstimate
         return max(minimumSpeechDisplaySeconds, Int(raw.rounded(.up)))

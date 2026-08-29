@@ -33,6 +33,13 @@ public final class VoiceController: ObservableObject {
 
     public init(player: SpeechPlayer = SpeechPlayer()) {
         self.player = player
+        // 自然に喋り終わったときに `isSpeaking` を戻す。
+        // これが無いと、一度喋ったきり「喋っている」ままになる。
+        player.onPlaybackFinished = { [weak self] priority in
+            Task { @MainActor in
+                self?.handlePlaybackFinished(priority: priority)
+            }
+        }
     }
 
     /// セリフ生成と読み上げが使える状態かを取り直す。
@@ -83,9 +90,18 @@ public final class VoiceController: ObservableObject {
         isSpeaking = false
     }
 
+    /// 喋り終わったときの後始末。`SpeechPlayer` の自然終了だけがここに来る。
+    ///
+    /// ひとりごとが終わっただけなら、検知のセリフの状態は動かさない。
+    func handlePlaybackFinished(priority: SpeechPriority) {
+        guard priority == .detection else { return }
+        isSpeaking = false
+    }
+
     private func playIfPossible(_ line: SpokenLine) -> Bool {
         guard let wav = line.audioData else { return false }
-        let played = player.play(wav: wav)
+        // 検知のセリフは最優先。ひとりごとが鳴っていても割り込んで鳴らす。
+        let played = player.play(wav: wav, priority: .detection)
         isSpeaking = played
         return played
     }
@@ -93,6 +109,12 @@ public final class VoiceController: ObservableObject {
     /// 履歴の積み方だけをテストから確かめるための入口。
     func recordForTesting(_ line: SpokenLine, spokenAloud: Bool) {
         record(line, spokenAloud: spokenAloud)
+    }
+
+    /// 喋っている状態からの遷移をテストから確かめるための入口。
+    /// 実際の再生は音声デバイスを必要とするため、状態だけを立てる。
+    func markSpeakingForTesting() {
+        isSpeaking = true
     }
 
     private func record(_ line: SpokenLine, spokenAloud: Bool) {
