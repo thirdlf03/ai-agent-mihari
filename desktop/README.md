@@ -202,3 +202,19 @@ Swift ──POST /voice/speak（状況）──▶ Python
 - `AttendanceGrace`: 「直近のスタンプから何秒経ったか」「いま猶予期間中か」を返す純粋なロジック。
   猶予秒数は `defaultGracePeriod`(既定 5 分)で、呼び出し側から上書きできる。
   サボり検知の状態機械(#9)はここを参照して、スタンプ直後の誤検知を避ける想定。
+## 撮影(カメラ / スクリーンショット)
+
+検知が発火した瞬間の証拠取得(#10)は `Sources/MihariCore/Capture/` にまとまっている。
+
+- `CameraCaptureService`: `AVCaptureSession` + `AVCapturePhotoOutput` で 1 枚だけ撮る。
+  呼び出しのたびにセッションを新しく組み立てて開始し、撮影が終わったら必ず `stopRunning()` する。
+  常時プレビューは行わないため、緑ランプは撮影の瞬間だけ点く。
+- `ScreenshotCaptureService`: ScreenCaptureKit の `SCScreenshotManager.captureImage` でメイン
+  ディスプレイを 1 枚キャプチャする。
+- `CaptureService`: 上記 2 つの窓口。撮った画像を PNG にそろえて一時ディレクトリへ保存し、
+  `CaptureArtifact`(保存先パス + `delete()`)として返す。送信後の削除はこの型 1 つで完結する。
+- どちらも撮影前に `PermissionChecker` で権限を確認し、未許可なら実際の AV API には触れずに
+  理由(`PermissionState.detail`)付きの `CaptureError` を返す。権限拒否・未決定でアプリが
+  落ちないことは単体テストで固定してある。
+- `Views/CaptureView.swift` は上記を単体で試すための最小限の画面(撮る / プレビュー / 保存先 /
+  エラー表示)。他タブへの組み込みは行っていない。
