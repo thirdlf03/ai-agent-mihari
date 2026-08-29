@@ -5,10 +5,10 @@ import Foundation
 /// Vision フレームワークに一切依存しない。`FaceDetectionOutcome` と閾値さえ渡せば
 /// 答えが出るので、実カメラや実 Vision リクエストなしにテストできる。
 ///
-/// **よそ見(yaw)判定は行わない。** この Vision のリビジョンでは
-/// `VNFaceObservation.yaw` が常に 0.000 を返し、実機の映像フレームでまったく
-/// 機能しなかった(顔の向きが取れていない)。取れていない値でよそ見を断定すると
-/// 誤判定にしかならないため、いまは「顔の有無」と「目の開き具合」だけで見る。
+/// **yaw によるよそ見判定は行わない。** この Vision のリビジョンでは
+/// `VNFaceObservation.yaw` がほぼ常に 0.000 を返し(真横 90 度でだけ -1.571 が出る程度)、
+/// 実機の映像フレームで機能しなかった。よそ見はランドマークから自前で計算した
+/// 鼻の左右オフセット(`FaceLandmarkMetrics.noseOffset`)で判定する。
 public enum VisionLabelClassifier {
 
     /// この値を下回ったら目を閉じている(=寝てる)と見なす。
@@ -18,12 +18,26 @@ public enum VisionLabelClassifier {
     /// 19 フレーム中 3 回が「寝ている」に振れていた。正常値の下限からさらに余裕を取る。
     public static let defaultClosedEyeOpennessThreshold = 0.12
 
+    /// 鼻の左右オフセットの絶対値がこの値を超えたら、横を向いている(よそ見)と見なす。
+    ///
+    /// 視線キャリブレーション(MIHARI_SELFTEST_GAZE=1)の実測では、画面を見ている 72 フレームで
+    /// |noseOffset| は最大 0.082、横を向いた 24 フレームでは中央値 0.738 だった。
+    /// 正常値の最大からおよそ 3 倍のマージンを取ってこの値に置く。
+    /// 遷移フレームを除いた 2 回目の計測でも 見る max 0.042 / 横向き min 0.548 で、
+    /// この値がその間に収まることを確認済み。
+    ///
+    /// **下を向いてスマホを見る動作は検知できない(既知の制約)。** 頭がほぼ正面のままで
+    /// 動くのは主にまぶただけ(目の開き中央値 0.206 → 0.109)。時々目が開くフレームで
+    /// 「連続して見ていない」のカウントが切れるため、しきい値では拾えない。
+    public static let defaultLookingAwayNoseOffsetThreshold = 0.25
+
     /// 顔検出の結果全体からラベルを決める。
     ///
-    /// 優先順位: 顔なし(不在) > 目を閉じている(寝てる) > どれでもなければ不明。
+    /// 優先順位: 顔なし(不在) > 目を閉じている(寝てる) > 横を向いている(よそ見) > 不明。
     public static func classify(
         outcome: FaceDetectionOutcome,
-        closedEyeOpennessThreshold: Double = defaultClosedEyeOpennessThreshold
+        closedEyeOpennessThreshold: Double = defaultClosedEyeOpennessThreshold,
+        lookingAwayNoseOffsetThreshold: Double = defaultLookingAwayNoseOffsetThreshold
     ) -> SpeechRequest.VisionLabel {
         switch outcome {
         case .detectionFailed:
@@ -32,17 +46,25 @@ public enum VisionLabelClassifier {
         case .noFaceFound:
             return .absent
         case .faceFound(let metrics):
-            return classify(metrics: metrics, closedEyeOpennessThreshold: closedEyeOpennessThreshold)
+            return classify(
+                metrics: metrics,
+                closedEyeOpennessThreshold: closedEyeOpennessThreshold,
+                lookingAwayNoseOffsetThreshold: lookingAwayNoseOffsetThreshold
+            )
         }
     }
 
     /// 顔は見つかっている前提で、指標だけから判定する。
     public static func classify(
         metrics: FaceLandmarkMetrics,
-        closedEyeOpennessThreshold: Double = defaultClosedEyeOpennessThreshold
+        closedEyeOpennessThreshold: Double = defaultClosedEyeOpennessThreshold,
+        lookingAwayNoseOffsetThreshold: Double = defaultLookingAwayNoseOffsetThreshold
     ) -> SpeechRequest.VisionLabel {
         if let openness = metrics.averageEyeOpenness, openness < closedEyeOpennessThreshold {
             return .sleeping
+        }
+        if let noseOffset = metrics.noseOffset, abs(noseOffset) > lookingAwayNoseOffsetThreshold {
+            return .lookingAway
         }
         return .unknown
     }

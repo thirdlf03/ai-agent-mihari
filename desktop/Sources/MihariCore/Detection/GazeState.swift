@@ -41,8 +41,7 @@ public enum GazeState: String, Equatable, Sendable, CaseIterable {
             case .sleeping, .absent:
                 return .notLooking
             case .lookingAway:
-                // いまの分類器はこれを返さないが、将来よそ見を復活させたときに
-                // ここで拾えるよう残しておく。
+                // 鼻の左右オフセット(顔向きプロキシ)が大きい = 横を向いている。
                 return .notLooking
             case .unknown:
                 return .lookingAtScreen

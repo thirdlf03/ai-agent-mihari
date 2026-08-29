@@ -84,3 +84,57 @@ struct VisionLabelClassifierTests {
         )
     }
 }
+
+@Suite("よそ見判定(鼻オフセット)")
+struct LookingAwayClassifierTests {
+
+    private func metrics(eyeOpenness: Double? = 0.3, noseOffset: Double?) -> FaceLandmarkMetrics {
+        FaceLandmarkMetrics(
+            leftEyeOpenness: eyeOpenness,
+            rightEyeOpenness: eyeOpenness,
+            yawRadians: nil,
+            noseOffset: noseOffset
+        )
+    }
+
+    @Test("鼻が大きく横に寄っていれば lookingAway")
+    func largeNoseOffsetIsLookingAway() {
+        #expect(VisionLabelClassifier.classify(metrics: metrics(noseOffset: 0.7)) == .lookingAway)
+        #expect(VisionLabelClassifier.classify(metrics: metrics(noseOffset: -0.7)) == .lookingAway)
+    }
+
+    @Test("正面顔の範囲(実測 max 0.082)なら unknown のまま")
+    func frontFaceStaysUnknown() {
+        #expect(VisionLabelClassifier.classify(metrics: metrics(noseOffset: 0.082)) == .unknown)
+        #expect(VisionLabelClassifier.classify(metrics: metrics(noseOffset: -0.05)) == .unknown)
+    }
+
+    @Test("鼻オフセットが取れなければよそ見と断定しない")
+    func missingNoseOffsetStaysUnknown() {
+        #expect(VisionLabelClassifier.classify(metrics: metrics(noseOffset: nil)) == .unknown)
+    }
+
+    @Test("目を閉じている判定が優先される")
+    func sleepingTakesPrecedence() {
+        let sleepy = metrics(eyeOpenness: 0.05, noseOffset: 0.7)
+        #expect(VisionLabelClassifier.classify(metrics: sleepy) == .sleeping)
+    }
+
+    @Test("しきい値は外から差し替えられる")
+    func thresholdIsConfigurable() {
+        let slightlyTurned = metrics(noseOffset: 0.2)
+        #expect(VisionLabelClassifier.classify(metrics: slightlyTurned) == .unknown)
+        #expect(
+            VisionLabelClassifier.classify(
+                metrics: slightlyTurned,
+                lookingAwayNoseOffsetThreshold: 0.1
+            ) == .lookingAway
+        )
+    }
+
+    @Test("よそ見なら GazeState は notLooking になる")
+    func lookingAwayMapsToNotLooking() {
+        let outcome = FaceDetectionOutcome.faceFound(metrics(noseOffset: 0.7))
+        #expect(GazeState.from(outcome: outcome) == .notLooking)
+    }
+}

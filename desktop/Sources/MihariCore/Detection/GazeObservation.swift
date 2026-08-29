@@ -18,6 +18,12 @@ public struct GazeObservation: Equatable, Sendable {
     /// 直近フレームの yaw(ラジアン)。
     public let yawRadians: Double?
 
+    /// 直近フレームの鼻の左右オフセット(顔向きプロキシ)。しきい値調整のための実測用。
+    public let noseOffset: Double?
+
+    /// 直近フレームの鼻の縦オフセット(顔ピッチのプロキシ)。しきい値調整のための実測用。
+    public let noseDrop: Double?
+
     /// 最後にフレームを見た時刻。古すぎる結果を信じないために使う。
     public let updatedAt: Date?
 
@@ -26,12 +32,16 @@ public struct GazeObservation: Equatable, Sendable {
         notLookingSeconds: TimeInterval = 0,
         eyeOpenness: Double? = nil,
         yawRadians: Double? = nil,
+        noseOffset: Double? = nil,
+        noseDrop: Double? = nil,
         updatedAt: Date? = nil
     ) {
         self.state = state
         self.notLookingSeconds = notLookingSeconds
         self.eyeOpenness = eyeOpenness
         self.yawRadians = yawRadians
+        self.noseOffset = noseOffset
+        self.noseDrop = noseDrop
         self.updatedAt = updatedAt
     }
 
