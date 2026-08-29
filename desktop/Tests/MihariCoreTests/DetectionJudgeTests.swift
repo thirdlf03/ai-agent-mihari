@@ -7,7 +7,7 @@ import Testing
 struct DetectionJudgeTests {
 
     /// 疑い 2 分 / 確定 5 分 / スタンプ猶予 5 分 / クールダウン 3 分。
-    private let judge = DetectionJudge(thresholds: .default)
+    private let judge = DetectionJudge(thresholds: .production)
 
     private func signals(
         idle: TimeInterval,

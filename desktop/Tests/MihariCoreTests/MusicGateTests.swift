@@ -6,7 +6,7 @@ import Testing
 @Suite("音楽が鳴っているときだけ説教する")
 struct MusicGateJudgeTests {
 
-    private let judge = DetectionJudge(thresholds: .default)
+    private let judge = DetectionJudge(thresholds: .production)
 
     private func signals(music: NowPlaying) -> DetectionSignals {
         DetectionSignals(macIdleSeconds: 600, music: music)
@@ -98,7 +98,9 @@ struct MusicProbeTests {
     }
 
     private func engine(idle: TimeInterval, music: MusicSpy) -> DetectionEngine {
-        DetectionEngine(idleMonitor: MacIdleMonitor(probe: { idle }), musicController: music)
+        let engine = DetectionEngine(idleMonitor: MacIdleMonitor(probe: { idle }), musicController: music)
+        engine.thresholds = .production
+        return engine
     }
 
     @Test("手を動かしている間は音楽を見に行かない")

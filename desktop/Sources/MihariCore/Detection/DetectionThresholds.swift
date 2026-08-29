@@ -39,9 +39,9 @@ public struct DetectionThresholds: Equatable, Sendable {
     public let promptTimeoutSeconds: TimeInterval
 
     public init(
-        suspectSeconds: TimeInterval = 120,
-        confirmSeconds: TimeInterval = 300,
-        gazeWatchSeconds: TimeInterval = 60,
+        suspectSeconds: TimeInterval = 12,
+        confirmSeconds: TimeInterval = 30,
+        gazeWatchSeconds: TimeInterval = 6,
         notLookingDurationSeconds: TimeInterval = 15,
         gazeFreshnessSeconds: TimeInterval = 10,
         stampGraceSeconds: TimeInterval = AttendanceGrace.defaultGracePeriod,
@@ -68,7 +68,7 @@ public struct DetectionThresholds: Equatable, Sendable {
         min(suspectSeconds, gazeWatchSeconds)
     }
 
-    /// 既定値。確定は 5 分。
+    /// 既定値。**一時的に** 疑い 12 秒 / 確定 30 秒 / カメラ 6 秒まで縮めている。本来は 120 / 300 / 60。
     ///
     /// `MIHARI_FAST_THRESHOLDS=1` を付けて起動すると、動作確認用に全部を秒単位まで縮める。
     /// 5 分待たずに一連の流れが通るかを見られる。デモの調整にも使う。

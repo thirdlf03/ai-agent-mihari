@@ -79,6 +79,7 @@ struct DetectionEngineTests {
             frontmostMonitor: FrontmostAppMonitor(probe: { "Safari" }),
             musicController: StubMusic(playing: music)
         )
+        engine.thresholds = .production
         engine.actions = spy.makeActions()
         return engine
     }
@@ -287,6 +288,7 @@ struct DetectionPetNotificationTests {
 
     private func engine(idle: TimeInterval, spy: ActionSpy, pet: PetSpy) -> DetectionEngine {
         let engine = DetectionEngine(idleMonitor: MacIdleMonitor(probe: { idle }))
+        engine.thresholds = .production
         engine.actions = spy.makeActions()
         engine.onEvent = { pet.record($0) }
         return engine
