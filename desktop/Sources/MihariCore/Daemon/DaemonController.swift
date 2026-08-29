@@ -47,6 +47,9 @@ public final class DaemonController: ObservableObject {
 
     public init() {}
 
+    /// 他のコントローラに渡すための接続済みクライアント。デーモンが動いていなければ `nil`。
+    public var connectedClient: DaemonClient? { client }
+
     public var isRunning: Bool {
         if case .running = state { return true }
         return false
