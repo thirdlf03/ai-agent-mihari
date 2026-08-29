@@ -122,8 +122,13 @@ public final class LivePetPresenter: ObservableObject, PetPresenting {
     }
 
     public func setMonitoring(_ mode: PetMonitoringMode) {
+        let previous = monitoringMode
         monitoringMode = mode
         controller.setFrozen(mode != .watching)
+
+        // 監視が始まった瞬間だけ一言そえる。同じ状態を入れ直したときは喋らない。
+        guard mode == .watching, previous != .watching else { return }
+        controller.say(previous == .onBreak ? .breakEnd : .watchStart)
     }
 
     // MARK: - 問いかけ

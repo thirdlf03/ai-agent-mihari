@@ -50,6 +50,8 @@ public final class PetController {
     public private(set) var isVoiceEnabled: Bool
     /// スプライトシートの読み込みに失敗したときの理由。
     private(set) var loadErrorMessage: String?
+    /// 直近に種類を指定して言おうとしたセリフの種類。ペットを出していないあいだは実際には喋らない。テストからの観測点。
+    @ObservationIgnored private(set) var lastSpokenKind: PetSpeechLines.Kind?
     /// ペットを右クリックしたときに出すメニュー。アプリ側が `PetContextMenu` で組み立てて差し込む。
     public var contextMenuBuilder: (@MainActor () -> NSMenu)?
 
@@ -341,6 +343,7 @@ public final class PetController {
     /// 種類に応じたセリフをランダムに 1 つ選んで言う。候補が無ければ何もしない。
     func say(_ kind: PetSpeechLines.Kind) {
         guard let line = speechLines.randomLine(for: kind) else { return }
+        lastSpokenKind = kind
         say(line)
     }
 
