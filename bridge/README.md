@@ -129,6 +129,36 @@ curl -s -X POST -H "X-Mihari-Token: <token>" http://127.0.0.1:<port>/iphone/scre
 `preflight` の `ready` が `false` の場合、`checks` の中の `ok: false` な項目の `remediation` を
 上から順に実行すればよい。
 
+## Wi-Fi(USB を抜いた状態)で動かす
+
+スクリーンショットと iPhone の状態取得(`/iphone/state`)は、USB を抜いても
+**tunneld が張っているトンネル経由**で動く。条件は次のとおり。
+
+- tunneld が root で常駐している(上の「3. (iOS 17+ のみ)tunneld を root で常駐させる」)
+- 一度 USB で繋いでペアリングし、RemotePairing レコードができている
+  (tunneld はこれを使って `_remotepairing._tcp` の端末にトンネルを張る)
+- iPhone と Mac が同じ Wi-Fi にいる
+- **iPhone の画面が点いている。** ロックされて眠るとトンネルごと消え、`list` からも消える。
+  画面が点けば tunneld が数秒〜30 秒で張り直す(その間は「応答なし」で正しい)
+
+このとき `uv run device-bridge list` には `{"connection_type": "Tunnel", "host": null}` として出る。
+USB で見えているデバイスは従来どおり usbmuxd 経由(`"USB"`)で、tunneld が動いていなくても使える。
+
+### bonjour 経由の Wi-Fi lockdown はやめた
+
+以前は bonjour(`_apple-mobdev2._tcp`)で見つけたホストへ TCP:62078 で直接 lockdown していたが、
+**実測(iOS 26.6 / iPhone 14)で使えないことが分かったため削除した。**
+
+- lockdownd 本体には繋がるが、`StartService` で開く 2 本目のサービス接続が SSL 直後に
+  端末側から必ず切断される(diagnostics_relay / notification_proxy / afc / installation_proxy の
+  いずれも。keep_alive・EscrowBag・IPv6 でも同じ)
+- macOS の usbmuxd は Wi-Fi 上の端末を Network デバイスとして列挙しない
+  (Finder の「Wi-Fi 経由で表示」を ON にしても)
+- bonjour 探索自体も 3 回に 1 回は 0 件を返し、そのぶん `list` が遅くなっていた
+
+トンネル経由で得られる `RemoteServiceDiscoveryService` なら、`DiagnosticsService` /
+`NotificationProxyService` / DVT のスクリーンショットがいずれもそのまま動く(実機で確認済み)。
+
 ## REST エンドポイント一覧(iPhone スクリーンショット関連)
 
 すべて `X-Mihari-Token` ヘッダによる認証が要る(トークンはアプリ起動時に生成される)。
@@ -173,6 +203,14 @@ curl -s -X POST -H "X-Mihari-Token: <token>" http://127.0.0.1:<port>/iphone/scre
 - Darwin 通知や developer サービスの内部仕様は非公開であり、iOS のバージョンによって挙動が
   変わる可能性がある(`get_developer_mode_status` / DDI マウント確認 / tunneld の到達確認は
   いずれも pymobiledevice3 の実装に依存する)
+- iPhone の `active` / `idle` は、diagnostics の IORegistry から画面の点灯状態
+  (`AppleCLCD2` の `NormalModeActive`、点灯 `True` / 消灯 `False`)を読んで決めている。
+  `AppleCLCD2` が無い機種向けに `AppleARMBacklight` の輝度(点灯 `16384` / 消灯 `0`)を
+  副指標として併用する。Darwin 通知は「読み直す合図」としてのみ使い、通知が来なくても
+  5 秒ごとに読み直す。この属性名も非公開であり、読めない機種では通知だけの判定に落ちる
+- **実測(iOS 26.6 / iPhone 14)では `com.apple.springboard.hasWokenUp` が一度も発火せず、
+  消灯時も点灯時も同じ `hasBlankedScreen` が来た。** 通知名だけでは遷移の向きが決められず
+  `active` になる経路が無いため、画面状態の読み取りを主にしている
 - iOS のバージョンが上がると DDI が外れ、再マウントが必要になることがある
 - tunneld は root 常駐が前提のプロセスであり、アプリからは制御できない。代わりに
   `install_tunneld_daemon.sh` で launchd(LaunchDaemon)に任せる。登録時に 1 回だけ
