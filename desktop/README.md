@@ -524,3 +524,26 @@ MIHARI_SELFTEST=1 ./desktop/Mihari.app/Contents/MacOS/Mihari
 
 最後の 1 つが一番重要。解除されないと Mac が操作不能になるので、
 上限秒数を 2 秒に縮めて毎回確かめる。消えなかった場合は手で消したうえで失敗として報告する。
+
+## iPhone のスクリーンショット（実機で確認済み）
+
+iOS 17+ では **DVT 経由**でしか撮れない。`com.apple.mobile.screenshotr` は RSD の
+サービス一覧に載っておらず `No such service` になる（iOS 26.4.1 の実機で確認）。
+pymobiledevice3 の CLI でも `developer screenshot`（非推奨）は失敗し、
+`developer dvt screenshot` だけが成功する。
+
+### 撮れる状態にするまで
+
+**USB 接続が必要。** DeveloperDiskImage のアップロードは Wi-Fi 経由では
+`Connection was terminated abruptly` で落ちる。
+
+1. iPhone を **USB ケーブル**で繋ぐ（「信頼」を許可）
+2. 設定 > プライバシーとセキュリティ > デベロッパモード を オン
+3. `cd bridge && uv run pymobiledevice3 mounter auto-mount`（root 不要。初回はイメージのダウンロードが走る）
+4. `sudo bridge/scripts/start_tunneld.sh`（**root 必須**。常駐し続ける）
+
+`GET /iphone/screenshot/preflight` が 4 項目すべて OK になれば撮れる。
+足りない項目には直すためのコマンドが付く。
+
+**tunneld は root で常駐し続けるプロセス。** Mac を再起動したら 4 をやり直す。
+デモ前に一度通しておくこと。

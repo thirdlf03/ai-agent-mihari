@@ -17,9 +17,16 @@ Wi-Fi 経由の接続は ``commands/devices.py`` の bonjour + lockdown 実装�
   RemoteXPC トンネル越しにしか届かないため、tunneld の HTTP API にこのデバイスの
   トンネルが登録されているかを見る
 
-実際のキャプチャは iOS バージョンで経路を変える。iOS 17 未満は classic lockdown 上の
-``com.apple.mobile.screenshotr`` サービス、iOS 17+ は tunneld から得た
-``RemoteServiceDiscoveryService`` 上の同サービスを使う。
+実際のキャプチャは iOS バージョンで経路を変える。
+
+- iOS 17 未満: classic lockdown 上の ``com.apple.mobile.screenshotr``
+- iOS 17+: tunneld から得た ``RemoteServiceDiscoveryService`` 上で **DVT** の
+  ``com.apple.instruments.server.services.screenshot`` を使う
+
+iOS 17+ で ``screenshotr`` を使わないのは、RSD のサービス一覧に載っておらず
+``No such service: com.apple.mobile.screenshotr`` になるため(iOS 26.4.1 で確認)。
+pymobiledevice3 の CLI も ``developer screenshot``(非推奨・screenshotr)は失敗し、
+``developer dvt screenshot``(DVT)だけが成功する。
 """
 
 from __future__ import annotations
@@ -35,6 +42,8 @@ from pymobiledevice3.exceptions import TunneldConnectionError
 from pymobiledevice3.lockdown import create_using_tcp, create_using_usbmux
 from pymobiledevice3.lockdown_service_provider import LockdownServiceProvider
 from pymobiledevice3.pair_records import get_usbmux_pairing_record
+from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+from pymobiledevice3.services.dvt.instruments.screenshot import Screenshot
 from pymobiledevice3.services.mobile_image_mounter import (
     DeveloperDiskImageMounter,
     MobileImageMounterService,
@@ -94,23 +103,32 @@ class LiveScreenshotSource:
     async def capture_png(self, udid: str) -> bytes:
         """スクリーンショットを撮り、PNG バイト列を返す。
 
-        ``com.apple.mobile.screenshotr`` は PNG または TIFF を返すため、TIFF だった
-        場合は Pillow で PNG に変換して常に PNG を保証する。
+        どちらの経路も PNG または TIFF を返しうるため、TIFF だった場合は
+        Pillow で PNG に変換して常に PNG を保証する。
         """
         lockdown = await _connect_lockdown(udid)
         try:
-            ios_version = lockdown.product_version
-            provider: LockdownServiceProvider = lockdown
-            if requires_tunneld(ios_version):
-                rsd = await get_tunneld_device_by_udid(udid)
-                if rsd is None:
-                    raise RuntimeError(f"tunneld にこのデバイスのトンネルが無い: {udid}")
-                provider = rsd
-            async with ScreenshotService(lockdown=provider) as service:
-                raw = await service.take_screenshot()
+            if requires_tunneld(lockdown.product_version):
+                raw = await _capture_via_dvt(udid)
+            else:
+                async with ScreenshotService(lockdown=lockdown) as service:
+                    raw = await service.take_screenshot()
             return _ensure_png(raw)
         finally:
             await _close_quietly(lockdown)
+
+
+async def _capture_via_dvt(udid: str) -> bytes:
+    """iOS 17+ 向け。tunneld のトンネル越しに DVT のスクリーンショットを撮る。
+
+    RSD には ``com.apple.mobile.screenshotr`` が載っていないため、
+    Instruments 側の ``...services.screenshot`` チャンネルを使う。
+    """
+    rsd = await get_tunneld_device_by_udid(udid)
+    if rsd is None:
+        raise RuntimeError(f"tunneld にこのデバイスのトンネルが無い: {udid}")
+    async with DvtProvider(rsd) as dvt, Screenshot(dvt) as screenshot:
+        return await screenshot.get_screenshot()
 
 
 def _ensure_png(raw: bytes) -> bytes:
