@@ -41,7 +41,7 @@ public struct StatusPanelSnapshot: Equatable, Sendable {
     public let idleText: String
     /// 確定までの進捗(0...1)。確定に達したら満タン。
     public let idleProgress: Double
-    /// 無操作の閾値。「疑い 120 / 確定 300」。
+    /// 無操作の閾値。「疑い 12 / 確定 30」。
     public let thresholdText: String
     /// 視線。「見ていない 6.2 秒」「見ている」「不明(カメラ閉)」。
     public let gazeText: String

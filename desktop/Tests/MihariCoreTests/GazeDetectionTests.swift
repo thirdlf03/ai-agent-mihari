@@ -85,7 +85,7 @@ struct GazeObservationTests {
 @Suite("画面を見ていないときの判定")
 struct NotLookingJudgeTests {
 
-    private let judge = DetectionJudge(thresholds: .default)
+    private let judge = DetectionJudge(thresholds: .production)
 
     private func signals(idle: TimeInterval, notLooking: TimeInterval) -> DetectionSignals {
         DetectionSignals(
@@ -180,7 +180,9 @@ struct GazeMonitoringTests {
     }
 
     private func engine(idle: TimeInterval, monitor: MonitorSpy) -> DetectionEngine {
-        DetectionEngine(idleMonitor: MacIdleMonitor(probe: { idle }), gazeMonitor: monitor)
+        let engine = DetectionEngine(idleMonitor: MacIdleMonitor(probe: { idle }), gazeMonitor: monitor)
+        engine.thresholds = .production
+        return engine
     }
 
     @Test("手を動かしている間はカメラを開けない")
@@ -216,6 +218,7 @@ struct GazeMonitoringTests {
             idleMonitor: MacIdleMonitor(probe: { idle.read() }),
             gazeMonitor: monitor
         )
+        engine.thresholds = .production
 
         idle.set(70)
         monitor.setObservation(GazeObservation(state: .notLooking, notLookingSeconds: 40, updatedAt: Date()))

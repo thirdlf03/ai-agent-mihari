@@ -152,6 +152,13 @@ public final class DaemonController: ObservableObject {
             }
 
             isStreamConnected = true
+            // つないだ直後に iPhone の状態を 1 回取りに行く。デーモン側の監視ループは
+            // その GET で初めて起動するうえ、SSE には変化しか流れてこないので、
+            // 呼ばないと状態が一生分からない。切れて張り直したときの取り直しにもなる。
+            Task { [weak self] in
+                await self?.primeIPhoneState(client: client)
+            }
+
             var parser = ServerSentEventParser()
             var lines = LineAccumulator()
             // bytes.lines は空行を捨ててしまい SSE のフレーム区切りが取れないため、自前で行に切る。
@@ -168,12 +175,55 @@ public final class DaemonController: ObservableObject {
         isStreamConnected = false
     }
 
+    /// iPhone の状態を 1 回取りに行き、SSE で届いたものと同じ形にして流す。
+    ///
+    /// 取れなかったときは記録だけ残す。`lastError` は画面に出る値なので、
+    /// 裏でやっているこの取り直しでは触らない。
+    private func primeIPhoneState(client: DaemonClient) async {
+        do {
+            let state = try await client.iphoneState()
+            guard let event = Self.makeIPhoneStateEvent(from: state, existing: events) else { return }
+            append(event: event)
+        } catch {
+            let message = (error as? DaemonError)?.errorDescription ?? error.localizedDescription
+            Self.logger.error("iphone state fetch failed: \(message, privacy: .public)")
+        }
+    }
+
+    /// 取ってきた状態を `iphone.state` のイベントに組み替える。
+    ///
+    /// GET は監視を起動した時点の初期値(`unresponsive`)を即座に返すが、監視ループは
+    /// その直後に実機へつないで本当の状態を SSE で流す。どちらが先に手元へ届くかは
+    /// 決まっていないので、すでにある `iphone.state` より新しいときだけイベントにする。
+    ///
+    /// - Returns: 流すべきイベント。古い、または時刻を解釈できないときは `nil`。
+    nonisolated static func makeIPhoneStateEvent(
+        from state: IPhoneStateResponse,
+        existing events: [DaemonEvent]
+    ) -> DaemonEvent? {
+        guard let updatedAt = DaemonEvent.parseTimestamp(state.updatedAt) else { return nil }
+        let newest = events.filter { $0.name == "iphone.state" }.map(\.createdAt).max()
+        if let newest, updatedAt <= newest { return nil }
+
+        // キー名と値の書き方は SSE の payload に合わせる。受け取る側は区別しない。
+        var payload = ["activity": state.activity]
+        if let udid = state.udid { payload["udid"] = udid }
+        if let level = state.batteryLevel { payload["battery_level"] = String(level) }
+        if let charging = state.batteryCharging { payload["battery_charging"] = String(charging) }
+        return DaemonEvent(name: "iphone.state", payload: payload, createdAt: updatedAt)
+    }
+
     private func append(frame: ServerSentEventParser.Frame) {
         guard let data = frame.data.data(using: .utf8) else { return }
         guard let event = try? JSONDecoder().decode(DaemonEvent.self, from: data) else {
             Self.logger.error("イベントを解釈できない: \(frame.data, privacy: .public)")
             return
         }
+        append(event: event)
+    }
+
+    /// 新しいイベントを先頭に足し、上限を超えたぶんを古い方から捨てる。
+    private func append(event: DaemonEvent) {
         events.insert(event, at: 0)
         if events.count > Self.eventHistoryLimit {
             events.removeLast(events.count - Self.eventHistoryLimit)
