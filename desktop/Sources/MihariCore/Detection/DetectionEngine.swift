@@ -26,6 +26,9 @@ public final class DetectionEngine: ObservableObject {
     @Published public private(set) var lastSignals: DetectionSignals?
     /// いまの視線の状況。画面に出して閾値の調整に使う。
     @Published public private(set) var gaze: GazeObservation = .none
+
+    /// いま音楽が鳴っているか。
+    @Published public private(set) var music: NowPlaying = .silent
     @Published public private(set) var log: [DetectionLogEntry] = []
     @Published public var thresholds: DetectionThresholds = .default
 
@@ -36,6 +39,7 @@ public final class DetectionEngine: ObservableObject {
     private var loop: Task<Void, Never>?
     private var lastEvidenceAt: Date?
     private let gazeMonitor: GazeMonitor
+    private let musicController: MusicControlling
 
     /// 実行部。テストからはここを差し替えて、実際に撮らず送らずに筋道だけを確かめる。
     public struct Actions: Sendable {
@@ -77,13 +81,15 @@ public final class DetectionEngine: ObservableObject {
         frontmostMonitor: FrontmostAppMonitor = FrontmostAppMonitor(),
         capture: CaptureService = CaptureService(),
         attendance: AttendanceModel? = nil,
-        gazeMonitor: GazeMonitor = GazeMonitor()
+        gazeMonitor: GazeMonitor = GazeMonitor(),
+        musicController: MusicControlling = AppleScriptMusicController()
     ) {
         self.idleMonitor = idleMonitor
         self.frontmostMonitor = frontmostMonitor
         self.capture = capture
         self.attendance = attendance
         self.gazeMonitor = gazeMonitor
+        self.musicController = musicController
     }
 
     public func start() {
@@ -104,19 +110,35 @@ public final class DetectionEngine: ObservableObject {
         state = .normal
         gazeMonitor.stop()
         gaze = .none
+        music = .silent
     }
 
     /// いまの材料を集める。必要なら途中でカメラを覗く。
-    public func currentSignals(now: Date = Date()) -> DetectionSignals {
+    public func currentSignals(now: Date = Date()) async -> DetectionSignals {
         let idle = idleMonitor.idleSeconds()
         let gaze = updateGazeMonitoring(idleSeconds: idle, now: now)
+        let music = await currentMusic(idleSeconds: idle)
         return DetectionSignals(
             macIdleSeconds: idle,
             iphone: iphoneState,
             gaze: gaze,
+            music: music,
             secondsSinceStamp: attendance?.secondsSinceLastStamp,
             frontmostApp: frontmostMonitor.currentAppName()
         )
+    }
+
+    /// 音楽が鳴っているかを見に行く。
+    ///
+    /// AppleScript の問い合わせなので、手が動いている間は投げない。
+    /// 何も起きない場面で他アプリに毎秒話しかける理由がない。
+    private func currentMusic(idleSeconds: TimeInterval) async -> NowPlaying {
+        guard idleSeconds >= thresholds.minimumIdleSeconds else {
+            music = .silent
+            return .silent
+        }
+        music = await musicController.nowPlaying()
+        return music
     }
 
     /// 視線の監視を、無操作かどうかで開け閉めする。
@@ -141,7 +163,7 @@ public final class DetectionEngine: ObservableObject {
     /// 1 回だけ評価して実行する。ループからも、画面の「いま評価する」ボタンからも呼ぶ。
     @discardableResult
     public func evaluate(now: Date = Date()) async -> DetectionDecision {
-        let signals = currentSignals(now: now)
+        let signals = await currentSignals(now: now)
         lastSignals = signals
 
         let judge = DetectionJudge(thresholds: thresholds)

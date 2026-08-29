@@ -86,9 +86,16 @@ struct DetectionJudgeTests {
         #expect(judge.decide(signals(idle: 300)).state == .confirmed)
     }
 
-    @Test("確定すると音楽を止めて聞かせる段階になる")
-    func confirmedInterrupts() {
-        #expect(judge.decide(signals(idle: 400)).shouldInterrupt)
+    @Test("確定しても、音楽が鳴っていなければ画面を覆わない")
+    func confirmedWithoutMusicDoesNotInterrupt() {
+        // 止める音楽が無いのに画面を奪っても「音楽を止めて聞かせる」が空振りするだけ。
+        #expect(judge.decide(signals(idle: 400)).shouldInterrupt == false)
+    }
+
+    @Test("音楽が鳴っていれば、確定で音楽を止めて聞かせる")
+    func confirmedWithMusicInterrupts() {
+        let playing = DetectionSignals(macIdleSeconds: 400, music: .playing(.spotify))
+        #expect(judge.decide(playing).shouldInterrupt)
     }
 
     // MARK: - 在席スタンプによる猶予

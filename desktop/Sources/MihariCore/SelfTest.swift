@@ -192,22 +192,39 @@ public enum SelfTest {
         )
     }
 
-    /// 音楽を止められるか。オートメーション権限が無ければ失敗するが、それも分かってよい情報。
+    /// いま音楽が鳴っているか。**説教を出すかどうかの条件そのもの。**
+    ///
+    /// `MIHARI_SELFTEST_STOP_MUSIC=1` を付けたときだけ実際に止める。
+    /// 付けなければ問い合わせるだけで、再生を邪魔しない。
     @MainActor
     private static func music() async -> Result {
-        let outcome = await AppleScriptMusicController().stopPlaying()
-        return Result(name: "音楽を止める", ok: true, detail: "\(outcome)")
+        let controller = AppleScriptMusicController()
+        let playing = await controller.nowPlaying()
+
+        guard ProcessInfo.processInfo.environment["MIHARI_SELFTEST_STOP_MUSIC"] == "1" else {
+            return Result(
+                name: "音楽の再生状況",
+                ok: true,
+                detail: "\(playing.label) → 説教は\(playing.isPlaying ? "出る" : "出ない")"
+            )
+        }
+
+        let outcome = await controller.stopPlaying()
+        return Result(name: "音楽を止める", ok: true, detail: "\(playing.label) → \(outcome)")
     }
 
     /// **一番危険な経路。** 全画面を覆ったあと、本当に自動で解除されるかを見る。
     /// 解除されないと Mac が操作不能になるので、上限秒数を短くして必ず確かめる。
     @MainActor
     private static func overlay() async -> Result {
+        // 実物の音楽コントローラを使うので、鳴っていれば本当に止まる。
+        // 診断が人の音楽を止めたまま終わらないよう、解除時に必ず再開させる。
         let model = OverlayModel(
             presenter: ScreenSaverOverlayPresenter(),
             maxDurationSeconds: 2,
-            resumeMusicAfterDismiss: false
+            resumeMusicAfterDismiss: true
         )
+        let wasPlaying = await AppleScriptMusicController().nowPlaying()
         model.show()
         let shown = model.isPresented
 
@@ -219,11 +236,11 @@ public enum SelfTest {
             model.dismissManually()
             return Result(name: "全画面オーバーレイの自動解除", ok: false, detail: "上限を過ぎても解除されなかった")
         }
-        return Result(
-            name: "全画面オーバーレイの自動解除",
-            ok: shown,
-            detail: shown ? "表示され、2 秒で自動解除された" : "そもそも表示できなかった"
-        )
+        var detail = shown ? "表示され、2 秒で自動解除された" : "そもそも表示できなかった"
+        if wasPlaying.isPlaying {
+            detail += "（\(wasPlaying.label)を止めて、解除時に再開した）"
+        }
+        return Result(name: "全画面オーバーレイの自動解除", ok: shown, detail: detail)
     }
 
     /// 写真全体の平均輝度(0=真っ黒, 1=真っ白)。暗すぎて顔が取れないのかを切り分ける。

@@ -61,10 +61,23 @@ final class ActionSpy: @unchecked Sendable {
 @MainActor
 struct DetectionEngineTests {
 
-    private func engine(idle: TimeInterval, spy: ActionSpy) -> DetectionEngine {
+    /// 音楽が鳴っている状況を作るためのスタブ。
+    private struct StubMusic: MusicControlling {
+        let playing: NowPlaying
+        func nowPlaying() async -> NowPlaying { playing }
+        func stopPlaying() async -> MusicStopOutcome { .nothingWasPlaying }
+        func resumePlaying(_ outcome: MusicStopOutcome) async {}
+    }
+
+    private func engine(
+        idle: TimeInterval,
+        spy: ActionSpy,
+        music: NowPlaying = .playing(.spotify)
+    ) -> DetectionEngine {
         let engine = DetectionEngine(
             idleMonitor: MacIdleMonitor(probe: { idle }),
-            frontmostMonitor: FrontmostAppMonitor(probe: { "Safari" })
+            frontmostMonitor: FrontmostAppMonitor(probe: { "Safari" }),
+            musicController: StubMusic(playing: music)
         )
         engine.actions = spy.makeActions()
         return engine

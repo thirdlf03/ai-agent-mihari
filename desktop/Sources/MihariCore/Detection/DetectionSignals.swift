@@ -15,6 +15,12 @@ public struct DetectionSignals: Equatable, Sendable {
     /// 画面を見ているか。カメラを開けていなければ `.none`。
     public let gaze: GazeObservation
 
+    /// いま音楽が鳴っているか。
+    ///
+    /// 「音楽を止めて説教」は、止める音楽が無ければ空振りする。
+    /// 鳴っているときだけ画面を覆うようにするための材料。
+    public let music: NowPlaying
+
     /// 最後に Touch ID の在席スタンプを押してからの秒数。一度も押していなければ `nil`。
     public let secondsSinceStamp: TimeInterval?
 
@@ -25,12 +31,14 @@ public struct DetectionSignals: Equatable, Sendable {
         macIdleSeconds: TimeInterval,
         iphone: SpeechRequest.IPhoneState = .unreachable,
         gaze: GazeObservation = .none,
+        music: NowPlaying = .silent,
         secondsSinceStamp: TimeInterval? = nil,
         frontmostApp: String? = nil
     ) {
         self.macIdleSeconds = max(0, macIdleSeconds)
         self.iphone = iphone
         self.gaze = gaze
+        self.music = music
         self.secondsSinceStamp = secondsSinceStamp
         self.frontmostApp = frontmostApp
     }

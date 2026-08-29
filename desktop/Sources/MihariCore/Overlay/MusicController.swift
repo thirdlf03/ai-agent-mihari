@@ -91,10 +91,45 @@ public enum MusicStopOutcome: Sendable, Equatable {
 
 /// 音楽を止める / 再開する。
 public protocol MusicControlling: Sendable {
+    /// いま再生中のプレイヤーを、**止めずに**返す。
+    ///
+    /// サボり判定の材料に使う。音楽を流しっぱなしで手が止まっているのか、
+    /// そもそも何も鳴っていないのかで、当たり方を変えるため。
+    func nowPlaying() async -> NowPlaying
+
     /// 再生中の Music / Spotify を止める。例外は投げず、結果を outcome として返す。
     func stopPlaying() async -> MusicStopOutcome
     /// `stopPlaying()` が返した outcome をもとに、止めた分だけ再開する。
     func resumePlaying(_ outcome: MusicStopOutcome) async
+}
+
+/// いま何が鳴っているか。
+///
+/// 「鳴っていない」と「分からない」を区別する。オートメーション権限が無いと
+/// 状態そのものが取れないので、それを「鳴っていない」と混ぜると、
+/// 権限を許可していない人には説教が一切出なくなってしまう。
+public enum NowPlaying: Equatable, Sendable {
+    /// このプレイヤーが再生中。
+    case playing(MediaPlayerKind)
+    /// どのプレイヤーも再生していないと確認できた。
+    case silent
+    /// 確認できなかった(主にオートメーション権限が未許可)。
+    case undetermined(reason: String)
+
+    /// 音楽が鳴っていると確信できるか。
+    public var isPlaying: Bool {
+        if case .playing = self { return true }
+        return false
+    }
+
+    /// 画面やログに出す一言。
+    public var label: String {
+        switch self {
+        case .playing(let player): return "\(player.scriptName) が再生中"
+        case .silent: return "何も鳴っていない"
+        case .undetermined: return "確認できない（オートメーション権限）"
+        }
+    }
 }
 
 /// `findPlayingPlayer()` の結果。「再生中がいない」と「分からなかった」を区別する。
@@ -134,6 +169,14 @@ public struct AppleScriptMusicController: MusicControlling {
 
     public static func isBundleRunning(bundleID: String) -> Bool {
         !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty
+    }
+
+    public func nowPlaying() async -> NowPlaying {
+        switch findPlayingPlayer() {
+        case .found(let player): return .playing(player)
+        case .noneConfirmedPlaying: return .silent
+        case .undetermined(let reason): return .undetermined(reason: reason)
+        }
     }
 
     public func stopPlaying() async -> MusicStopOutcome {

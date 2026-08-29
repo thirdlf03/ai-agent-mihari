@@ -59,7 +59,9 @@ public struct DetectionJudge: Sendable {
             state: .confirmed,
             evidence: evidence(for: signals.iphone),
             shouldSpeak: true,
-            shouldInterrupt: true,
+            // 止める音楽が無いのに画面を覆っても、「音楽を止めて聞かせる」が空振りするだけ。
+            // 鳴っているときだけ画面を奪う。鳴っていなければ声だけかける。
+            shouldInterrupt: signals.music.isPlaying,
             reason: confirmedReason(signals, cause: confirmedBy)
         )
     }
@@ -105,6 +107,9 @@ public struct DetectionJudge: Sendable {
             parts.append("iPhone は置かれたまま")
         case .unreachable:
             parts.append("iPhone は応答なし")
+        }
+        if signals.music.isPlaying {
+            parts.append(signals.music.label)
         }
         if let app = signals.frontmostApp {
             parts.append("直前は \(app)")

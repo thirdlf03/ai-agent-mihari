@@ -39,6 +39,9 @@ public struct DetectionView: View {
                 Label(engine.gaze.summary, systemImage: gazeIcon)
                     .foregroundStyle(gazeColor)
                     .font(.callout)
+                Label(engine.music.label, systemImage: engine.music.isPlaying ? "music.note" : "speaker.slash")
+                    .foregroundStyle(engine.music.isPlaying ? Color.orange : Color.secondary)
+                    .font(.callout)
             }
             .padding(.top, 2)
 
@@ -87,6 +90,7 @@ public struct DetectionView: View {
                 row("Mac 無操作", "\(Int(signals.macIdleSeconds)) 秒")
                 row("iPhone", iphoneLabel(signals.iphone))
                 row("視線", signals.gaze.summary)
+                row("音楽", signals.music.label)
                 row("前面アプリ", signals.frontmostApp ?? "不明")
                 row(
                     "在席スタンプから",

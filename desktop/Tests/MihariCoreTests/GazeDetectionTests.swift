@@ -184,31 +184,31 @@ struct GazeMonitoringTests {
     }
 
     @Test("手を動かしている間はカメラを開けない")
-    func neverOpensWhileActive() {
+    func neverOpensWhileActive() async {
         // 緑ランプが点きっぱなしになると、ただの監視カメラになってしまう。
         let monitor = MonitorSpy()
-        _ = engine(idle: 10, monitor: monitor).currentSignals()
+        _ = await engine(idle: 10, monitor: monitor).currentSignals()
         #expect(monitor.starts == 0)
     }
 
     @Test("無操作が閾値を超えたらカメラを開ける")
-    func opensOnceIdle() {
+    func opensOnceIdle() async {
         let monitor = MonitorSpy()
-        _ = engine(idle: 70, monitor: monitor).currentSignals()
+        _ = await engine(idle: 70, monitor: monitor).currentSignals()
         #expect(monitor.starts == 1)
     }
 
     @Test("すでに開いていれば開き直さない")
-    func doesNotReopen() {
+    func doesNotReopen() async {
         let monitor = MonitorSpy()
         let engine = engine(idle: 70, monitor: monitor)
-        _ = engine.currentSignals()
-        _ = engine.currentSignals()
+        _ = await engine.currentSignals()
+        _ = await engine.currentSignals()
         #expect(monitor.starts == 1)
     }
 
     @Test("触り始めたらカメラを閉じて、覚えていた結果も捨てる")
-    func closesWhenActive() {
+    func closesWhenActive() async {
         // 席に戻って作業を再開したのに、さっきの「見ていない」で撮られては困る。
         let monitor = MonitorSpy()
         let idle = IdleBox()
@@ -219,11 +219,11 @@ struct GazeMonitoringTests {
 
         idle.set(70)
         monitor.setObservation(GazeObservation(state: .notLooking, notLookingSeconds: 40, updatedAt: Date()))
-        _ = engine.currentSignals()
+        _ = await engine.currentSignals()
         #expect(engine.gaze.state == .notLooking)
 
         idle.set(0)
-        let signals = engine.currentSignals()
+        let signals = await engine.currentSignals()
 
         #expect(monitor.stops == 1)
         #expect(signals.gaze == .none)
@@ -231,20 +231,20 @@ struct GazeMonitoringTests {
     }
 
     @Test("古い観測結果は判定に使わない")
-    func staleObservationIsDropped() {
+    func staleObservationIsDropped() async {
         let monitor = MonitorSpy()
         monitor.setObservation(
             GazeObservation(state: .notLooking, notLookingSeconds: 60, updatedAt: Date().addingTimeInterval(-120))
         )
-        let signals = engine(idle: 70, monitor: monitor).currentSignals()
+        let signals = await engine(idle: 70, monitor: monitor).currentSignals()
         #expect(signals.gaze == .none)
     }
 
     @Test("監視を止めるとカメラも閉じる")
-    func stopClosesTheCamera() {
+    func stopClosesTheCamera() async {
         let monitor = MonitorSpy()
         let engine = engine(idle: 70, monitor: monitor)
-        _ = engine.currentSignals()
+        _ = await engine.currentSignals()
 
         engine.stop()
 

@@ -39,6 +39,10 @@ struct OverlayModelTests {
             self.outcome = outcome
         }
 
+        func nowPlaying() async -> NowPlaying {
+            if case .stoppedViaAppleScript(let player) = outcome { return .playing(player) }
+            return .silent
+        }
         func stopPlaying() async -> MusicStopOutcome { outcome }
         func resumePlaying(_ outcome: MusicStopOutcome) async { resumedOutcomes.append(outcome) }
     }
