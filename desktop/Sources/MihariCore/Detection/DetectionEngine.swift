@@ -36,6 +36,14 @@ public final class DetectionEngine: ObservableObject {
     /// いま音楽が鳴っているか。
     @Published public private(set) var music: NowPlaying = .silent
     @Published public private(set) var log: [DetectionLogEntry] = []
+
+    /// いまのエスカレーション段階。ペットへ渡している `PetEvent.escalationStage` と同じ値。
+    /// 状態パネルに出して、どこまで上がっているかを見えるようにする。
+    @Published public private(set) var escalationStage = 0
+
+    /// 最後に証拠を撮った時刻。まだ撮っていなければ `nil`。
+    /// クールダウンの判定に使っている値そのもので、残り時間の表示にも使う。
+    @Published public private(set) var lastEvidenceAt: Date?
     @Published public var thresholds: DetectionThresholds = .default
 
     /// 休憩が明ける時刻。休憩していなければ `nil`。
@@ -48,7 +56,6 @@ public final class DetectionEngine: ObservableObject {
     private let capture: CaptureService
     private let attendance: AttendanceModel?
     private var loop: Task<Void, Never>?
-    private var lastEvidenceAt: Date?
     private let gazeMonitor: GazeMonitor
     private let musicController: MusicControlling
     private let sleep: Sleeping
@@ -240,6 +247,7 @@ public final class DetectionEngine: ObservableObject {
     /// 休憩が明ければ何もしなくても通常の評価に戻る。
     public func startBreak(now: Date = Date()) {
         breakUntil = now.addingTimeInterval(thresholds.breakDurationSeconds)
+        escalationStage = 0
         // 休むと言った相手のカメラを開けたままにしない。緑ランプを点けておく理由がない。
         gazeMonitor.stop()
         gaze = .none
@@ -329,6 +337,7 @@ public final class DetectionEngine: ObservableObject {
     /// 疑いのエピソードが終わった。答えの出ていない問いかけを閉じ、ペットに戻ったことを伝える。
     private func finishEpisode() {
         dismissPrompt()
+        escalationStage = 0
         // セリフは空。「おかえり」の動きだけしてもらう。
         onEvent?(PetEvent(state: .normal, escalationStage: 0, line: ""))
     }
@@ -387,10 +396,11 @@ public final class DetectionEngine: ObservableObject {
         line: String,
         prompt: PetYesNoPrompt?
     ) {
+        escalationStage = petStage(decision)
         onEvent?(
             PetEvent(
                 state: petState(decision.state),
-                escalationStage: petStage(decision),
+                escalationStage: escalationStage,
                 line: line,
                 visionLabel: petLabel(label),
                 prompt: prompt

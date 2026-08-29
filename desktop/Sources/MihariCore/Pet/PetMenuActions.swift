@@ -10,6 +10,8 @@ public protocol PetMenuActions: AnyObject, ObservableObject {
     var isWatching: Bool { get }
     /// 休憩中か。メニューの表示を「休憩する / 休憩を終える」で切り替えるのに使う。
     var isOnBreak: Bool { get }
+    /// 状態パネルを出しているか。メニューのチェックに使う。
+    var isStatusPanelVisible: Bool { get }
 
     /// 監視を始める。
     func startWatching()
@@ -25,4 +27,6 @@ public protocol PetMenuActions: AnyObject, ObservableObject {
     func openDiscordSettings()
     /// 権限の確認画面を開く。
     func openPermissions()
+    /// 状態パネルの表示を切り替える。
+    func toggleStatusPanel()
 }

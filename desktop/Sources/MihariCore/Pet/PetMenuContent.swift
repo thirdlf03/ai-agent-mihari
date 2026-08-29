@@ -65,6 +65,7 @@ public struct PetMenuContent<Actions: PetMenuActions>: View {
             }
         }
         Toggle("声を出す", isOn: voiceBinding)
+        Toggle("状態パネルを表示", isOn: statusPanelBinding)
     }
 
     private func petBinding(for candidate: PetDefinition) -> Binding<Bool> {
@@ -91,6 +92,13 @@ public struct PetMenuContent<Actions: PetMenuActions>: View {
         Binding(
             get: { pet.isVoiceEnabled },
             set: { pet.setVoiceEnabled($0) }
+        )
+    }
+
+    private var statusPanelBinding: Binding<Bool> {
+        Binding(
+            get: { actions.isStatusPanelVisible },
+            set: { _ in actions.toggleStatusPanel() }
         )
     }
 }

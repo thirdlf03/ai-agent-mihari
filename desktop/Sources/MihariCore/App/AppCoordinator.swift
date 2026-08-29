@@ -33,10 +33,13 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     @Published public private(set) var isWatching = false
     /// 休憩中か。メニューの表示に使う。
     @Published public private(set) var isOnBreak = false
+    /// 状態パネルを出しているか。メニューの表示に使う。
+    @Published public private(set) var isStatusPanelVisible = false
 
     /// 音を出す口。検知のセリフとペットのひとりごとで 1 つを共有する。
     private let speechPlayer: SpeechPlayer
     private let windows = AuxiliaryWindows()
+    private let statusPanel = StatusPanelController()
     private var cancellables: Set<AnyCancellable> = []
     /// すでに見張り始めたか。`begin()` を何度呼んでも 1 回しか効かないようにする。
     private var hasBegun = false
@@ -51,6 +54,7 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         // 在席スタンプ直後の猶予を効かせるため、検知エンジンに在席の記録を渡す。
         self.detection = DetectionEngine(attendance: attendance)
         self.pet = LivePetPresenter(controller: PetController(speechPlayer: player))
+        self.isStatusPanelVisible = statusPanel.isVisible
     }
 
     // MARK: - 起動
@@ -83,6 +87,7 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
             return AnyView(PetMenuContent(actions: self, pet: pet.controller))
         }
         pet.show()
+        statusPanel.restore { statusPanelView }
         observeDetection()
         observeDaemonEvents()
 
@@ -184,6 +189,16 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
 
     public func openPermissions() {
         showPermissionWindow(canStart: !hasBegun)
+    }
+
+    public func toggleStatusPanel() {
+        statusPanel.toggle { statusPanelView }
+        isStatusPanelVisible = statusPanel.isVisible
+    }
+
+    /// 状態パネルの中身。エンジンとデーモンの `@Published` をそのまま映す。
+    private var statusPanelView: StatusPanelView {
+        StatusPanelView(engine: detection, daemon: daemon)
     }
 
     // MARK: - 配線
