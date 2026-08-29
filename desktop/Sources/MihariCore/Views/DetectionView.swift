@@ -42,6 +42,15 @@ public struct DetectionView: View {
                 Label(engine.music.label, systemImage: engine.music.isPlaying ? "music.note" : "speaker.slash")
                     .foregroundStyle(engine.music.isPlaying ? Color.orange : Color.secondary)
                     .font(.callout)
+                if let until = engine.breakUntil {
+                    Label {
+                        Text("休憩中(残り ") + Text(until, style: .relative) + Text(")")
+                    } icon: {
+                        Image(systemName: "cup.and.saucer")
+                    }
+                    .foregroundStyle(Color.blue)
+                    .font(.callout)
+                }
             }
             .padding(.top, 2)
 
@@ -68,6 +77,8 @@ public struct DetectionView: View {
             thresholdRow("見ていない継続", engine.thresholds.notLookingDurationSeconds, "この秒数続いたら確定する")
             thresholdRow("スタンプ猶予", engine.thresholds.stampGraceSeconds, "在席スタンプ直後は見逃す")
             thresholdRow("クールダウン", engine.thresholds.cooldownSeconds, "次に撮るまで空ける")
+            thresholdRow("休憩", engine.thresholds.breakDurationSeconds, "「休憩中?」に はい で見張りを止める")
+            thresholdRow("問いかけ待ち", engine.thresholds.promptTimeoutSeconds, "返事が無ければ引っ込める")
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)

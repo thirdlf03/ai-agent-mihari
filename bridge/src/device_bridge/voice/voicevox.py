@@ -17,9 +17,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "http://127.0.0.1:50021"
 
-#: 話者 ID。VOICEVOX の話者一覧は /speakers で引ける。
-#: TODO: どのキャラにするか未定。決まったらここを既定値にする。
-DEFAULT_SPEAKER = 1
+#: 話者 ID。VOICEVOX の話者一覧は /speakers で引ける。14 は冥鳴ひまり。
+DEFAULT_SPEAKER = 14
 
 #: 合成を待つ上限。エンジンが固まっていても発話待ちで詰まらせない。
 DEFAULT_TIMEOUT_SECONDS = 10.0
