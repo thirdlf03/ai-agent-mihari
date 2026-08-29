@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Mihari</string>
+	<key>CFBundleDisplayName</key>
+	<string>Mihari</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.thirdlf03.mihari</string>
+	<key>CFBundleExecutable</key>
+	<string>Mihari</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>LSUIElement</key>
+	<false/>
+	<key>NSCameraUsageDescription</key>
+	<string>サボりを検知したときに、証拠として写真を1枚だけ撮影します。撮影した画像は、あなたが選んだ Discord チャンネルに送信されます。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>在席状況の判定にマイクを使用します(音声そのものは保存しません)。</string>
+	<key>NSMotionUsageDescription</key>
+	<string>AirPods の向きを読み取り、うなずき/首振りを「はい/いいえ」の回答として受け取ります。</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>説教を聞かせるあいだ、再生中の音楽を一時停止するために他アプリを操作します。</string>
+</dict>
+</plist>
