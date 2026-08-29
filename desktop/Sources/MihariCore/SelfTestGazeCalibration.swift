@@ -26,6 +26,7 @@ extension SelfTest {
         let state: GazeState
         let eyeOpenness: Double?
         let noseOffset: Double?
+        let noseDrop: Double?
         let yaw: Double?
 
         /// 顔(ランドマーク)が取れたか。指標が 1 つでも出ていれば取れている。
@@ -60,7 +61,8 @@ extension SelfTest {
             emit("\n>>> 次: \(phase.rawValue)（2 秒後に計測開始）\n")
             try? await Task.sleep(for: .seconds(2))
             emit(">>> 3 秒間そのまま: \(phase.rawValue)\n")
-            let collected = await collect(from: monitor, seconds: 3)
+            // 動作へ移る途中のフレームが混ざると分布が汚れるので、最初の 1 秒は捨てる。
+            let collected = await collect(from: monitor, seconds: 4, discardFirstSeconds: 1)
             samples[phase, default: []].append(contentsOf: collected)
         }
 
@@ -89,21 +91,27 @@ extension SelfTest {
     }
 
     /// 指定秒数のあいだ、新しいフレームが来るたびに記録する。
-    private static func collect(from monitor: GazeMonitor, seconds: TimeInterval) async -> [GazeSample] {
+    /// `discardFirstSeconds` のあいだのフレームは、動作の途中とみなして捨てる。
+    private static func collect(
+        from monitor: GazeMonitor, seconds: TimeInterval, discardFirstSeconds: TimeInterval = 0
+    ) async -> [GazeSample] {
         var collected: [GazeSample] = []
         var lastSeen: Date?
-        let deadline = Date().addingTimeInterval(seconds)
+        let start = Date()
+        let deadline = start.addingTimeInterval(seconds)
         while Date() < deadline {
             try? await Task.sleep(for: .milliseconds(100))
             let observation = monitor.observation
             // 同じフレームを二重に数えない。
             guard let updatedAt = observation.updatedAt, updatedAt != lastSeen else { continue }
             lastSeen = updatedAt
+            guard Date().timeIntervalSince(start) >= discardFirstSeconds else { continue }
             collected.append(
                 GazeSample(
                     state: observation.state,
                     eyeOpenness: observation.eyeOpenness,
                     noseOffset: observation.noseOffset,
+                    noseDrop: observation.noseDrop,
                     yaw: observation.yawRadians
                 ))
         }
@@ -127,6 +135,7 @@ extension SelfTest {
             lines.append("  目の開き " + rangeText(list.compactMap(\.eyeOpenness)))
             lines.append("  鼻オフセット " + rangeText(list.compactMap(\.noseOffset)))
             lines.append("  |鼻オフセット| " + rangeText(list.compactMap { $0.noseOffset.map(abs) }))
+            lines.append("  鼻の縦(ピッチ) " + rangeText(list.compactMap(\.noseDrop)))
             lines.append("  yaw " + rangeText(list.compactMap(\.yaw)))
         }
         lines.append(String(repeating: "-", count: 60))
@@ -135,12 +144,17 @@ extension SelfTest {
     }
 
     /// 「見る」を基準に、離す側のフェーズごとに分離できる指標を推定する。
+    ///
+    /// min/max の比較だと外れ値 1 つ(振り向き途中の残りなど)で分離が消えるので、
+    /// 「離す側の四分位(25%)が、見る側のほぼ全体(95%)より外側にあるか」で判定する。
     private static func recommendations(_ samples: [GazePhase: [GazeSample]]) -> [String] {
         guard let look = samples[.look], !look.isEmpty else {
             return ["基準になる「画面を見る」が測れておらず、推奨を出せない"]
         }
         let lookEAR = look.compactMap(\.eyeOpenness)
         let lookNose = look.compactMap { $0.noseOffset.map(abs) }
+        let lookDrop = look.compactMap(\.noseDrop)
+        let dropBaseline = quantile(lookDrop, 0.5)
 
         var lines: [String] = ["推奨:"]
         for phase in [GazePhase.phone, .side, .leave] {
@@ -153,24 +167,56 @@ extension SelfTest {
                         phase.rawValue, faceRate * 100))
                 continue
             }
-            // 顔が写ったままなら、指標の分離を探す。
+
+            // 顔が写ったままなら、指標ごとに分離を探す。
+            var separable: [String] = []
+
+            // 目の開き: 離す側が下に離れる。
             let awayEAR = away.compactMap(\.eyeOpenness)
+            if let awayHigh = quantile(awayEAR, 0.75), let lookLow = quantile(lookEAR, 0.05),
+                awayHigh < lookLow
+            {
+                separable.append(String(format: "目の開き(しきい値 %.3f)", (awayHigh + lookLow) / 2))
+            }
+
+            // |鼻オフセット|: 離す側が上に離れる。
             let awayNose = away.compactMap { $0.noseOffset.map(abs) }
-            if let earMax = awayEAR.max(), let earMin = lookEAR.min(), earMax < earMin {
-                lines.append(
-                    String(
-                        format: "  %@ → 目の開きで分離できる(しきい値 %.3f を推奨)",
-                        phase.rawValue, (earMax + earMin) / 2))
-            } else if let noseMin = awayNose.min(), let noseMax = lookNose.max(), noseMin > noseMax {
-                lines.append(
-                    String(
-                        format: "  %@ → |鼻オフセット|で分離できる(しきい値 %.3f を推奨)",
-                        phase.rawValue, (noseMin + noseMax) / 2))
-            } else {
+            if let awayLow = quantile(awayNose, 0.25), let lookHigh = quantile(lookNose, 0.95),
+                awayLow > lookHigh
+            {
+                separable.append(String(format: "|鼻オフセット|(しきい値 %.3f)", (awayLow + lookHigh) / 2))
+            }
+
+            // 鼻の縦: 「見る」の中央値を基準に、そこからの乖離が上に離れるか。
+            if let baseline = dropBaseline {
+                let lookDeviation = lookDrop.map { abs($0 - baseline) }
+                let awayDeviation = away.compactMap(\.noseDrop).map { abs($0 - baseline) }
+                if let awayLow = quantile(awayDeviation, 0.25),
+                    let lookHigh = quantile(lookDeviation, 0.95),
+                    awayLow > lookHigh
+                {
+                    separable.append(
+                        String(
+                            format: "鼻の縦の乖離(基準 %.3f から %.3f 以上ずれたら)",
+                            baseline, (awayLow + lookHigh) / 2))
+                }
+            }
+
+            if separable.isEmpty {
                 lines.append("  \(phase.rawValue) → どの指標でも「見る」と重なっていて分離できない")
+            } else {
+                lines.append("  \(phase.rawValue) → " + separable.joined(separator: " / ") + " で分離できる")
             }
         }
         return lines
+    }
+
+    /// 分位点。q は 0.0〜1.0。値が無ければ nil。
+    private static func quantile(_ values: [Double], _ q: Double) -> Double? {
+        guard !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        let index = Int(Double(sorted.count - 1) * q)
+        return sorted[index]
     }
 
     /// 自己診断の一覧に載せる一行。詳細は標準出力のレポートで見る。

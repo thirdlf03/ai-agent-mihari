@@ -18,16 +18,22 @@ public struct FaceLandmarkMetrics: Sendable, Equatable {
     /// yaw が取れない環境でのよそ見判定の候補。詳細は `FaceLandmarkGeometry.noseOffset`。
     public let noseOffset: Double?
 
+    /// 鼻が両目の線からどれだけ離れているか(顔ピッチ=上下向きのプロキシ)。
+    /// 下を向いてスマホを見る動作の判定候補。詳細は `FaceLandmarkGeometry.noseDrop`。
+    public let noseDrop: Double?
+
     public init(
         leftEyeOpenness: Double?,
         rightEyeOpenness: Double?,
         yawRadians: Double?,
-        noseOffset: Double? = nil
+        noseOffset: Double? = nil,
+        noseDrop: Double? = nil
     ) {
         self.leftEyeOpenness = leftEyeOpenness
         self.rightEyeOpenness = rightEyeOpenness
         self.yawRadians = yawRadians
         self.noseOffset = noseOffset
+        self.noseDrop = noseDrop
     }
 
     /// 左右の目の開き具合の平均。片方しか取れなければそちらだけを使う。

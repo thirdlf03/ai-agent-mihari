@@ -40,3 +40,17 @@ extension FaceLandmarkMetricsTests {
         #expect(without.noseOffset == nil)
     }
 }
+
+extension FaceLandmarkMetricsTests {
+
+    @Test("鼻の縦オフセットを保持する(未指定なら nil)")
+    func carriesNoseDrop() {
+        let metrics = FaceLandmarkMetrics(
+            leftEyeOpenness: 0.3, rightEyeOpenness: 0.3, yawRadians: nil, noseDrop: -0.6)
+        #expect(metrics.noseDrop == -0.6)
+
+        let without = FaceLandmarkMetrics(
+            leftEyeOpenness: 0.3, rightEyeOpenness: 0.3, yawRadians: nil)
+        #expect(without.noseDrop == nil)
+    }
+}

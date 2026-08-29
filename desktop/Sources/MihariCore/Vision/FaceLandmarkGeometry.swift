@@ -59,6 +59,33 @@ extension FaceLandmarkGeometry {
     public static func noseOffset(
         leftEye: [CGPoint], rightEye: [CGPoint], nose: [CGPoint]
     ) -> Double? {
+        guard let face = eyeAxis(leftEye: leftEye, rightEye: rightEye, nose: nose) else { return nil }
+        // 軸方向の成分だけを取り出し、目間距離で正規化する。
+        let projected = (face.toNose.x * face.axis.x + face.toNose.y * face.axis.y) / face.distance
+        return Double(projected / face.distance)
+    }
+
+    /// 鼻が両目を結ぶ線からどれだけ離れているか(顔ピッチ=上下向きのプロキシ)。
+    ///
+    /// 顔を上下に振ると、遠近の縮みで目と鼻の縦の距離が画像上で変わる。
+    /// その変化を「両目の線から鼻の重心までの垂直距離 / 目間距離」として取り出す。
+    /// 軸に対する垂直成分なので、首をかしげても・左右に寄っても値は変わらない。
+    ///
+    /// - Returns: 目間距離で正規化した符号付きの距離。いずれかの点群が空、
+    ///   または両目の重心が一致していれば `nil`。
+    public static func noseDrop(
+        leftEye: [CGPoint], rightEye: [CGPoint], nose: [CGPoint]
+    ) -> Double? {
+        guard let face = eyeAxis(leftEye: leftEye, rightEye: rightEye, nose: nose) else { return nil }
+        // 軸との外積 = 垂直方向の成分。目間距離で正規化する。
+        let perpendicular = (face.axis.x * face.toNose.y - face.axis.y * face.toNose.x) / face.distance
+        return Double(perpendicular / face.distance)
+    }
+
+    /// 両目の重心を結ぶ軸と、その中点から鼻の重心へのベクトル。noseOffset / noseDrop の共通部品。
+    private static func eyeAxis(
+        leftEye: [CGPoint], rightEye: [CGPoint], nose: [CGPoint]
+    ) -> (axis: CGPoint, toNose: CGPoint, distance: CGFloat)? {
         guard let left = centroid(of: leftEye),
             let right = centroid(of: rightEye),
             let noseCenter = centroid(of: nose)
@@ -70,9 +97,7 @@ extension FaceLandmarkGeometry {
 
         let mid = CGPoint(x: (left.x + right.x) / 2, y: (left.y + right.y) / 2)
         let toNose = CGPoint(x: noseCenter.x - mid.x, y: noseCenter.y - mid.y)
-        // 軸方向の成分だけを取り出し、目間距離で正規化する。
-        let projected = (toNose.x * axis.x + toNose.y * axis.y) / distance
-        return Double(projected / distance)
+        return (axis, toNose, distance)
     }
 
     /// 点群の重心。空なら `nil`。

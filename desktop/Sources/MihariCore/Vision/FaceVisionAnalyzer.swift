@@ -70,17 +70,20 @@ public enum FaceVisionAnalyzer {
             FaceLandmarkGeometry.eyeOpenness(points: region.pointsInImage(imageSize: imageSize))
         }
 
-        let noseOffset: Double? = {
-            guard let leftEye = landmarks?.leftEye,
-                let rightEye = landmarks?.rightEye,
-                let nose = landmarks?.nose
-            else { return nil }
-            return FaceLandmarkGeometry.noseOffset(
-                leftEye: leftEye.pointsInImage(imageSize: imageSize),
-                rightEye: rightEye.pointsInImage(imageSize: imageSize),
-                nose: nose.pointsInImage(imageSize: imageSize)
-            )
-        }()
+        var noseOffset: Double?
+        var noseDrop: Double?
+        if let leftEye = landmarks?.leftEye,
+            let rightEye = landmarks?.rightEye,
+            let nose = landmarks?.nose
+        {
+            let leftPoints = leftEye.pointsInImage(imageSize: imageSize)
+            let rightPoints = rightEye.pointsInImage(imageSize: imageSize)
+            let nosePoints = nose.pointsInImage(imageSize: imageSize)
+            noseOffset = FaceLandmarkGeometry.noseOffset(
+                leftEye: leftPoints, rightEye: rightPoints, nose: nosePoints)
+            noseDrop = FaceLandmarkGeometry.noseDrop(
+                leftEye: leftPoints, rightEye: rightPoints, nose: nosePoints)
+        }
 
         if landmarks == nil {
             logger.info("顔は検出できたがランドマークが取れなかった(confidence=\(observation.confidence, privacy: .public))")
@@ -90,7 +93,8 @@ public enum FaceVisionAnalyzer {
             leftEyeOpenness: leftOpenness,
             rightEyeOpenness: rightOpenness,
             yawRadians: observation.yaw?.doubleValue,
-            noseOffset: noseOffset
+            noseOffset: noseOffset,
+            noseDrop: noseDrop
         )
     }
 }
