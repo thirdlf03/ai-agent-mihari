@@ -169,3 +169,38 @@ Swift ──POST /voice/speak（状況）──▶ Python
 
 `bridge/src/device_bridge/voice/generator.py` の `SYSTEM_PROMPT` を書き換える。
 固定文言は `bridge/src/device_bridge/voice/fallback.py`。
+
+## Vision でのラベル付け(寝てる / よそ見 / 不在)
+
+撮った写真そのものではサボり判定をしない。撮った 1 枚に「寝てる / よそ見 / 不在」の
+ラベルを付けて、Discord の文面とセリフ生成(`SpeechRequest.vision`)に渡すためだけに使う(#11)。
+`Sources/MihariCore/Vision/` にまとまっている。
+
+- `FaceVisionAnalyzer`: `VNDetectFaceLandmarksRequest` を実行する唯一の入口。複数人写っていても
+  最も信頼度の高い 1 件だけを見る。例外は内部で吸収し、失敗しても外へは投げない。
+- `FaceLandmarkGeometry` / `FaceLandmarkMetrics`: 目の輪郭点群から開き具合(縦幅/横幅)を計算する
+  純粋関数と、判定に使う指標(左右の目の開き具合・yaw)をまとめた型。Vision フレームワークの型を
+  知らないので、実カメラなしにテストできる。
+- `FaceDetectionOutcome`: 検出結果を `detectionFailed` / `noFaceFound` / `faceFound(metrics)` の
+  3 通りに分けたもの。「顔が 0 件」と「検出処理自体が失敗した」を区別する。
+- `VisionLabelClassifier`: 上記から `SpeechRequest.VisionLabel` を決める純粋なロジック。
+  閾値は引数で注入できる。
+
+判定の優先順位と閾値(いずれも `../macos-app-verification` の SaboriLab モジュール 11 での
+検証値を引き継いだ仮の値。個人差・カメラ位置・照明でキャリブレーションが必要):
+
+| 条件 | ラベル |
+| --- | --- |
+| 顔が 1 件も検出できない | `absent`(不在) |
+| 目の開き具合(左右平均、縦幅/横幅)が `0.18` 未満 | `sleeping`(寝てる) |
+| `yaw` の絶対値が `0.35` rad(約 20 度)超 | `lookingAway`(よそ見) |
+| 上記のどれでもない / 検出処理自体が失敗した | `unknown`(不明) |
+
+「検出処理自体が失敗した」場合は「顔が写っていない」と断定できないため `absent` ではなく
+`unknown` に倒す。ラベル付けは付加価値であり、これが原因で撮影や送信を止めないことを優先している。
+
+「Vision でラベル付け」タブ(`VisionView`)で「撮ってラベルを付ける」を押すと、その場で
+1 枚撮ってプレビュー・判定結果・算出した指標の生の値(左右の目の開き具合・yaw の角度)を表示する。
+生の値を見ながら閾値を調整する用途を想定していて、他タブへの組み込みは行っていない。
+
+既知の誤判定要因: メガネ・暗所・逆光。
