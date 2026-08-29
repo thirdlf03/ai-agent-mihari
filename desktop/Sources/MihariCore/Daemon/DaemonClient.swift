@@ -75,6 +75,53 @@ public struct DaemonClient: Sendable {
         try await get("voice/status")
     }
 
+    /// Discord Bot が使える状態かを問い合わせる。
+    public func discordStatus() async throws -> DiscordStatus {
+        try await get("discord/status")
+    }
+
+    /// 投稿できるチャンネルの一覧。
+    public func discordChannels() async throws -> DiscordChannelList {
+        try await get("discord/channels")
+    }
+
+    /// 投稿先のチャンネルを決める。
+    @discardableResult
+    public func selectDiscordChannel(_ channel: DiscordChannel) async throws -> DiscordChannelSelection {
+        try await post(
+            "discord/channel",
+            body: DiscordChannelRequest(
+                guildID: channel.guildID,
+                channelID: channel.channelID,
+                guildName: channel.guildName,
+                channelName: channel.channelName
+            )
+        )
+    }
+
+    /// 証拠を投稿する。画像は base64 にして送る。
+    @discardableResult
+    public func postToDiscord(
+        text: String,
+        image: Data? = nil,
+        filename: String = "evidence.png"
+    ) async throws -> DiscordPostResult {
+        try await post(
+            "discord/post",
+            body: DiscordPostRequest(
+                text: text,
+                image: image?.base64EncodedString(),
+                filename: filename
+            )
+        )
+    }
+
+    /// 監視の開始を予約する。`at` が `nil` ならすぐ始める。
+    @discardableResult
+    public func setWatchSchedule(at time: String?) async throws -> WatchSchedule {
+        try await post("discord/schedule", body: WatchScheduleRequest(at: time, requestedBy: "app"))
+    }
+
     /// SSE の接続に使うリクエスト。
     public func eventStreamRequest() throws -> URLRequest {
         var request = try makeRequest(path: "events", authenticated: true)
@@ -155,6 +202,36 @@ public struct DaemonClient: Sendable {
     private struct PublishRequest: Encodable {
         let name: String
         let payload: [String: String]
+    }
+
+    private struct DiscordChannelRequest: Encodable {
+        let guildID: Int
+        let channelID: Int
+        let guildName: String
+        let channelName: String
+
+        enum CodingKeys: String, CodingKey {
+            case guildID = "guild_id"
+            case channelID = "channel_id"
+            case guildName = "guild_name"
+            case channelName = "channel_name"
+        }
+    }
+
+    private struct DiscordPostRequest: Encodable {
+        let text: String
+        let image: String?
+        let filename: String
+    }
+
+    private struct WatchScheduleRequest: Encodable {
+        let at: String?
+        let requestedBy: String
+
+        enum CodingKeys: String, CodingKey {
+            case at
+            case requestedBy = "requested_by"
+        }
     }
 }
 

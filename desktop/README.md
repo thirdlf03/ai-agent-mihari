@@ -152,3 +152,36 @@ Swift ──POST /voice/speak（状況）──▶ Python
 
 `bridge/src/device_bridge/voice/generator.py` の `SYSTEM_PROMPT` を書き換える。
 固定文言は `bridge/src/device_bridge/voice/fallback.py`。
+
+## Discord
+
+証拠の投稿も、監視の指示も Discord Bot 経由で行う。Webhook は使わない。
+**Bot は Mac の上でローカル常駐する**ので、Mac が落ちている間はスラッシュコマンドが効かない。
+
+### セットアップ
+
+1. [Discord Developer Portal](https://discord.com/developers/applications) で **New Application**
+2. 「General Information」の **APPLICATION ID** を `bridge/.env` の `DISCORD_CLIENT_ID` に
+3. 「Bot」タブで **Reset Token** して `bridge/.env` の `DISCORD_BOT_TOKEN` に
+4. アプリの「Discord」タブで **招待 URL を開く** → 自分のサーバに Bot を入れる
+5. 「チャンネルを探す」→ 投稿先を選ぶ
+
+`bridge/.env` は `.gitignore` 済み。**Bot トークンは認証情報なので絶対にコミットしない。**
+
+未設定でもアプリは起動する。「Discord」タブに、いま何段目で止まっているかが出る。
+
+### スラッシュコマンド
+
+| コマンド | 内容 |
+| --- | --- |
+| `/watch start` | いますぐ監視を始める |
+| `/watch at HH:MM` | 指定時刻に監視を始める（過ぎていれば翌日） |
+| `/watch stop` | 監視を止める |
+| `/watch status` | いまの監視状態を見る |
+
+予約が発火すると Python 側が SSE に `watch.start` を流し、macOS アプリが監視モードに入る。
+
+### 招待 URL が要求する権限
+
+「チャンネルを見る」「メッセージを送る」「ファイルを添付する」だけ。
+過剰な権限を要求すると招待をためらわれるので最小限にしている。
