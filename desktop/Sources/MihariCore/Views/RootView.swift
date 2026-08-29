@@ -49,6 +49,9 @@ public struct RootView: View {
             // デーモンを立ち上げてから、検知エンジンに各機能を差し込む。
             await daemon.start()
             wireDetection()
+            // 常駐して見張るアプリなので、起動したら見張り始める。
+            // ボタンを押すまで何も起きないのでは、そもそも監視にならない。
+            detection.start()
         }
         .onChange(of: daemon.events.first?.id) { handleLatestEvent() }
         .onDisappear {
@@ -90,9 +93,23 @@ public struct RootView: View {
         }
     }
 
-    /// SSE で届いた iPhone の状態変化を検知エンジンに反映する。
+    /// SSE で届いたイベントを検知エンジンに反映する。
     private func handleLatestEvent() {
-        guard let event = daemon.events.first, event.name == "iphone.state" else { return }
+        guard let event = daemon.events.first else { return }
+        switch event.name {
+        case "iphone.state":
+            applyIPhoneState(event)
+        case "watch.start":
+            // Discord の /watch から始めた場合。すでに見張っていれば何も起きない。
+            detection.start()
+        case "watch.stop":
+            detection.stop()
+        default:
+            break
+        }
+    }
+
+    private func applyIPhoneState(_ event: DaemonEvent) {
         guard let raw = event.payload["activity"] else { return }
         switch raw {
         case "active": detection.iphoneState = .active

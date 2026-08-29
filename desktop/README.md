@@ -561,6 +561,45 @@ Mac の無操作時間と iPhone の様子から、声をかけるか・証拠�
 | `stampGraceSeconds` | 300 | 在席スタンプ直後の猶予 |
 | `cooldownSeconds` | 180 | 次に撮るまで空ける |
 
+### いつ見張り始めるか
+
+**アプリを起動したら自動で見張り始める。** 常駐して見張るアプリなので、ボタンを押すまで
+何も起きないのでは監視にならない。「検知」タブから手で止め / 再開もできる。
+
+Discord の `/watch start` `/watch at HH:MM` `/watch stop` からも操作できる。
+Python 側のスケジューラが SSE に `watch.start` / `watch.stop` を流し、アプリがそれを受ける。
+
+### 動作確認（しきい値を縮めて通しで見る）
+
+5 分待たずに一連の流れを確かめたいとき:
+
+```sh
+make build
+MIHARI_FAST_THRESHOLDS=1 ./desktop/Mihari.app/Contents/MacOS/Mihari
+```
+
+疑い 10 秒 / 確定 25 秒 / 視線 5 秒から 8 秒継続、まで縮まる。
+判断の様子は「検知」タブの記録か、次のログで見られる。
+
+```sh
+log stream --info --predicate 'subsystem == "com.thirdlf03.mihari"' --style compact
+```
+
+実際にこうなる（Discord のトークンが無い状態）:
+
+```
+視線の監視を開始する(緑ランプ点灯)
+AVCaptureSession を開始する(撮影のみ・緑ランプ点灯)
+AVCaptureSession を停止した(緑ランプ消灯)
+Discord へ投稿できなかった: HTTP 409 DISCORD_BOT_TOKEN が未設定
+confirmed: Mac が 4分 無操作 / iPhone は応答なし / 直前は GatherV2
+           → 証拠を取った / Discord に送れなかった
+confirmed: 7秒 前に証拠を取ったばかり → 声をかけた
+```
+
+**Discord が失敗しても検知が止まらない**ことと、**クールダウンが効いて撮り直さない**ことが
+この 1 回で確かめられる。
+
 ### 判断の記録
 
 「なぜ撮られたのか」が後から分からないと、閾値を詰めようがないし撮られた本人も納得できない。

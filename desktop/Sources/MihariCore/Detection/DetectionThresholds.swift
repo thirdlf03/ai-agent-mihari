@@ -58,5 +58,21 @@ public struct DetectionThresholds: Equatable, Sendable {
     }
 
     /// 既定値。確定は 5 分。
-    public static let `default` = DetectionThresholds()
+    ///
+    /// `MIHARI_FAST_THRESHOLDS=1` を付けて起動すると、動作確認用に全部を秒単位まで縮める。
+    /// 5 分待たずに一連の流れが通るかを見られる。デモの調整にも使う。
+    public static var `default`: DetectionThresholds {
+        guard ProcessInfo.processInfo.environment["MIHARI_FAST_THRESHOLDS"] == "1" else {
+            return DetectionThresholds()
+        }
+        return DetectionThresholds(
+            suspectSeconds: 10,
+            confirmSeconds: 25,
+            gazeWatchSeconds: 5,
+            notLookingDurationSeconds: 8,
+            gazeFreshnessSeconds: 10,
+            stampGraceSeconds: 15,
+            cooldownSeconds: 30
+        )
+    }
 }
