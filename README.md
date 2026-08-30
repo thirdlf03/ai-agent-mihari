@@ -99,7 +99,7 @@ Swift の整形設定は `desktop/.swift-format`、Python の設定は `bridge/p
 セリフ(`lines.json`)を直したら、VOICEVOX を起動してから作り直す。
 
 ```sh
-python3 scripts/generate_voice_lines.py              # 全 56 本
+python3 scripts/generate_voice_lines.py              # 全 108 本
 python3 scripts/generate_voice_lines.py --only idle   # 区分を絞る
 python3 scripts/generate_voice_lines.py --url http://127.0.0.1:50021
 ```

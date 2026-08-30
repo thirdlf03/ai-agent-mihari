@@ -207,19 +207,25 @@ README にあった「しゃべる」「しまう / 起こす」「ペット」�
 | モード | セリフ | 音声 | VOICEVOX |
 | --- | --- | --- | --- |
 | `bundled`(既定) | `Resources/voice/lines.json` から抽選 | 同封の `.m4a` をそのまま鳴らす | 要らない |
-| `live` | bridge が LLM で生成(ひとりごとはビルトイン) | その場で合成 | 起動している必要がある |
+| `live` | ひとりごとはビルトイン、説教オーバーレイは bridge が LLM で生成 | その場で合成 | 起動している必要がある |
 
 決め方は `VoiceModeStore`。環境変数 `MIHARI_VOICE_MODE`(`bundled` / `live`)> `UserDefaults` の
 `voiceMode` > 既定(`bundled`)の順。右クリック →「デバッグ」→「音声」で切り替えると、その場で
-`DetectionEngine.voiceMode` と `PetController.voiceMode` に配られ、再起動なしで効く。知らない値は
-無視して次の候補に落ちる。
+`PetController.voiceMode` に配られて再起動なしで効く(`AppCoordinator.observeVoiceMode`)。説教
+オーバーレイは配られる代わりに、喋る直前に `VoiceModeStore` を直接見る(`AppCoordinator.makeOverlay()`)。
+知らない値は無視して次の候補に落ちる。
+
+**検知エンジンは音声モードを持たない。** `DetectionEngine` が喋るセリフは常に同封音声で、モードを
+切り替えても変わらない。例外は iPhone のスクショを撮れた晒しだけで、そのときは画面の中身に触れた
+セリフを bridge(Gemini → VOICEVOX)にライブで作らせ、作れなければ同封の `iphoneActive` に落ちる
+(`DetectionEngine.expose`)。
 
 鳴らす口は `SpeechPlayer` 1 つだけで、どちらのモードでも変わらない。優先度も同じ。
 
 | 経路 | 作る場所(bundled) | 作る場所(live) | 優先度 |
 | --- | --- | --- | --- |
 | ペットのひとりごと | 同封 `.m4a` | `PetVoice` が VOICEVOX を直接叩く | `.chatter` |
-| 検知のセリフ | 同封 `.m4a` | `bridge/`(Claude API → VOICEVOX) | `.detection` |
+| 検知のセリフ | 同封 `.m4a` | 同左(モードによらず同封固定)。iPhone のスクショを撮れた晒しだけ `bridge/`(Gemini → VOICEVOX)を試す | `.detection` |
 | 説教オーバーレイ | 同封 `.m4a`(`sermon`) | `bridge/` | `.detection` |
 
 `SpeechPlaybackArbiter.decide` の判定:
@@ -810,27 +816,46 @@ LLM が使えない・失敗した・遅すぎたときの保険。`fallback_lin
 
 エピソード終了(`finishEpisode()`)は `line: ""` の `PetEvent` を送る。正常かつ空なので吹き出しは出ず、手を振る動きだけになる。
 
-#### `DetectionJudge` の `reason`
+#### `DetectionEngine` の `reason`
 
-セリフを作れなかったときの代わりの文であり、記録(`DetectionLogEntry.reason`)にも残る。
-**Discord の投稿本文には使わない**(そちらは `DiscordMessageComposer` が別に組み立てる)。
-秒数は 60 秒未満なら `{N}秒`、以上なら `{N}分`(切り捨て)。`\(seconds:)` の補間は
-`DiscordMessageComposer` も使い回す。
+なぜそう判断したかを 1 行で残す文。結論(`DetectionDecision`)を作るその場で `DetectionEngine` が
+直接組み立て、`record(_:outcome:at:)` が `DetectionLogEntry` に `outcome`(実際に何をしたか)と
+対で積む。出る先は検証画面の記録一覧とステータスパネルの `「{reason} → {outcome}」`。
+**吹き出しには出さない**(セリフは同封音声か bridge が別に用意する)し、**Discord の投稿本文にも
+使わない**(そちらは `DiscordMessageComposer` が別に組み立てる)。
 
-| 状態 | 組み立て | 例 |
+秒数は `\(seconds:)` の補間で、60 秒未満なら `{N}秒`、以上なら `{N}分`(切り捨て)。この補間は
+`DiscordMessageComposer` も使い回す。メンヘラモードの経過時間だけ `ElapsedText.minutesAndSeconds`
+(`12 分 34 秒`。60 秒未満は `45 秒`)を使う。
+
+記録に残るもの(`record` を通るもの):
+
+| 場面 | `reason` | `outcome` |
 | --- | --- | --- |
-| 正常(何もしない) | `Mac を {秒} 前まで触っている` | `Mac を 3秒 前まで触っている` |
-| 正常(スタンプ直後) | `{秒} 前に在席スタンプが押されている` | `2分 前に在席スタンプが押されている` |
-| 正常(疑いの手前) | `Mac が {秒} 無操作` | `Mac が 8秒 無操作` |
-| 疑い 1 / 2 / 3 | `Mac が {秒} 無操作` | `Mac が 30秒 無操作` |
-| 晒し / メンヘラの証拠 | 下記を ` / ` でつなぐ | `Mac が 1分 無操作 / iPhone は応答なし` |
+| 疑い 1 / 2 / 3 に入った | `Mac が {秒} 無操作(疑い {N} 回目)` | `Touch ID で確かめる` / `首振りで確かめる` / `最終警告を出した` |
+| Touch ID が通った | `疑い 1 回目・Touch ID で在席を確かめた` | `正常に戻す(猶予なし)` |
+| Touch ID が空振り・時間切れ | `疑い 1 回目・Touch ID に応じなかった` | `空振り` / `時間切れ` |
+| うなずいた | `疑い 2 回目・うなずいた` | `正常に戻す` |
+| 首を横に振った / 無反応 | `疑い 2 回目・首を横に振った` / `疑い 2 回目・返事が無かった` | `様子を見る` |
+| 疑いの途中で戻ってきた | `疑い {N} 回目の途中で戻ってきた` | `黙って正常に戻す` |
+| 晒した | `最終警告のあとも Mac が {秒} 無操作` | やったことを ` / ` でつなぐ(`証拠を取った` / `音楽を止めて聞かせた` / `Discord に送った` など) |
+| メンヘラモードの投稿 | `戻ってこないまま {経過}({N} 回目)` | 同上(`証拠を撮り直した` / `Discord に送った` など) |
+| メンヘラモードから戻ってきた | `{経過} ぶりに戻ってきた` | `Discord に送った(メンションなし)` / `Discord に送れなかった` |
+| 休憩が明けた | `休憩が明けた` | `見張りに戻る` |
+| デバッグの「今すぐ晒す」 | `デバッグメニューから晒した` | 晒しと同じ |
+| デバッグの「メンヘラを始める」 | `デバッグメニューからメンヘラモードに入った` | `投稿は間隔ぶん先` |
 
-晒すときに並べる要素(この順):
+記録に残らないもの(1 ティックの戻り値だけの `.idle(reason:)`):
 
-1. `Mac が {秒} 無操作` — 常に入る
-2. `iPhone は操作中` / `iPhone は置かれたまま` / `iPhone は応答なし`
-3. `{プレイヤー名} が再生中` — 音楽が鳴っているときだけ
-4. `直前は {アプリ名}` — 前面のアプリが分かるときだけ
+| 場面 | `reason` | 例 |
+| --- | --- | --- |
+| Mac を触っている | `Mac を {秒} 前まで触っている` | `Mac を 3秒 前まで触っている` |
+| 在席スタンプの猶予中 | `{秒} 前に在席スタンプが押されている` | `2分 前に在席スタンプが押されている` |
+| 疑いの手前 | `Mac が {秒} 無操作` | `Mac が 8秒 無操作` |
+| 疑いの確認中 / 待ち | `疑い {N} 回目・確認中` / `疑い {N} 回目・様子を見ている` | — |
+| 晒している最中 | `晒している最中` | — |
+| メンヘラモードの投稿と投稿の間 | `メンヘラモード({N} 回目)` | — |
+| 休憩中 | `休憩中(残り {秒})` | `休憩中(残り 4分)` |
 
 ### `speech.json` での差し替え
 
@@ -857,8 +882,8 @@ LLM が使えない・失敗した・遅すぎたときの保険。`fallback_lin
 投稿の本文は `Detection/DiscordMessage.swift` の `DiscordMessageComposer.compose(_:using:)` が
 組み立てる。OS も HTTP も触らない純粋関数で、乱数を渡せば出力を固定できる。
 
-材料(`DiscordMessageFacts`)は `DetectionJudge.confirmedReason` が `reason` を組み立てるのに
-使っている信号と同じもの。
+材料(`DiscordMessageFacts`)は `DetectionEngine.discordFacts(...)` が `DetectionSignals` から
+組み立てる。`reason` と同じ信号を見ているが、文は別物。
 
 | 項目 | 出どころ |
 | --- | --- |
@@ -995,8 +1020,7 @@ LLM が使えない・失敗した・遅すぎたときの保険。`fallback_lin
 | `desktop/Sources/MihariCore/Resources/voice/` | セリフの原本(`lines.json`)と音声(`<区分>/<NN>.m4a`) |
 | `desktop/Sources/MihariCore/Detection/DiscordMessage.swift` | Discord の投稿本文の組み立て |
 | `scripts/generate_voice_lines.py` | 同封音声の生成(VOICEVOX → afconvert) |
-| `desktop/Sources/MihariCore/Detection/DetectionEngine.swift` | 検知ループ・問いかけ・休憩・段階の決定 |
-| `desktop/Sources/MihariCore/Detection/DetectionJudge.swift` | サボり判定と `reason` の組み立て |
+| `desktop/Sources/MihariCore/Detection/DetectionEngine.swift` | 検知ループ・問いかけ・休憩・段階の決定と `reason` の組み立て |
 | `desktop/Sources/MihariCore/Detection/DetectionThresholds.swift` | 閾値 |
 | `bridge/src/device_bridge/commands/iphone_state.py` | iPhone の状態モデルと前面アプリのログ行の解釈 |
 | `bridge/src/device_bridge/commands/iphone_state_source.py` | 実機の観測(画面状態・前面アプリ・表示名) |
