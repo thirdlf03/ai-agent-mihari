@@ -50,11 +50,12 @@ class ChannelInfo:
 class MihariBot(discord.Client):
     """スラッシュコマンドを持つ最小の Bot。"""
 
-    def __init__(self, scheduler: WatchScheduler) -> None:
+    def __init__(self, scheduler: WatchScheduler, store: SettingsStore) -> None:
         # メッセージ内容は読まない。投稿と、参加サーバの一覧が取れれば足りる。
         super().__init__(intents=discord.Intents.default())
         self.tree = app_commands.CommandTree(self)
         self._scheduler = scheduler
+        self._store = store
         self._register_commands()
 
     async def setup_hook(self) -> None:
@@ -96,7 +97,21 @@ class MihariBot(discord.Client):
             scheduled = state["scheduled"]
             if isinstance(scheduled, dict):
                 lines.append(f"予約: {scheduled['at']}")
+            lines.append(f"起動してから終了できない時間: {self._store.load_lock_hours()} 時間")
             await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+        @group.command(name="lock", description="監視開始から終了できない時間を決める")
+        @app_commands.describe(hours="時間数(例: 4)。次に監視を始めたときから効く")
+        async def lock(interaction: discord.Interaction, hours: float) -> None:
+            if hours < 0:
+                await interaction.response.send_message(
+                    "0 以上の数字にしてください。", ephemeral=True
+                )
+                return
+            self._store.save_lock_hours(hours)
+            await interaction.response.send_message(
+                f"次に監視を始めてから {hours} 時間は終了できなくなります。"
+            )
 
         self.tree.add_command(group)
 
@@ -149,11 +164,19 @@ class DiscordService:
     def set_mention_user_id(self, user_id: str | None) -> None:
         self._store.save_mention_user_id(user_id)
 
+    @property
+    def lock_hours(self) -> float:
+        """起動してから終了できるようになるまでの時間(時間単位)。"""
+        return self._store.load_lock_hours()
+
+    def set_lock_hours(self, hours: float) -> None:
+        self._store.save_lock_hours(hours)
+
     async def start(self) -> None:
         """Bot を起動する。トークンが無ければ何もしない。"""
         if not self._config.has_token or self._task is not None:
             return
-        self._bot = MihariBot(self._scheduler)
+        self._bot = MihariBot(self._scheduler, self._store)
         self._task = asyncio.create_task(self._run())
 
     async def close(self) -> None:

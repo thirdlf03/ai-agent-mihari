@@ -21,6 +21,12 @@ SETTINGS_FILE = "discord.json"
 #: Discord の snowflake は 64bit あり JSON の数値では丸められかねないので、文字列で持つ。
 MENTION_KEY = "mention_user_id"
 
+#: 「起動してから何時間は終了できないか」を入れるキー。
+LOCK_HOURS_KEY = "lock_hours"
+
+#: 未設定のときに使う既定値。1 回の作業セッションとして妥当な長さ。
+DEFAULT_LOCK_HOURS = 4.0
+
 
 @dataclass(frozen=True, slots=True)
 class ChannelSelection:
@@ -90,6 +96,21 @@ class SettingsStore:
             payload[MENTION_KEY] = user_id
         else:
             payload.pop(MENTION_KEY, None)
+        self._write(payload)
+
+    def load_lock_hours(self) -> float:
+        """起動してから終了できるようになるまでの時間(時間単位)。決めていなければ既定値。"""
+        payload = self._read() or {}
+        raw = payload.get(LOCK_HOURS_KEY)
+        try:
+            hours = float(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return DEFAULT_LOCK_HOURS
+        return hours if hours >= 0 else DEFAULT_LOCK_HOURS
+
+    def save_lock_hours(self, hours: float) -> None:
+        payload = self._read() or {}
+        payload[LOCK_HOURS_KEY] = hours
         self._write(payload)
 
     def clear(self) -> None:

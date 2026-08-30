@@ -59,11 +59,40 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     private let externalTrigger = ExternalTriggerListener()
     private let windows = AuxiliaryWindows()
     private let statusPanel = StatusPanelController()
+    /// 監視中はディスプレイ/システムのアイドルスリープを止める。
+    private let sleepPreventer: SleepPreventing
+    /// 起動してから何時間かは終了そのものを受け付けない。
+    private var quitTimeLock = QuitTimeLock()
+    /// `quitTimeLock` に渡す既定のロック時間。デーモン(Discord の `/watch lock`)から
+    /// 取れなかったときのフォールバック。
+    private static let defaultLockHours: Double = 4
+    /// kill されて落ちても次回ログインで自動的に立ち上がるよう登録する。
+    private let loginItemRegistrar: LoginItemRegistering
+    /// 本体が kill されても、こちらの監視プロセスが数秒以内に起こす。
+    private let watchdogRegistrar: WatchdogRegistering
+    /// 前回、正常に終了できていたか(kill されて起こされたのかを見分けるため)。
+    private let lifecycleMarker: AppLifecycleMarking
     private var cancellables: Set<AnyCancellable> = []
     /// すでに見張り始めたか。`begin()` を何度呼んでも 1 回しか効かないようにする。
     private var hasBegun = false
+    /// 監視プロセスの登録を定期的に見直すループ。`launchctl bootout` で外から
+    /// 消されても、Touch ID を経ずには長続きさせないためのもの。
+    private var watchdogReassertionTask: Task<Void, Never>?
+    /// 上の見直しの間隔。短すぎると無駄に `launchctl` を叩き、長すぎると
+    /// 「外から消されてから戻るまで」のすきまが意味を持ち始める。
+    private static let watchdogReassertionInterval: Duration = .seconds(20)
 
-    public init() {
+    /// - Parameters:
+    ///   - sleepPreventer: スリープ防止の実体。テストでは呼び出し回数だけ記録するスタブに差し替える。
+    ///   - loginItemRegistrar: ログイン項目への登録処理。テストでは何もしないスタブに差し替える。
+    ///   - watchdogRegistrar: 監視プロセスの登録処理。テストでは何もしないスタブに差し替える。
+    ///   - lifecycleMarker: 前回の終了が正常だったかの記録。テストでは固定値を返すスタブに差し替える。
+    public init(
+        sleepPreventer: SleepPreventing = IOPMSleepPreventer(),
+        loginItemRegistrar: LoginItemRegistering = SMAppServiceLoginItemRegistrar(),
+        watchdogRegistrar: WatchdogRegistering = LaunchAgentWatchdogRegistrar(),
+        lifecycleMarker: AppLifecycleMarking = UserDefaultsLifecycleMarker()
+    ) {
         let player = SpeechPlayer()
         let attendance = AttendanceModel()
         self.speechPlayer = player
@@ -75,6 +104,10 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         self.detection = DetectionEngine(attendance: attendance)
         self.pet = LivePetPresenter(controller: PetController(speechPlayer: player))
         self.isStatusPanelVisible = statusPanel.isVisible
+        self.sleepPreventer = sleepPreventer
+        self.loginItemRegistrar = loginItemRegistrar
+        self.watchdogRegistrar = watchdogRegistrar
+        self.lifecycleMarker = lifecycleMarker
         observeVoiceMode()
     }
 
@@ -119,12 +152,36 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         guard !hasBegun else { return }
         hasBegun = true
 
+        // 見張っている間は画面が暗転して撮影・検知が止まらないよう、スリープを止める。
+        sleepPreventer.start()
+        // kill されて落ちても次回ログインで自動的に立ち上がるようにする。
+        loginItemRegistrar.ensureRegistered()
+        // 本体が kill されても、監視プロセスが数秒以内に起こす。
+        watchdogRegistrar.ensureRegistered()
+        // `launchctl bootout` で監視プロセスの登録だけ外からむしり取られても、
+        // Touch ID を経ない解除を長続きさせない。
+        watchdogReassertionTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.watchdogReassertionInterval)
+                guard !Task.isCancelled else { return }
+                self?.watchdogRegistrar.reassertIfMissing()
+            }
+        }
+
+        // 前回、正常に終了できていなければ(= kill か crash で消えたのを監視プロセスに
+        // 起こされたのなら)、記録を上書きする前に見ておく。
+        let wasKilled = !lifecycleMarker.wasPreviousSessionGraceful()
+        lifecycleMarker.markSessionStarted()
+
         // 右クリックメニューはウィンドウを作る前に差し込む。
         pet.controller.contextMenuBuilder = { [weak self] in
             guard let self else { return NSMenu() }
             return PetContextMenu.makeMenu(PetMenuEntries.make(actions: self, presenter: pet))
         }
         pet.show()
+        if wasKilled {
+            pet.controller.say(RevivalAngerLine.random())
+        }
         statusPanel.restore { statusPanelView }
         observeDetection()
         observeDaemonEvents()
@@ -142,6 +199,16 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
             wireDetection()
             // 常駐して見張るアプリなので、始めたら見張り続ける。
             detection.start()
+
+            // ロック時間は Discord の `/watch lock` で決まる。デーモンに繋がる前に
+            // 決め打ちすると設定より短く/長くロックしてしまうので、繋がってから引く。
+            // 取れなければ既定値で必ずロックする ―― 取れないからロックしない、は
+            // 「ロックできない状況を作れば終了できる」という抜け道になってしまう。
+            var hours: Double?
+            if let client = daemon.connectedClient {
+                hours = try? await client.lockHours()
+            }
+            quitTimeLock.lock(for: hours ?? Self.defaultLockHours)
         }
     }
 
@@ -149,6 +216,31 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     public func shutdown() {
         detection.stop()
         daemon.stop()
+        sleepPreventer.stop()
+        watchdogReassertionTask?.cancel()
+        watchdogReassertionTask = nil
+    }
+
+    /// 終了(Cmd+Q・Dock「終了」・kill によるシグナル)してよいか。
+    ///
+    /// 見張り始める前(権限オンボーディング中)はまだロックする意味がないので素通しする。
+    /// ロックが解けていれば、監視プロセスとログイン項目の登録もここで解く ―― 解かずに
+    /// 本体だけ終了させると、監視プロセスが「本体が消えた」と誤解してまた起こしてしまう。
+    ///
+    /// ロック中は、認証のふりをして結果を無視するようなことは一切しない。
+    /// 単に断り、あと何分ロックが残っているかをペットに正直に言わせるだけ。
+    public func confirmQuit() async -> Bool {
+        guard hasBegun else { return true }
+        guard quitTimeLock.isUnlocked() else {
+            if let remaining = quitTimeLock.remainingDescription() {
+                pet.controller.say("まだロック中。\(remaining)は消せないよ。")
+            }
+            return false
+        }
+        watchdogRegistrar.unregister()
+        loginItemRegistrar.unregister()
+        lifecycleMarker.markGracefulShutdown()
+        return true
     }
 
     /// Dock のアイコンがクリックされた。

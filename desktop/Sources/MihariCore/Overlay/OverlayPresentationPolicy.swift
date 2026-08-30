@@ -12,13 +12,17 @@ public enum OverlayPresentationPolicy {
     /// 説教オーバーレイ表示中に適用する組み合わせ。
     /// Dock / メニューバーを隠し、Cmd+Tab によるアプリ切替を止める(Issue #17 の要求どおり)。
     ///
-    /// あえて `disableForceQuit` / `disableSessionTermination` は含めていない。
-    /// 自動解除や Esc キーがすべて壊れた最悪のケースでも、
-    /// Cmd+Option+Esc の強制終了や再起動でユーザーが自力で抜け出せる経路を残すため。
+    /// `disableForceQuit` / `disableSessionTermination` も含める ―― Cmd+Option+Esc の
+    /// 強制終了メニューと、ログアウト/再起動/シャットダウンの経路をこの間だけ塞ぐ。
+    /// 唯一の脱出弁は `OverlayModel` の `hardDeadlineTask`(既定 90 秒、最大でも
+    /// `durationRange` の上限 300 秒)で、途中で何が起きても必ずここまでに解除される。
+    /// つまりこの封鎖が効いている時間には厳密な上限があり、無期限には続かない。
     public static let sermonOptions: NSApplication.PresentationOptions = [
         .hideDock,
         .hideMenuBar,
         .disableProcessSwitching,
+        .disableForceQuit,
+        .disableSessionTermination,
     ]
 
     /// 解除時に必ず戻す値。空集合は常に有効な組み合わせ。
