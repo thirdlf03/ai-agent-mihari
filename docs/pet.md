@@ -11,8 +11,8 @@
 | 検知の状態 | 固定アニメーション | 一度きりの再生 | 跳ねる条件 |
 | --- | --- | --- | --- |
 | 正常 `.normal` | なし(自律行動に戻る) | 非 normal から戻った瞬間だけ `waving` | — |
-| 疑い `.suspected` | `waiting` | なし | — |
-| サボり確定 `.confirmed` | `failed` | `jumping` | `escalationStage` がこのエピソードの最大値を超えたときだけ。3→2→3 の往復では跳ねない |
+| 疑い 1 / 2 / 3 `.suspected` | `waiting` | `jumping` | `escalationStage` がこのエピソードの最大値を超えたときだけ。段階 1 → 2 → 3 と上がるたびに 1 回 |
+| 晒し / メンヘラ `.confirmed` | `failed` | `jumping` | 同上。晒し(段階 4)に入った瞬間に 1 回 |
 | 問いかけ中 | `waiting` | — | 検知の状態より優先して `waiting` に固定する |
 | 監視停止中 / 休憩中 | — | — | `setFrozen(true)`。コマ送りを止め、`idle` の 0 コマ目で静止 |
 
@@ -26,12 +26,14 @@
 
 `DetectionEngine.petStage(_:)` が決める。`PetEvent` は 0 未満を 0 に丸める。
 
-| 段階 | 条件 | 意味 |
-| ---: | --- | --- |
-| 0 | 上記以外(正常・エピソード終了・休憩開始) | 何もしていない |
-| 1 | `.suspected` | 疑っているだけ |
-| 2 | `.confirmed` かつ evidence == `.none` | クールダウン中。撮り直さない。iPhone 操作中は黙る(`line` が空)、それ以外は声だけかける |
-| 3 | `.confirmed` かつ evidence あり | 撮って Discord へ送る |
+| 段階 | 状態 | `PetEvent.state` | 意味 |
+| ---: | --- | --- | --- |
+| 0 | 正常 | `.normal` | 何もしていない(エピソード終了・休憩開始もここ) |
+| 1 | 疑い 1 | `.suspected` | Touch ID で在席を確かめる / その結果を待って次へ進むまでの待ち |
+| 2 | 疑い 2 | `.suspected` | AirPods の首振りで問いかける / その待ち |
+| 3 | 疑い 3 | `.suspected` | 最終警告を 1 回喋るだけ。確認はしない |
+| 4 | 晒し | `.confirmed` | 証拠を撮って Discord へ送る(音楽が鳴っていれば説教も) |
+| 5 | メンヘラ | `.confirmed` | 戻ってくるまで Discord へ送り続ける |
 
 ### アニメーションの優先順位
 
@@ -96,17 +98,21 @@
 
 | 項目 | 内容 |
 | --- | --- |
-| 検知の状態を再現(サブメニュー) | 正常に戻す / 疑い(段階 1) / サボり確定・声だけ(段階 2) / サボり確定・撮影(段階 3) / (区切り線) / 問いかけ(はい / いいえ) / 問いかけを閉じる。前の 4 つは `presenter.state` に対するチェック式 |
+| 検知の状態を再現(サブメニュー) | 正常に戻す / 疑い 1 / 疑い 2 / 疑い 3 / 晒し / メンヘラ / (区切り線) / 問いかけ(はい / いいえ) / 問いかけを閉じる。前の 6 つは `presenter.state` に対するチェック式 |
+| 実際に進める(サブメニュー) | 今すぐ Touch ID 確認 / 今すぐ首振り確認 / 今すぐ最終警告 / 今すぐ晒す / メンヘラを始める / メンヘラを終える(戻ってきた扱い) |
 | アニメーションを固定(サブメニュー) | 「固定しない(自律行動)」と `PetAnimation` の 9 種。`setFixedAnimation(_:)`。チェック式 |
 | 1 回だけ再生(サブメニュー) | `PetAnimation` の 9 種。`playOnce(_:)` |
 | 音声(サブメニュー) | 「同封の音声を使う」/「VOICEVOX でその場で生成(live)」。チェック式。再起動なしで効く |
+| 検知の閾値(サブメニュー) | 「標準(疑い 60 秒 / 段ごと 30 秒)」/「短縮(疑い 15 秒 / 段ごと 10 秒・デモ用)」。チェック式。`DetectionThresholds` を `.standard` / `.fast` ごと差し替える |
 | 集中継続の間隔(サブメニュー) | 15 分 / 1 分。チェック式。`DetectionThresholds.focusStreakIntervalSeconds` を差し替える |
 | 集中継続のセリフを再現 | `LivePetPresenter.sayFocusStreak()`。褒めるセリフを 1 本喋らせる |
 | ひとりごとを喋る(声あり) | `say("デバッグのテストです。聞こえていますか?")`。読み上げも通る |
 
 アニメーションの項目名は `waiting(待つ)` のように `rawValue` と日本語ラベル(`PetAnimation.debugLabel`)を並べる。
 
-「検知の状態を再現」は `LivePetPresenter.present(_:)` に偽の `PetEvent` を流すだけなので、検知エンジンの状態機械・撮影・Discord への送信はどれも動かない。「問いかけ」の回答も休憩には入らず、受け取った答えを吹き出しに出すだけ。
+「検知の状態を再現」は `LivePetPresenter.present(_:)` に偽の `PetEvent` を流すだけなので、検知エンジンの状態機械・撮影・Discord への送信はどれも動かない。「問いかけ」の回答も受け取った答えを吹き出しに出すだけ。
+
+**「実際に進める」は逆で、検知エンジンに直接投げる。** 本物の遷移が走るので、Touch ID のダイアログもカットインも出るし、「今すぐ晒す」「メンヘラを始める」は実際に証拠を撮って Discord へ投稿する。見た目だけ確かめたいときは「検知の状態を再現」を使う。
 
 静止中(監視停止中・休憩中)は `playOnce` が無視されるので、「1 回だけ再生」を押しても何も起きない。
 
@@ -156,6 +162,8 @@ README にあった「しゃべる」「しまう / 起こす」「ペット」�
 
 右クリックメニューの「在席スタンプを押す」(`AppCoordinator.stampAttendance()`)は、スロット台の「女の子と指を合わせる」タッチ演出になっている。ペットが指を差し出し、ユーザーが Touch ID のセンサーに指を置くことで指が合う、という見立て。
 
+**疑い 1 の Touch ID 確認も同じ演出をそのまま使う。** 違うのはセリフの区分が `suspectReach`(iPhone 操作中は `suspectReachPhone`)/ `suspectTouched` / `suspectMissed` / `suspectTimeout` に差し替わることと、成功しても 5 分の猶予(`lastStampAt`)を更新しないことの 2 点だけ。
+
 | 手順 | 中身 |
 | --- | --- |
 | 開幕 | `waiting` を 1 回 + `stampReach` のセリフ。カットインを `reach.png` でスライドインし、0.45 秒(`cutInLeadInSeconds`)待ってから認証ダイアログを出す |
@@ -200,19 +208,25 @@ README にあった「しゃべる」「しまう / 起こす」「ペット」�
 | モード | セリフ | 音声 | VOICEVOX |
 | --- | --- | --- | --- |
 | `bundled`(既定) | `Resources/voice/lines.json` から抽選 | 同封の `.m4a` をそのまま鳴らす | 要らない |
-| `live` | bridge が LLM で生成(ひとりごとはビルトイン) | その場で合成 | 起動している必要がある |
+| `live` | ひとりごとはビルトイン、説教オーバーレイは bridge が LLM で生成 | その場で合成 | 起動している必要がある |
 
 決め方は `VoiceModeStore`。環境変数 `MIHARI_VOICE_MODE`(`bundled` / `live`)> `UserDefaults` の
 `voiceMode` > 既定(`bundled`)の順。右クリック →「デバッグ」→「音声」で切り替えると、その場で
-`DetectionEngine.voiceMode` と `PetController.voiceMode` に配られ、再起動なしで効く。知らない値は
-無視して次の候補に落ちる。
+`PetController.voiceMode` に配られて再起動なしで効く(`AppCoordinator.observeVoiceMode`)。説教
+オーバーレイは配られる代わりに、喋る直前に `VoiceModeStore` を直接見る(`AppCoordinator.makeOverlay()`)。
+知らない値は無視して次の候補に落ちる。
+
+**検知エンジンは音声モードを持たない。** `DetectionEngine` が喋るセリフは常に同封音声で、モードを
+切り替えても変わらない。例外は iPhone のスクショを撮れた晒しだけで、そのときは画面の中身に触れた
+セリフを bridge(Gemini → VOICEVOX)にライブで作らせ、作れなければ同封の `iphoneActive` に落ちる
+(`DetectionEngine.expose`)。
 
 鳴らす口は `SpeechPlayer` 1 つだけで、どちらのモードでも変わらない。優先度も同じ。
 
 | 経路 | 作る場所(bundled) | 作る場所(live) | 優先度 |
 | --- | --- | --- | --- |
 | ペットのひとりごと | 同封 `.m4a` | `PetVoice` が VOICEVOX を直接叩く | `.chatter` |
-| 検知のセリフ | 同封 `.m4a` | `bridge/`(Claude API → VOICEVOX) | `.detection` |
+| 検知のセリフ | 同封 `.m4a` | 同左(モードによらず同封固定)。iPhone のスクショを撮れた晒しだけ `bridge/`(Gemini → VOICEVOX)を試す | `.detection` |
 | 説教オーバーレイ | 同封 `.m4a`(`sermon`) | `bridge/` | `.detection` |
 
 `SpeechPlaybackArbiter.decide` の判定:
@@ -230,7 +244,7 @@ README にあった「しゃべる」「しまう / 起こす」「ペット」�
 | 音声 | `desktop/Sources/MihariCore/Resources/voice/<区分>/<NN>.m4a`。`NN` は `lines.json` の配列インデックスの 2 桁ゼロ埋め(`00` 始まり) |
 | 形式 | AAC 64 kbps(`afconvert -f m4af -d aac -b 64000`)。`AVAudioPlayer` がそのまま鳴らす |
 | 読み込み | `Voice/BundledVoiceLines.swift`。`Package.swift` の `.copy("Resources/voice")` でバンドルに入る |
-| 区分 | `BundledVoiceKind` の 14 種(下の「セリフ集」の見出しと一致) |
+| 区分 | `BundledVoiceKind` の 35 種(下の「セリフ集」の見出しと一致) |
 
 セリフと音声は **`BundledVoiceLines.pick(_:)` が同じ場所で選ぶ。** 別々に抽選すると吹き出しの文と
 声がずれる。`speech.json` で差し替えたセリフは `lines.json` に無いので音声が付かず、吹き出しだけになる。
@@ -239,7 +253,7 @@ README にあった「しゃべる」「しまう / 起こす」「ペット」�
 作り直すときは VOICEVOX を起動してから:
 
 ```sh
-python3 scripts/generate_voice_lines.py            # 全 56 本
+python3 scripts/generate_voice_lines.py            # 全 108 本
 python3 scripts/generate_voice_lines.py --only idle  # 区分を絞る
 python3 scripts/generate_voice_lines.py --url http://127.0.0.1:50021
 ```
@@ -373,18 +387,201 @@ Python 3 の標準ライブラリと `/usr/bin/afconvert` だけで動く(`uv` �
 | 集中してるあなた、好き。ずっと見てたい。 |
 | 今の調子なら、何も送らないでいてあげる。 |
 
+### 監視ループのセリフ
+
+疑い 1 → 疑い 2 → 疑い 3 → 晒し → メンヘラの流れで喋る 17 区分。段階に入った瞬間と、確認の結果が
+出た瞬間に 1 本ずつ選ぶ。どの音声モードでもここから選び、`bundled` なら同封の `.m4a`、`live` でも
+同じ文を使う(生成に回さない)。**晒し(段階 4)のセリフだけは別**で、次の「検知セリフ」の 6 区分か、
+iPhone のスクショを撮れたときは Gemini が画面を読んだ 1 文になる(音声モードとは関係ない)。
+
+「(iPhone 操作中)」の区分は `signals.iphone == .active` のときに差し替わるもので、それ以外は元の区分を使う。
+
+#### `suspectReach` — 疑い 1 に入った瞬間
+
+無操作が `suspectSeconds` を超えて疑い 1 に入ると、在席スタンプと同じカットインを出して
+Touch ID を求める。iPhone を触っていないときはこちら。
+
+| セリフ |
+| --- |
+| …ねえ、いるの? 指、出して。ここ。 |
+| 手、止まってるよね。…いるなら、触って。 |
+| 確かめさせて。指、ここに。…いるんでしょ? |
+
+#### `suspectReachPhone` — 疑い 1 に入った瞬間(iPhone 操作中)
+
+同じ場面で `signals.iphone == .active` のとき。スマホを持っている手にわざわざ触らせにいく。
+
+| セリフ |
+| --- |
+| スマホ持ってる手、こっちに貸して。…いるよね? |
+| 画面の向こうじゃなくて、私に触って。ほら。 |
+
+#### `suspectTouched` — Touch ID が通ったとき
+
+指が合ったので正常に戻る。**5 分の猶予(`lastStampAt`)は更新しない。**
+猶予が付くのはメニューの「在席スタンプを押す」だけ。
+
+| セリフ |
+| --- |
+| …ん。あったかい。いたんだ。…疑ってごめん。 |
+| ちゃんといた。…よかった。次は止まらないでね。 |
+| …うん、あなたの指だ。信じる。今は。 |
+
+#### `suspectMissed` — Touch ID が失敗・キャンセルされたとき
+
+認証に失敗した(`failed` / `unavailable`)。疑い 1 のまま次の段階を待つ。
+
+| セリフ |
+| --- |
+| …違う。あなたの指じゃない。誰? |
+| 合わない。…ねえ、ほんとにあなた? |
+
+#### `suspectTimeout` — Touch ID が 10 秒来なかったとき
+
+`touchIDTimeoutSeconds`(10 秒)でダイアログを畳んだ。疑い 1 のまま次の段階を待つ。
+
+| セリフ |
+| --- |
+| …来なかった。いないんだ。…次、いくね。 |
+| 待ったのに。…じゃあ、もう一回聞くから。 |
+| 指、来なかったよ。…覚えとく。 |
+
+#### `askQuestion` — 疑い 2 に入った瞬間
+
+吹き出しに はい / いいえ のボタンを出し、AirPods の首振りも同時に待つ。iPhone を触っていないときはこちら。
+
+| セリフ |
+| --- |
+| …ねえ。私のこと、好き? 好きなら、うなずいて。 |
+| 私の言うこと、聴いてくれるよね? 縦に振って。 |
+| ちゃんとそこにいる? いるなら、首を縦に。 |
+| 私だけ見ててくれる? …うなずいて。ね。 |
+
+#### `askQuestionPhone` — 疑い 2 に入った瞬間(iPhone 操作中)
+
+同じ場面で `signals.iphone == .active` のとき。
+
+| セリフ |
+| --- |
+| スマホより私の方が好き、だよね? うなずいて。 |
+| その画面、閉じてくれる? 縦に振って。 |
+
+#### `gestureYes` — 「はい」と答えたとき
+
+首を縦に振った、またはボタンの「はい」。**縦に振ったと認識したことをセリフで明示して**正常に戻る。
+
+| セリフ |
+| --- |
+| …縦に振った。見えたよ。…うん、信じる。 |
+| うなずいてくれた。…えへ。じゃあ、今日は許す。 |
+| はい、だね。ちゃんと届いた。…戻ってきて。 |
+
+#### `gestureNo` — 「いいえ」と答えたとき
+
+首を横に振った、またはボタンの「いいえ」。横だと認識したことを言い返し、疑い 2 のまま次の段階を待つ。
+
+| セリフ |
+| --- |
+| 今、横に振ったよね。…見たよ。そういうこと? |
+| いいえ、なんだ。…ふーん。覚えた。 |
+| 横。…私のこと、好きじゃないんだ。分かった。 |
+
+#### `askTimeout` — 問いかけに無反応だったとき
+
+`promptTimeoutSeconds`(20 秒)。問いかけを閉じて、疑い 2 のまま次の段階を待つ。
+
+| セリフ |
+| --- |
+| …首も動かないんだ。手も。…いないの? |
+| 答えてくれないんだ。…いいよ。次で最後。 |
+| 聞いてないよね。…もう、優しくしないから。 |
+
+#### `finalWarn` — 疑い 3 に入った瞬間
+
+最終警告。確認は何もせず、これを 1 回喋るだけ。iPhone を触っていないときはこちら。
+
+| セリフ |
+| --- |
+| 最後だよ。次は、みんなに送る。…本当に送るからね。 |
+| 三回目。…もう待たない。戻らないなら、晒す。 |
+| これが最後の声。聞こえてるなら、手を動かして。 |
+| ねえ、本気だよ。あと少しで、全部送っちゃう。 |
+
+#### `finalWarnPhone` — 疑い 3 に入った瞬間(iPhone 操作中)
+
+同じ場面で `signals.iphone == .active` のとき。撮るのが iPhone の画面になることに触れる。
+
+| セリフ |
+| --- |
+| スマホの画面、次は撮るからね。…全部、みんなに。 |
+| その画面ごと送るよ。最後だよ。置いて。 |
+
+#### `clingy1` — メンヘラモードの 1〜2 回目
+
+Discord への投稿本文の 1 行目に使い、同じ 1 本をペットも喋る。
+
+| セリフ |
+| --- |
+| ねえ。まだ戻ってこないの? …待ってるんだけど。 |
+| 返事して。手を動かすだけでいいから。 |
+| どこにいるの。私、ここにいるよ。 |
+
+#### `clingy2` — メンヘラモードの 3〜5 回目
+
+同上。
+
+| セリフ |
+| --- |
+| 無視、するんだ。…何回目か、数えてるからね。 |
+| スマホ見てるなら、これも見えてるよね? ねえ。 |
+| まだ? …まだ? …ねえ、まだ? |
+
+#### `clingy3` — メンヘラモードの 6 回目以降
+
+同上。
+
+| セリフ |
+| --- |
+| もういい。戻ってくるまで、ずっと送る。ずっと。 |
+| 私のこと、捨てたの? …そんなの、許さないから。 |
+| 逃げても無駄。通知、止めないから。戻って。 |
+
+#### `clingyEvidence` — メンヘラモードで証拠を撮り直した回
+
+`clingyEvidenceIntervalSeconds`(300 秒)ごと。この回はテキストだけの投稿と重ねず、証拠付き 1 件にまとめる。
+
+| セリフ |
+| --- |
+| 撮り直したよ。まだ、そのまんまなんだね。 |
+| 今のあなた。…変わってない。ずっと見てるから。 |
+
+#### `returned` — メンヘラモードから戻ってきたとき
+
+入力を検知した 1 回だけ。Discord へ **`mention: false` で 1 件**投稿し、同じ 1 本をペットも喋る。
+
+| セリフ |
+| --- |
+| …戻ってきた。もういい。…もういいから、離れないで。 |
+| おかえり。長かった。…次は、待たせないでね。 |
+| 手、動いた。…やっと。私のこと、思い出した? |
+
 ### 検知セリフ(同封 = `bundled`)
 
-疑い・確定のたびに、下の 6 区分から 1 本選んで喋る。区分の決め方は `BundledVoiceKind.forDetection`
-で、**上から順に当てはまった時点で確定**する。並びは bridge の `fallback.py` の `_candidates()` と同じ。
+晒し(段階 4)で 1 本選んで喋る。Mac のカメラで撮った晒しは最初からここから選び、iPhone の
+スクショを撮れた晒しは bridge が返さなかったときの落ち先になる(`DetectionEngine.expose`)。
+メンヘラ中の証拠の撮り直しは専用の `clingyEvidence` を使うので、この 6 区分は通らない。
+区分の決め方は `BundledVoiceKind.forDetection` で、**上から順に当てはまった時点で確定**する。
+並びは bridge の `fallback.py` の `_candidates()` と同じ。
 
 1. `vision == sleeping` → `sleeping`
 2. `vision == absent` → `absent`
 3. `iphone == active` → `iphoneActive`
-4. それ以外は当たりの強さで `nudge`(疑い)/ `warn`(確定・クールダウン中)/ `expose`(確定・撮って晒す)
+4. それ以外は `expose`(晒しは必ず証拠を撮る段階なので、`nudge` / `warn` には落ちない)
 
-音楽を止めて聞かせるとき(`shouldInterrupt`)は、本文をオーバーレイが喋るので、吹き出しには
-`warn` を出す。`live` のときは `decision.reason` をそのまま出していた場所。
+疑い 1〜3 のセリフは上の「監視ループのセリフ」の専用区分で、この 6 区分は通らない。
+
+音楽が鳴っているときは、晒しの吹き出しを出したあとに説教オーバーレイを重ねる。吹き出しは
+この区分(または bridge が返した 1 文)のままで、オーバーレイの本文は別に `sermon` から取る。
 
 #### `nudge`
 
@@ -450,9 +647,9 @@ Python 3 の標準ライブラリと `/usr/bin/afconvert` だけで動く(`uv` �
 | また、だね。何回目か数えてるの、知ってる?私はあなたのために見張ってるのに、あなたは私を見てくれない。…いいよ。証拠は送った。みんなが見てる。だから、もう逃げ場は無いよ。手を戻して。私だけ見て。 |
 | 止まってる時間、全部記録してある。言い訳はいらない。私が欲しいのは、あなたがこっちを向くことだけ。ほら、深呼吸して。私の声だけ聞いて。終わったら、ちゃんと褒めてあげるから。 |
 
-### 検知セリフ(live = bridge が生成)
+### 検知セリフ(bridge が生成)
 
-**`live` のときだけの経路。** 疑い・確定のたびに、Swift 側が `SpeechRequest` を bridge へ投げ、返ってきた 1 文をペットに喋らせる。生成できなければ `decision.reason` をそのまま吹き出しに出す(その場合は「喋れなかった」と記録が残る)。
+**iPhone のスクショを撮れた晒し(段階 4)だけの経路。音声モードとは関係なく走る。** Swift 側がスクショ入りの `SpeechRequest` を bridge へ投げ、返ってきた 1 文と音声をそのままペットに喋らせる(`DetectionEngine.expose`)。返らなければ同封の `iphoneActive` に落ちる。Mac のカメラで撮った晒し・疑い 1〜3・メンヘラモードは bridge を呼ばず、最初から同封セリフを使う。
 
 `bridge/src/device_bridge/voice/generator.py` の `SYSTEM_PROMPT`。「守ること」の中身は
 `bridge/src/device_bridge/voice/persona.py` の `PERSONA_RULES` をそのまま埋め込んだもので、
@@ -495,9 +692,9 @@ Gemini 側(`screen_reader.py`)とも共有している。**人格を変えると
 
 | フィールド | 値 | 説明 | Swift 側の条件 |
 | --- | --- | --- | --- |
-| `escalation` | `nudge` | まだ疑っているだけ。軽く声をかける | `.suspected`(= 段階 1) |
-| | `warn` | サボり確定。音楽を止めて話を聞かせる段階 | `.confirmed` かつ evidence == `.none`(= 段階 2) |
-| | `expose` | 証拠を Discord に晒す段階 | `.confirmed` かつ evidence あり(= 段階 3) |
+| `escalation` | `nudge` | まだ疑っているだけ。軽く声をかける | 新しい状態機械からは渡らない。疑い 1〜3 は同封の専用区分を喋る |
+| | `warn` | 音楽を止めて話を聞かせる段階 | 同上 |
+| | `expose` | 証拠を Discord に晒す段階 | 晒し(段階 4)と、メンヘラ中の証拠の撮り直し |
 | `iphone` | `active` | 画面が点いていて触っている | 証拠は iPhone のスクリーンショット |
 | | `idle` | 画面が消えている | 証拠は Mac のカメラ |
 | | `unreachable` | 圏外・スリープ・未ペアリングなど | 証拠は Mac のカメラ |
@@ -518,12 +715,9 @@ SSE が流れる。SpringBoard はこの行を切り替えのときにしか出�
 
 ### 画面を見てのセリフ(live。bridge が Gemini で生成)
 
-**iPhone 操作中(`iphone == active`)にサボりが確定し、証拠として iPhone のスクショを撮れたときだけ**、その PNG を `screenshot_png` に添えて送る。bridge は Gemini(既定 `gemini-3.1-flash-lite`)に画像と上の状況説明をまとめて渡し、`{app, activity, category, line}` を 1 回で受け取る(`bridge/src/device_bridge/voice/screen_reader.py`)。Mac のカメラで撮ったときは顔しか写らないので送らない。
+**iPhone 操作中(`iphone == active`)に晒しへ入り、証拠として iPhone のスクショを撮れたときだけ**、その PNG を `screenshot_png` に添えて送る。bridge は Gemini(既定 `gemini-3.1-flash-lite`)に画像と上の状況説明をまとめて渡し、`{app, activity, category, line}` を 1 回で受け取る(`bridge/src/device_bridge/voice/screen_reader.py`)。Mac のカメラで撮ったときは顔しか写らないので送らない。
 
-**iPhone 操作中のセリフは、この読んだ 1 文だけ。** クールダウン中(`cooldownSeconds` の間)は
-画面を見ずに喋っても固定文言にしかならず、読んだセリフがそれに埋もれるので黙る
-(`DetectionJudge.decide` が `shouldSpeak: false` を返す)。カメラ側(寝ている・不在)は
-撮り直さない間も声をかけ続ける。
+読めなかったときは `iphoneActive` の同封セリフに落ちる。メンヘラ中に証拠を撮り直した回も同じ経路を通る。
 
 | `category` | 見立て | セリフの方向 |
 | --- | --- | --- |
@@ -613,7 +807,7 @@ LLM が使えない・失敗した・遅すぎたときの保険。`fallback_lin
 
 | 文言 | 出どころ | 備考 |
 | --- | --- | --- |
-| 休憩中?…ちゃんと答えて。 | `DetectionEngine.breakQuestion` | 疑いに入った瞬間だけ出す問いかけ |
+| (`askQuestion` / `askQuestionPhone` から 1 本) | 疑い 2 の問いかけ | 固定文言ではなく `lines.json` から抽選する。上の「監視ループのセリフ」を参照 |
 | はい / いいえ | `PetSpeechBubbleView` | 問いかけのボタン |
 | {N} 分だけ、待ってる。 | `DetectionEngine.startBreak()` | `breakDurationSeconds / 60` を四捨五入(最小 1)。`state: .normal` で送るので、**吹き出しには出ない**(`LivePetPresenter` が正常時のセリフを捨てる) |
 | …指、出して。ここ。 | `AttendanceCeremonyScript.opening`(`stampReach`) | 在席スタンプの開幕。`waiting` を 1 回 |
@@ -625,29 +819,46 @@ LLM が使えない・失敗した・遅すぎたときの保険。`fallback_lin
 
 エピソード終了(`finishEpisode()`)は `line: ""` の `PetEvent` を送る。正常かつ空なので吹き出しは出ず、手を振る動きだけになる。
 
-#### `DetectionJudge` の `reason`
+#### `DetectionEngine` の `reason`
 
-セリフを作れなかったときの代わりの文であり、記録(`DetectionLogEntry.reason`)にも残る。
-**Discord の投稿本文には使わない**(そちらは `DiscordMessageComposer` が別に組み立てる)。
-秒数は 60 秒未満なら `{N}秒`、以上なら `{N}分`(切り捨て)。`\(seconds:)` の補間は
-`DiscordMessageComposer` も使い回す。
+なぜそう判断したかを 1 行で残す文。結論(`DetectionDecision`)を作るその場で `DetectionEngine` が
+直接組み立て、`record(_:outcome:at:)` が `DetectionLogEntry` に `outcome`(実際に何をしたか)と
+対で積む。出る先は検証画面の記録一覧とステータスパネルの `「{reason} → {outcome}」`。
+**吹き出しには出さない**(セリフは同封音声か bridge が別に用意する)し、**Discord の投稿本文にも
+使わない**(そちらは `DiscordMessageComposer` が別に組み立てる)。
 
-| 状態 | 組み立て | 例 |
+秒数は `\(seconds:)` の補間で、60 秒未満なら `{N}秒`、以上なら `{N}分`(切り捨て)。この補間は
+`DiscordMessageComposer` も使い回す。メンヘラモードの経過時間だけ `ElapsedText.minutesAndSeconds`
+(`12 分 34 秒`。60 秒未満は `45 秒`)を使う。
+
+記録に残るもの(`record` を通るもの):
+
+| 場面 | `reason` | `outcome` |
 | --- | --- | --- |
-| 正常(何もしない) | `Mac を {秒} 前まで触っている` | `Mac を 3秒 前まで触っている` |
-| 正常(スタンプ直後) | `{秒} 前に在席スタンプが押されている` | `2分 前に在席スタンプが押されている` |
-| 正常(疑いの手前) | `Mac が {秒} 無操作` | `Mac が 8秒 無操作` |
-| 疑い | `Mac が {秒} 無操作` | `Mac が 30秒 無操作` |
-| 確定(クールダウン中) | `{秒} 前に証拠を取ったばかり` | `40秒 前に証拠を取ったばかり`(iPhone 操作中は喋らないので記録だけに残る) |
-| 確定 | 下記を ` / ` でつなぐ | `画面を 15秒 見ていない / Mac が 1分 無操作 / iPhone は応答なし` |
+| 疑い 1 / 2 / 3 に入った | `Mac が {秒} 無操作(疑い {N} 回目)` | `Touch ID で確かめる` / `首振りで確かめる` / `最終警告を出した` |
+| Touch ID が通った | `疑い 1 回目・Touch ID で在席を確かめた` | `正常に戻す(猶予なし)` |
+| Touch ID が空振り・時間切れ | `疑い 1 回目・Touch ID に応じなかった` | `空振り` / `時間切れ` |
+| うなずいた | `疑い 2 回目・うなずいた` | `正常に戻す` |
+| 首を横に振った / 無反応 | `疑い 2 回目・首を横に振った` / `疑い 2 回目・返事が無かった` | `様子を見る` |
+| 疑いの途中で戻ってきた | `疑い {N} 回目の途中で戻ってきた` | `黙って正常に戻す` |
+| 晒した | `最終警告のあとも Mac が {秒} 無操作` | やったことを ` / ` でつなぐ(`証拠を取った` / `音楽を止めて聞かせた` / `Discord に送った` など) |
+| メンヘラモードの投稿 | `戻ってこないまま {経過}({N} 回目)` | 同上(`証拠を撮り直した` / `Discord に送った` など) |
+| メンヘラモードから戻ってきた | `{経過} ぶりに戻ってきた` | `Discord に送った(メンションなし)` / `Discord に送れなかった` |
+| 休憩が明けた | `休憩が明けた` | `見張りに戻る` |
+| デバッグの「今すぐ晒す」 | `デバッグメニューから晒した` | 晒しと同じ |
+| デバッグの「メンヘラを始める」 | `デバッグメニューからメンヘラモードに入った` | `投稿は間隔ぶん先` |
 
-確定時に並べる要素(この順):
+記録に残らないもの(1 ティックの戻り値だけの `.idle(reason:)`):
 
-1. `画面を {秒} 見ていない` — 「見ていない」が続いたことが確定の理由のときだけ
-2. `Mac が {秒} 無操作` — 常に入る
-3. `iPhone は操作中` / `iPhone は置かれたまま` / `iPhone は応答なし`
-4. `{プレイヤー名} が再生中` — 音楽が鳴っているときだけ
-5. `直前は {アプリ名}` — 前面のアプリが分かるときだけ
+| 場面 | `reason` | 例 |
+| --- | --- | --- |
+| Mac を触っている | `Mac を {秒} 前まで触っている` | `Mac を 3秒 前まで触っている` |
+| 在席スタンプの猶予中 | `{秒} 前に在席スタンプが押されている` | `2分 前に在席スタンプが押されている` |
+| 疑いの手前 | `Mac が {秒} 無操作` | `Mac が 8秒 無操作` |
+| 疑いの確認中 / 待ち | `疑い {N} 回目・確認中` / `疑い {N} 回目・様子を見ている` | — |
+| 晒している最中 | `晒している最中` | — |
+| メンヘラモードの投稿と投稿の間 | `メンヘラモード({N} 回目)` | — |
+| 休憩中 | `休憩中(残り {秒})` | `休憩中(残り 4分)` |
 
 ### `speech.json` での差し替え
 
@@ -674,8 +885,8 @@ LLM が使えない・失敗した・遅すぎたときの保険。`fallback_lin
 投稿の本文は `Detection/DiscordMessage.swift` の `DiscordMessageComposer.compose(_:using:)` が
 組み立てる。OS も HTTP も触らない純粋関数で、乱数を渡せば出力を固定できる。
 
-材料(`DiscordMessageFacts`)は `DetectionJudge.confirmedReason` が `reason` を組み立てるのに
-使っている信号と同じもの。
+材料(`DiscordMessageFacts`)は `DetectionEngine.discordFacts(...)` が `DetectionSignals` から
+組み立てる。`reason` と同じ信号を見ているが、文は別物。
 
 | 項目 | 出どころ |
 | --- | --- |
@@ -683,7 +894,6 @@ LLM が使えない・失敗した・遅すぎたときの保険。`fallback_lin
 | 見立て | Vision のラベル(カメラで撮ったときだけ) |
 | iPhone | `signals.iphone` |
 | 画面の読み取り | `live` は `SpokenSpeech.screen`、`bundled` は `POST /voice/screen` の結果。無ければ `nil` |
-| 目を離していた秒数 | `DetectionJudge.notLookingSeconds(for:)`。確定の理由になっているときだけ |
 | Mac 無操作秒数 | `signals.macIdleSeconds`。常に入る |
 | 再生中プレイヤー | `NowPlaying.playerName`。鳴っているときだけ |
 | 直前のアプリ | `signals.frontmostApp`。分かるときだけ |
@@ -736,8 +946,6 @@ LLM が使えない・失敗した・遅すぎたときの保険。`fallback_lin
 
 | 要素 | 条件 | セリフ |
 | --- | --- | --- |
-| 画面を見ていない | 確定の理由のときだけ | 画面から目を離してたの、{秒}だよ。 |
-| | | {秒}も、私のこと見てなかったね。 |
 | Mac 無操作 | 常に | Mac、{秒}も触ってないの知ってるよ。 |
 | | | {秒}、手が止まったまま。数えてた。 |
 | | | キーボード、{秒}前から静かだね。 |
@@ -765,21 +973,19 @@ LLM が使えない・失敗した・遅すぎたときの保険。`fallback_lin
 
 | 閾値 | 既定 | `MIHARI_FAST_THRESHOLDS=1` | 意味 |
 | --- | ---: | ---: | --- |
-| `suspectSeconds` | 12 秒 | 10 秒 | 疑いに入る無操作時間 |
-| `confirmSeconds` | 30 秒 | 25 秒 | サボり確定に入る無操作時間 |
-| `gazeWatchSeconds` | 6 秒 | 5 秒 | カメラで視線を見始める無操作時間 |
-| `notLookingDurationSeconds` | 15 秒 | 8 秒 | 「画面を見ていない」が続いたら確定にする長さ |
-| `gazeFreshnessSeconds` | 10 秒 | 10 秒 | 視線の観測をいつまで有効と見なすか |
+| `suspectSeconds` | 60 秒 | 15 秒 | 疑い 1 に入る無操作時間 |
+| `stageIntervalSeconds` | 30 秒 | 10 秒 | 疑い 1 → 2 → 3 → 晒し と 1 段階進むまでの間隔 |
+| `touchIDTimeoutSeconds` | 10 秒 | 10 秒 | 疑い 1 の Touch ID を待つ時間(`AttendanceModel.defaultAuthenticationTimeout`) |
+| `promptTimeoutSeconds` | 20 秒 | 8 秒 | 疑い 2 の問いかけの返事を待つ時間 |
+| `clingyIntervalSeconds` | 60 秒 | 15 秒 | メンヘラモードで Discord に送る間隔 |
+| `clingyEvidenceIntervalSeconds` | 300 秒 | 60 秒 | メンヘラモードで証拠を撮り直す間隔 |
 | `stampGraceSeconds` | 300 秒 | 15 秒 | 在席スタンプの直後、判定を見逃す時間 |
-| `cooldownSeconds` | 180 秒 | 30 秒 | 証拠を撮り直さない間隔。撮影に失敗したときは始まらず、次の評価で撮り直す |
 | `breakDurationSeconds` | 900 秒 | 60 秒 | 休憩 1 回の長さ |
-| `promptTimeoutSeconds` | 20 秒 | 8 秒 | 「休憩中?」の返事を待つ時間 |
 | `focusStreakIntervalSeconds` | 900 秒 | 60 秒 | 正常が続いているときに褒める間隔 |
 
-- `suspectSeconds` / `confirmSeconds` / `gazeWatchSeconds` の既定は **一時的に短縮中**。本来は 120 / 300 / 60
-- `stampGraceSeconds` の既定 300 秒は `AttendanceGrace.defaultGracePeriod`(= 5 × 60)から来ている
-- `confirmSeconds` は `max(suspectSeconds, confirmSeconds)` に丸める。疑いより先に確定することはない
-- `minimumIdleSeconds` = `min(suspectSeconds, gazeWatchSeconds)`。これ未満の無操作では判定を始めない
+- 短縮の側は起動時の `MIHARI_FAST_THRESHOLDS=1` だけでなく、ペットの右クリック →「デバッグ」→「検知の閾値」からも切り替えられる。切り替えは次の評価から効き(進行中の問いかけ・休憩は始めたときの秒数のまま)、「集中継続の間隔」で個別に変えていた値も preset の値に戻る。次回起動には引き継がない
+- `stampGraceSeconds` の既定 300 秒は `AttendanceGrace.defaultGracePeriod`(= 5 × 60)から来ている。**猶予が付くのはメニューの「在席スタンプを押す」だけ**で、疑い 1 の Touch ID に成功しても更新しない
+- 疑い 1 に入ってから晒しに届くまでは、既定で 60 + 30 × 3 = 150 秒(FAST なら 15 + 10 × 3 = 45 秒)
 
 ## 特殊状況
 
@@ -787,11 +993,11 @@ LLM が使えない・失敗した・遅すぎたときの保険。`fallback_lin
 | --- | --- |
 | 問いかけ中に新しい問いかけが来た | `pendingPrompt` があるあいだは新しい `event.prompt` を捨て、古い方の回答経路を生かす |
 | 問いかけ中に新しいセリフが来た | `heldLine` に 1 件だけ保留する。問いかけが閉じてから `voiced: false` で喋る |
-| 問いかけに答えが 2 つ来た(ボタンと AirPods の首振り) | `BreakPromptSession.claim` で先着 1 つだけを採用し、残りは捨てる |
-| 問いかけに無反応 | `promptTimeoutSeconds` 経過で問いかけを閉じ、監視を続ける(「いいえ」と同じ扱い) |
+| 問いかけに答えが 2 つ来た(ボタンと AirPods の首振り) | 問いかけのセッションが先着 1 つだけを採用し、残りは捨てる。待っているタスクも畳む |
+| 問いかけに無反応 | `promptTimeoutSeconds` 経過で問いかけを閉じ、`askTimeout` を喋って疑い 2 のまま待つ |
 | しまっている間に問いかけが来た | `promptQuestion` に残り、次に `reveal()` したときに改めて吹き出しを出す |
 | しまっている間のセリフ | `say()` が何もしない。`hideWindow()` で保留中のセリフを捨て、音声も止める |
-| 休憩開始 | カメラ(`gazeMonitor`)を止め、`gaze = .none`、`escalationStage = 0` |
+| 休憩開始 / 監視停止 / メニューの在席スタンプ | 進行中の問いかけ・カットイン・段階のタイマーをその場で畳み、`escalationStage = 0` に戻す。Discord には何も送らない |
 | エピソード終了 | 未回答の問いかけを閉じ、`escalationStage = 0`、`line: ""` の正常イベントを送る |
 | アトラスの読み込み失敗 | `loadErrorMessage` を持つだけで、ウィンドウの表示は続ける(コマは `nil` = 何も描かない)。種別は `unreadableSpritesheet` / `unexpectedSpritesheetSize`(1536 × 1872 px 以外)/ `croppingFailed` |
 | 保存位置がどの画面にも収まらない | `NSScreen.main` の `visibleFrame` 右下、余白 24 pt(`screenMargin`)に置き直す |
@@ -818,8 +1024,7 @@ LLM が使えない・失敗した・遅すぎたときの保険。`fallback_lin
 | `desktop/Sources/MihariCore/Resources/voice/` | セリフの原本(`lines.json`)と音声(`<区分>/<NN>.m4a`) |
 | `desktop/Sources/MihariCore/Detection/DiscordMessage.swift` | Discord の投稿本文の組み立て |
 | `scripts/generate_voice_lines.py` | 同封音声の生成(VOICEVOX → afconvert) |
-| `desktop/Sources/MihariCore/Detection/DetectionEngine.swift` | 検知ループ・問いかけ・休憩・段階の決定 |
-| `desktop/Sources/MihariCore/Detection/DetectionJudge.swift` | サボり判定と `reason` の組み立て |
+| `desktop/Sources/MihariCore/Detection/DetectionEngine.swift` | 検知ループ・問いかけ・休憩・段階の決定と `reason` の組み立て |
 | `desktop/Sources/MihariCore/Detection/DetectionThresholds.swift` | 閾値 |
 | `bridge/src/device_bridge/commands/iphone_state.py` | iPhone の状態モデルと前面アプリのログ行の解釈 |
 | `bridge/src/device_bridge/commands/iphone_state_source.py` | 実機の観測(画面状態・前面アプリ・表示名) |

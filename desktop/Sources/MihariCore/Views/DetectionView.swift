@@ -24,7 +24,7 @@ public struct DetectionView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("検知").font(.title2).bold()
-            Text("Mac の無操作時間と iPhone の様子から、声をかけるか・証拠を取るかを決める。")
+            Text("Mac の無操作時間と iPhone の様子から、疑う・晒す・まとわりつくを決める。")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -35,9 +35,6 @@ public struct DetectionView: View {
                     .font(.callout)
                 Label(engine.isWatching ? "監視中" : "停止中", systemImage: engine.isWatching ? "eye" : "eye.slash")
                     .foregroundStyle(engine.isWatching ? Color.green : Color.secondary)
-                    .font(.callout)
-                Label(engine.gaze.summary, systemImage: gazeIcon)
-                    .foregroundStyle(gazeColor)
                     .font(.callout)
                 Label(engine.music.label, systemImage: engine.music.isPlaying ? "music.note" : "speaker.slash")
                     .foregroundStyle(engine.music.isPlaying ? Color.orange : Color.secondary)
@@ -71,14 +68,14 @@ public struct DetectionView: View {
             Text("すべて要調整。デモしながら詰める前提の値。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            thresholdRow("疑い", engine.thresholds.suspectSeconds, "声をかけ始める")
-            thresholdRow("確定", engine.thresholds.confirmSeconds, "証拠を取って晒す")
-            thresholdRow("カメラを開ける", engine.thresholds.gazeWatchSeconds, "ここまではカメラを起動しない")
-            thresholdRow("見ていない継続", engine.thresholds.notLookingDurationSeconds, "この秒数続いたら確定する")
-            thresholdRow("スタンプ猶予", engine.thresholds.stampGraceSeconds, "在席スタンプ直後は見逃す")
-            thresholdRow("クールダウン", engine.thresholds.cooldownSeconds, "次に撮るまで空ける")
-            thresholdRow("休憩", engine.thresholds.breakDurationSeconds, "「休憩中?」に はい で見張りを止める")
+            thresholdRow("疑い", engine.thresholds.suspectSeconds, "疑い 1 に入って Touch ID を確かめる")
+            thresholdRow("段ごとの待ち", engine.thresholds.stageIntervalSeconds, "次の段へ上がるまで")
+            thresholdRow("Touch ID 待ち", engine.thresholds.touchIDTimeoutSeconds, "指を置かなければ打ち切る")
             thresholdRow("問いかけ待ち", engine.thresholds.promptTimeoutSeconds, "返事が無ければ引っ込める")
+            thresholdRow("メンヘラ間隔", engine.thresholds.clingyIntervalSeconds, "テキストだけの投稿を投げる")
+            thresholdRow("メンヘラ撮り直し", engine.thresholds.clingyEvidenceIntervalSeconds, "証拠を撮り直して添える")
+            thresholdRow("スタンプ猶予", engine.thresholds.stampGraceSeconds, "在席スタンプ直後は疑わない")
+            thresholdRow("休憩", engine.thresholds.breakDurationSeconds, "メニューの休憩で見張りを止める")
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -100,7 +97,6 @@ public struct DetectionView: View {
             if let signals = engine.lastSignals {
                 row("Mac 無操作", "\(Int(signals.macIdleSeconds)) 秒")
                 row("iPhone", iphoneLabel(signals.iphone))
-                row("視線", signals.gaze.summary)
                 row("音楽", signals.music.label)
                 row("前面アプリ", signals.frontmostApp ?? "不明")
                 row(
@@ -168,35 +164,20 @@ public struct DetectionView: View {
         .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
     }
 
-    private var gazeIcon: String {
-        switch engine.gaze.state {
-        case .lookingAtScreen: return "eye.circle.fill"
-        case .notLooking: return "eye.slash.circle.fill"
-        case .unknown: return "questionmark.circle"
-        }
-    }
-
-    private var gazeColor: Color {
-        switch engine.gaze.state {
-        case .lookingAtScreen: return .green
-        case .notLooking: return .orange
-        case .unknown: return .secondary
-        }
-    }
-
     private var stateIcon: String {
         switch engine.state {
         case .normal: return "checkmark.circle"
-        case .suspected: return "exclamationmark.circle"
-        case .confirmed: return "exclamationmark.triangle.fill"
+        case .suspect: return "exclamationmark.circle"
+        case .exposing: return "exclamationmark.triangle.fill"
+        case .clingy: return "heart.slash.fill"
         }
     }
 
     private var stateColor: Color {
         switch engine.state {
         case .normal: return .green
-        case .suspected: return .orange
-        case .confirmed: return .red
+        case .suspect: return .orange
+        case .exposing, .clingy: return .red
         }
     }
 }

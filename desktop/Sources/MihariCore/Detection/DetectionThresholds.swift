@@ -3,66 +3,56 @@ import Foundation
 /// 判定の閾値。**すべて要調整。** デモしながら詰める前提で、全部外から差し替えられるようにしている。
 public struct DetectionThresholds: Equatable, Sendable {
 
-    /// ここを超えたら「疑い」。声をかけ始める。
+    /// ここを超えたら疑い 1。すぐ Touch ID を確かめに行く。
     public let suspectSeconds: TimeInterval
 
-    /// ここを超えたら「サボり確定」。証拠を取る。
-    public let confirmSeconds: TimeInterval
+    /// 疑いの段が 1 つ上がるまでの待ち時間。チェックが空振りしてから次の段へ進むまで。
+    public let stageIntervalSeconds: TimeInterval
 
-    /// 無操作がこの秒数を超えたら、カメラを開けて視線を見張り始める。
-    /// これより手前ではカメラを一切起動しない。手を動かしている間に緑ランプを点けない。
-    public let gazeWatchSeconds: TimeInterval
+    /// 疑い 1 の Touch ID を待つ時間。`AttendanceModel` の打ち切りと同じ値を使う。
+    public let touchIDTimeoutSeconds: TimeInterval
 
-    /// **「画面を見ていない」がこの秒数続いたら確定**にする。
-    ///
-    /// 判定の主役。単発のフレームで決めると瞬き(0.1〜0.4 秒)で飛ぶが、
-    /// 続いた長さで見れば埋もれる。
-    public let notLookingDurationSeconds: TimeInterval
+    /// 疑い 2 の問いかけの返事を待つ時間。これを過ぎたら無反応として次の待ちに入る。
+    public let promptTimeoutSeconds: TimeInterval
 
-    /// 視線の見立てをいつまで信じるか。これより古い結果は使わない。
-    /// カメラを止めた直後の値で判定しないための保険。
-    public let gazeFreshnessSeconds: TimeInterval
+    /// メンヘラモードでテキストだけの投稿を投げる間隔。
+    public let clingyIntervalSeconds: TimeInterval
 
-    /// Touch ID の在席スタンプを押した直後の猶予。
-    /// 「いま席にいる」と本人が示したのに撮りに行くと、ただの嫌がらせになる。
-    public let stampGraceSeconds: TimeInterval
+    /// メンヘラモードで証拠を撮り直す間隔。この回はテキストだけの投稿と重ねず 1 件にまとめる。
+    public let clingyEvidenceIntervalSeconds: TimeInterval
 
-    /// 一度証拠を取ったあと、次に取るまで空ける時間。
-    /// これが無いと 1 秒ごとに撮って送り続けることになる。
-    public let cooldownSeconds: TimeInterval
-
-    /// 「休憩中?」に はい と答えたとき、見張りを止めておく時間。
-    /// この間はカメラも開かないし、撮らない・送らない・喋らない。
+    /// メニューの「休憩する」で見張りを止めておく時間。
+    /// この間は材料を集める前に評価を打ち切る。撮らない・送らない・喋らない。
     public let breakDurationSeconds: TimeInterval
 
-    /// 「休憩中?」の返事を待つ時間。これを過ぎたら無反応として問いかけを閉じ、監視を続ける。
-    public let promptTimeoutSeconds: TimeInterval
+    /// メニューの在席スタンプを押した直後の猶予。
+    /// 「いま席にいる」と本人が示したのに疑い始めると、ただの嫌がらせになる。
+    public let stampGraceSeconds: TimeInterval
 
     /// 正常が続いているとき、この間隔ごとにペットが褒める。
     /// 疑い以上の判定・休憩の開始・監視の停止で数え直す。
     public let focusStreakIntervalSeconds: TimeInterval
 
     public init(
-        suspectSeconds: TimeInterval = 12,
-        confirmSeconds: TimeInterval = 30,
-        gazeWatchSeconds: TimeInterval = 6,
-        notLookingDurationSeconds: TimeInterval = 15,
-        gazeFreshnessSeconds: TimeInterval = 10,
-        stampGraceSeconds: TimeInterval = AttendanceGrace.defaultGracePeriod,
-        cooldownSeconds: TimeInterval = 180,
-        breakDurationSeconds: TimeInterval = 900,
+        suspectSeconds: TimeInterval = 60,
+        stageIntervalSeconds: TimeInterval = 30,
+        touchIDTimeoutSeconds: TimeInterval = AttendanceModel.defaultAuthenticationTimeout,
         promptTimeoutSeconds: TimeInterval = 20,
+        clingyIntervalSeconds: TimeInterval = 60,
+        clingyEvidenceIntervalSeconds: TimeInterval = 300,
+        breakDurationSeconds: TimeInterval = 900,
+        stampGraceSeconds: TimeInterval = AttendanceGrace.defaultGracePeriod,
         focusStreakIntervalSeconds: TimeInterval = 900
     ) {
         self.suspectSeconds = suspectSeconds
-        self.confirmSeconds = max(suspectSeconds, confirmSeconds)
-        self.gazeWatchSeconds = gazeWatchSeconds
-        self.notLookingDurationSeconds = notLookingDurationSeconds
-        self.gazeFreshnessSeconds = gazeFreshnessSeconds
-        self.stampGraceSeconds = stampGraceSeconds
-        self.cooldownSeconds = cooldownSeconds
-        self.breakDurationSeconds = breakDurationSeconds
+        self.stageIntervalSeconds = stageIntervalSeconds
+        self.touchIDTimeoutSeconds = touchIDTimeoutSeconds
         self.promptTimeoutSeconds = promptTimeoutSeconds
+        self.clingyIntervalSeconds = clingyIntervalSeconds
+        // 撮り直しの間隔がテキストの間隔より短いと、毎回が証拠つきになってテキストだけの投稿が消える。
+        self.clingyEvidenceIntervalSeconds = max(clingyIntervalSeconds, clingyEvidenceIntervalSeconds)
+        self.breakDurationSeconds = breakDurationSeconds
+        self.stampGraceSeconds = stampGraceSeconds
         self.focusStreakIntervalSeconds = focusStreakIntervalSeconds
     }
 
@@ -70,45 +60,45 @@ public struct DetectionThresholds: Equatable, Sendable {
     public func withFocusStreakInterval(_ seconds: TimeInterval) -> DetectionThresholds {
         DetectionThresholds(
             suspectSeconds: suspectSeconds,
-            confirmSeconds: confirmSeconds,
-            gazeWatchSeconds: gazeWatchSeconds,
-            notLookingDurationSeconds: notLookingDurationSeconds,
-            gazeFreshnessSeconds: gazeFreshnessSeconds,
-            stampGraceSeconds: stampGraceSeconds,
-            cooldownSeconds: cooldownSeconds,
-            breakDurationSeconds: breakDurationSeconds,
+            stageIntervalSeconds: stageIntervalSeconds,
+            touchIDTimeoutSeconds: touchIDTimeoutSeconds,
             promptTimeoutSeconds: promptTimeoutSeconds,
+            clingyIntervalSeconds: clingyIntervalSeconds,
+            clingyEvidenceIntervalSeconds: clingyEvidenceIntervalSeconds,
+            breakDurationSeconds: breakDurationSeconds,
+            stampGraceSeconds: stampGraceSeconds,
             focusStreakIntervalSeconds: seconds
         )
     }
 
-    /// 何か起こりうる最短の無操作秒数。これ未満なら判定を始めるまでもない。
+    /// 何か起こりうる最短の無操作秒数。これ未満なら「手が動いている」と見なす。
     ///
-    /// カメラを開けている間は「見ていない秒数」でも確定しうるので、
-    /// 監視を始める秒数も候補に入れる。
+    /// 疑いの途中でこの秒数を下回ったら、何か入力があったということなので正常に戻す。
     public var minimumIdleSeconds: TimeInterval {
-        min(suspectSeconds, gazeWatchSeconds)
+        min(suspectSeconds, stageIntervalSeconds)
     }
 
-    /// 既定値。**一時的に** 疑い 12 秒 / 確定 30 秒 / カメラ 6 秒まで縮めている。本来は 120 / 300 / 60。
+    /// 標準の値。
+    public static let standard = DetectionThresholds()
+
+    /// 動作確認用に全部を秒単位まで縮めた値。
+    /// 1 分待たずに一連の流れが通るかを見られる。デモの調整にも使う。
+    public static let fast = DetectionThresholds(
+        suspectSeconds: 15,
+        stageIntervalSeconds: 10,
+        promptTimeoutSeconds: 8,
+        clingyIntervalSeconds: 15,
+        clingyEvidenceIntervalSeconds: 60,
+        breakDurationSeconds: 60,
+        stampGraceSeconds: 15,
+        focusStreakIntervalSeconds: 60
+    )
+
+    /// 起動時の既定値。
     ///
-    /// `MIHARI_FAST_THRESHOLDS=1` を付けて起動すると、動作確認用に全部を秒単位まで縮める。
-    /// 5 分待たずに一連の流れが通るかを見られる。デモの調整にも使う。
+    /// `MIHARI_FAST_THRESHOLDS=1` を付けて起動すると `fast` で始まる。
+    /// 起動したあとはペットの右クリック →「デバッグ」→「検知の閾値」からも切り替えられる。
     public static var `default`: DetectionThresholds {
-        guard ProcessInfo.processInfo.environment["MIHARI_FAST_THRESHOLDS"] == "1" else {
-            return DetectionThresholds()
-        }
-        return DetectionThresholds(
-            suspectSeconds: 10,
-            confirmSeconds: 25,
-            gazeWatchSeconds: 5,
-            notLookingDurationSeconds: 8,
-            gazeFreshnessSeconds: 10,
-            stampGraceSeconds: 15,
-            cooldownSeconds: 30,
-            breakDurationSeconds: 60,
-            promptTimeoutSeconds: 8,
-            focusStreakIntervalSeconds: 60
-        )
+        ProcessInfo.processInfo.environment["MIHARI_FAST_THRESHOLDS"] == "1" ? .fast : .standard
     }
 }

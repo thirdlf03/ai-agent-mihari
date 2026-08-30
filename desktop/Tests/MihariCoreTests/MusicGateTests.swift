@@ -3,60 +3,8 @@ import Testing
 
 @testable import MihariCore
 
-@Suite("音楽が鳴っているときだけ説教する")
-struct MusicGateJudgeTests {
-
-    private let judge = DetectionJudge(thresholds: .production)
-
-    private func signals(music: NowPlaying) -> DetectionSignals {
-        DetectionSignals(macIdleSeconds: 600, music: music)
-    }
-
-    @Test("音楽が鳴っていれば、音楽を止めて画面を覆う")
-    func playingMusicTriggersSermon() {
-        let decision = judge.decide(signals(music: .playing(.spotify)))
-        #expect(decision.state == .confirmed)
-        #expect(decision.shouldInterrupt)
-    }
-
-    @Test("何も鳴っていなければ画面を覆わない")
-    func silenceDoesNotInterrupt() {
-        // 止める音楽が無いのに画面を奪っても、「音楽を止めて聞かせる」が空振りするだけ。
-        let decision = judge.decide(signals(music: .silent))
-        #expect(decision.state == .confirmed)
-        #expect(decision.shouldInterrupt == false)
-    }
-
-    @Test("画面を覆わなくても、声はかけるし証拠は取る")
-    func silenceStillSpeaksAndCaptures() {
-        let decision = judge.decide(signals(music: .silent))
-        #expect(decision.shouldSpeak)
-        #expect(decision.evidence == .macCamera)
-    }
-
-    @Test("再生状況が分からないときは画面を覆わない")
-    func undeterminedDoesNotInterrupt() {
-        // オートメーション権限が無いと状態が取れない。確信が無いのに画面は奪わない。
-        let decision = judge.decide(signals(music: .undetermined(reason: "権限が無い")))
-        #expect(decision.shouldInterrupt == false)
-    }
-
-    @Test("鳴っているプレイヤー名が判断の根拠に残る")
-    func reasonNamesThePlayer() {
-        let reason = judge.decide(signals(music: .playing(.spotify))).reason
-        #expect(reason.contains("Spotify"))
-    }
-
-    @Test("鳴っていなければ根拠に音楽の話は出ない")
-    func silentReasonOmitsMusic() {
-        #expect(!judge.decide(signals(music: .silent)).reason.contains("再生中"))
-    }
-
-    @Test("Music で鳴っていても同じように説教する")
-    func appleMusicAlsoTriggers() {
-        #expect(judge.decide(signals(music: .playing(.music))).shouldInterrupt)
-    }
-}
+// 「音楽が鳴っているときだけ画面を奪う」は状態機械側の話になったので、
+// その検証は `DetectionExposureTests.interruptsOnlyWhenMusicIsPlaying` に移した。
 
 @Suite("いま鳴っているかの表現")
 struct NowPlayingTests {

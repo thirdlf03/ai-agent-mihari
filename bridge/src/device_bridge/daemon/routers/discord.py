@@ -101,10 +101,16 @@ async def post_test(request: Request) -> dict[str, Any]:
 
 @router.post("/post")
 async def post_evidence(request: Request, body: dict[str, Any]) -> dict[str, Any]:
-    """証拠を投稿する。画像は base64 で受け取る。"""
+    """証拠を投稿する。画像は base64 で受け取る。
+
+    `mention` を `false` にすると、メンション先が決まっていても `<@ID>` を付けない。
+    呼びつける必要のない知らせ(戻ってきた、など)で使う。
+    """
     text = str(body.get("text") or "")
     image = _decode_image(body.get("image"))
     filename = str(body.get("filename") or "evidence.png")
+    raw_mention = body.get("mention")
+    mention = True if raw_mention is None else bool(raw_mention)
 
     if not text and image is None:
         raise HTTPException(
@@ -113,7 +119,9 @@ async def post_evidence(request: Request, body: dict[str, Any]) -> dict[str, Any
         )
 
     try:
-        message_id = await request.app.state.discord.post(text, image=image, filename=filename)
+        message_id = await request.app.state.discord.post(
+            text, image=image, filename=filename, mention=mention
+        )
     except DiscordUnavailableError as error:
         # 晒せないことは検知を止める理由にならないので、原因を返して呼び出し元に判断させる。
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error

@@ -114,18 +114,22 @@ public struct DaemonClient: Sendable {
     }
 
     /// 証拠を投稿する。画像は base64 にして送る。
+    ///
+    /// `mention` を `false` にすると、メンション先が決まっていても `<@ID>` を付けずに投稿する。
     @discardableResult
     public func postToDiscord(
         text: String,
         image: Data? = nil,
-        filename: String = "evidence.png"
+        filename: String = "evidence.png",
+        mention: Bool = true
     ) async throws -> DiscordPostResult {
         try await post(
             "discord/post",
             body: DiscordPostRequest(
                 text: text,
                 image: image?.base64EncodedString(),
-                filename: filename
+                filename: filename,
+                mention: mention
             )
         )
     }
@@ -293,6 +297,7 @@ public struct DaemonClient: Sendable {
         let text: String
         let image: String?
         let filename: String
+        let mention: Bool
     }
 
     private struct DiscordMentionRequest: Encodable {

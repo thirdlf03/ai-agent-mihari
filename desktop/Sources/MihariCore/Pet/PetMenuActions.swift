@@ -16,6 +16,8 @@ public protocol PetMenuActions: AnyObject, ObservableObject {
     var voiceMode: VoiceMode { get }
     /// 集中継続を褒める間隔(秒)。デバッグメニューのチェックに使う。
     var focusStreakIntervalSeconds: TimeInterval { get }
+    /// 検知の閾値が短縮(`DetectionThresholds.fast`)か。デバッグメニューのチェックに使う。
+    var isFastThresholds: Bool { get }
 
     /// 監視を始める。
     func startWatching()
@@ -37,6 +39,11 @@ public protocol PetMenuActions: AnyObject, ObservableObject {
     func setVoiceMode(_ mode: VoiceMode)
     /// 集中継続を褒める間隔を変える。
     func setFocusStreakInterval(_ seconds: TimeInterval)
+    /// 検知の閾値を標準 / 短縮で切り替える。次の評価から新しい秒数で動く。
+    func setFastThresholds(_ enabled: Bool)
     /// 集中継続のセリフをその場で喋らせる(デバッグ用)。
     func replayFocusStreak()
+    /// 検知エンジンを実際に次の段へ進める(デバッグ用)。
+    /// 見た目だけの再現と違い、**本物の撮影・投稿が走る。**
+    func runDetectionStep(_ step: DetectionDebugStep)
 }

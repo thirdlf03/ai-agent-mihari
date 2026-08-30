@@ -40,8 +40,8 @@ public final class LivePetPresenter: ObservableObject, PetPresenting {
     /// 直近の `present(_:)` でペットに与えた指示。
     @Published public private(set) var lastDirective = PetDirective()
 
-    /// このエピソード（正常に戻るまで）で見たサボり確定の最大段階。段階が上がったときだけ跳ねる。
-    private var maxConfirmedStage: Int?
+    /// このエピソード（正常に戻るまで）で見たエスカレーション段階の最大値。段階が上がったときだけ跳ねる。
+    private var maxEscalationStage: Int?
     /// 問いかけを出しているあいだに届いたセリフと、その読み上げ用の音声。問いかけが閉じてから出す。
     private var heldLine: (text: String, audio: Data?)?
 
@@ -61,15 +61,15 @@ public final class LivePetPresenter: ObservableObject, PetPresenting {
         case .normal:
             // 非 normal から戻ってきたときだけ手を振る。エピソードの段階もここで忘れる。
             if state != .normal { directive.playOnce = .waving }
-            maxConfirmedStage = nil
-        case .suspected:
-            directive.fixedAnimation = .waiting
-        case .confirmed:
-            directive.fixedAnimation = .failed
+            maxEscalationStage = nil
+        case .suspected, .confirmed:
+            // 疑いは待つ姿、晒し以降は落ち込んだ姿で固定する。
+            directive.fixedAnimation = event.state == .suspected ? .waiting : .failed
             // 段階が上がったときだけ跳ねる。3→2→3 の往復では跳ねない。
-            if event.escalationStage > (maxConfirmedStage ?? Int.min) {
-                maxConfirmedStage = event.escalationStage
-                directive.playOnce = .jumping
+            if event.escalationStage > (maxEscalationStage ?? Int.min) {
+                maxEscalationStage = event.escalationStage
+                // メンヘラモードは晒しの続きなので、跳ね直さない。
+                if event.escalationStage != PetEvent.clingyStage { directive.playOnce = .jumping }
             }
         }
 
@@ -77,8 +77,8 @@ public final class LivePetPresenter: ObservableObject, PetPresenting {
         if pendingPrompt != nil || event.prompt != nil {
             directive.fixedAnimation = .waiting
         }
-        // 正常時は吹き出しを出さない。
-        if event.state != .normal, !event.line.isEmpty {
+        // 正常に戻るときも、メンヘラモードから戻った一言などは吹き出しに出す。
+        if !event.line.isEmpty {
             directive.line = event.line
         }
 
@@ -92,7 +92,10 @@ public final class LivePetPresenter: ObservableObject, PetPresenting {
         // 出している問いかけがあるあいだは、新しい問いかけを捨てて古い方の回答経路を生かす。
         if let prompt = event.prompt, pendingPrompt == nil {
             pendingPrompt = prompt
-            controller.showPrompt(question: prompt.question) { [weak self] answer in
+            controller.showPrompt(
+                question: prompt.question,
+                voice: Self.speechVoice(for: prompt.audio)
+            ) { [weak self] answer in
                 self?.answerPrompt(answer)
             }
         }

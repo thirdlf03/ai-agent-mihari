@@ -23,19 +23,10 @@ struct StatusPanelView: View {
                 Text(snapshot.idleBar).foregroundStyle(barColor(snapshot.tone))
                 Text(snapshot.thresholdText).foregroundStyle(.white.opacity(0.5))
             }
-            row("視線") {
-                Text(snapshot.gazeText)
-                if let openness = snapshot.eyeOpennessText {
-                    Text("目の開き \(openness)").foregroundStyle(.white.opacity(0.5))
-                }
-            }
             row("iPhone") { Text(snapshot.iphoneText) }
             row("音楽") { Text(snapshot.musicText) }
             row("前面アプリ") { Text(snapshot.frontmostAppText) }
-            row("在席スタンプ") {
-                Text(snapshot.attendanceText)
-                cooldown(snapshot)
-            }
+            row("在席スタンプ") { Text(snapshot.attendanceText) }
             row("最後の判断") {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(snapshot.judgementText)
@@ -68,17 +59,6 @@ struct StatusPanelView: View {
             } else {
                 Text(snapshot.watchText).foregroundStyle(.white.opacity(0.7))
             }
-        }
-    }
-
-    /// クールダウンの残り。撮れる状態なら「なし」。
-    @ViewBuilder
-    private func cooldown(_ snapshot: StatusPanelSnapshot) -> some View {
-        if let until = snapshot.cooldownUntil {
-            (Text("クールダウン 残り ") + Text(until, style: .timer))
-                .foregroundStyle(.white.opacity(0.5))
-        } else {
-            Text("クールダウン \(snapshot.cooldownText)").foregroundStyle(.white.opacity(0.5))
         }
     }
 

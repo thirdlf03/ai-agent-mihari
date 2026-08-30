@@ -59,6 +59,14 @@ struct PetDebugMenuEntriesTests {
         }
     }
 
+    /// チェックの付いている項目のタイトルだけを並び順に取り出す。
+    private func checkedTitles(_ entries: [PetMenuEntry]) -> [String] {
+        entries.compactMap { entry in
+            if case .item(let title, let isChecked, _) = entry, isChecked { return title }
+            return nil
+        }
+    }
+
     @Test("「アニメーションを固定」は固定を解く項目と 9 種を定義順に並べる")
     func fixedAnimationSubmenuListsEveryAnimation() throws {
         let presenter = makePresenter()
@@ -75,24 +83,50 @@ struct PetDebugMenuEntriesTests {
         )
     }
 
-    @Test("「疑い(段階 1)」で waiting に固定する")
+    @Test("「検知の状態を再現」は新フローの 6 状態を並べる")
+    func detectionStateSubmenuFollowsTheNewFlow() throws {
+        let presenter = makePresenter()
+        let entries = PetDebugMenuEntries.make(actions: StubPetMenuActions(), presenter: presenter)
+
+        let submenu = try #require(findSubmenu("検知の状態を再現", in: entries))
+
+        #expect(
+            itemTitles(submenu).prefix(6)
+                == ["正常に戻す", "疑い 1(Touch ID)", "疑い 2(首振り)", "疑い 3(最終警告)", "晒し", "メンヘラ"]
+        )
+    }
+
+    @Test("「疑い 1(Touch ID)」で waiting に固定する")
     func suspectedEntryFixesWaiting() {
         let presenter = makePresenter()
 
-        tap("疑い(段階 1)", in: PetDebugMenuEntries.make(actions: StubPetMenuActions(), presenter: presenter))
+        tap("疑い 1(Touch ID)", in: PetDebugMenuEntries.make(actions: StubPetMenuActions(), presenter: presenter))
 
         #expect(presenter.state == .suspected)
         #expect(presenter.lastDirective.fixedAnimation == .waiting)
     }
 
-    @Test("「サボり確定・撮影(段階 3)」で failed に固定して 1 回跳ねる")
-    func confirmedEntryFixesFailedAndJumps() {
+    @Test("「晒し」で failed に固定して 1 回跳ねる")
+    func exposingEntryFixesFailedAndJumps() {
         let presenter = makePresenter()
 
-        tap("サボり確定・撮影(段階 3)", in: PetDebugMenuEntries.make(actions: StubPetMenuActions(), presenter: presenter))
+        tap("晒し", in: PetDebugMenuEntries.make(actions: StubPetMenuActions(), presenter: presenter))
 
         #expect(presenter.lastDirective.fixedAnimation == .failed)
         #expect(presenter.lastDirective.playOnce == .jumping)
+    }
+
+    @Test("「実際に進める」は検知エンジンへの操作をそのまま並べて投げる")
+    func realStepsSubmenuForwardsToTheEngine() throws {
+        let presenter = makePresenter()
+        let actions = StubPetMenuActions()
+        let entries = PetDebugMenuEntries.make(actions: actions, presenter: presenter)
+
+        let submenu = try #require(findSubmenu("実際に進める(撮影・投稿あり)", in: entries))
+        #expect(itemTitles(submenu) == DetectionDebugStep.allCases.map(\.title))
+
+        tap(DetectionDebugStep.expose.title, in: entries)
+        #expect(actions.detectionSteps == [.expose])
     }
 
     @Test("問いかけを出して、閉じる項目で捨てる")
@@ -118,6 +152,29 @@ struct PetDebugMenuEntriesTests {
 
         tap(VoiceMode.live.label, in: PetDebugMenuEntries.make(actions: actions, presenter: presenter))
         #expect(actions.voiceMode == .live)
+    }
+
+    @Test("「検知の閾値」は標準 / 短縮を並べ、いまの preset にチェックを付ける")
+    func thresholdPresetEntriesSwitchThePreset() throws {
+        let presenter = makePresenter()
+        let actions = StubPetMenuActions()
+
+        let submenu = try #require(
+            findSubmenu("検知の閾値", in: PetDebugMenuEntries.make(actions: actions, presenter: presenter))
+        )
+        #expect(itemTitles(submenu) == PetDebugMenuEntries.thresholdPresets.map(\.title))
+        #expect(checkedTitles(submenu) == ["標準(疑い 60 秒 / 段ごと 30 秒)"])
+
+        tap(
+            "短縮(疑い 15 秒 / 段ごと 10 秒・デモ用)",
+            in: PetDebugMenuEntries.make(actions: actions, presenter: presenter)
+        )
+        #expect(actions.isFastThresholds)
+
+        let afterSwitch = try #require(
+            findSubmenu("検知の閾値", in: PetDebugMenuEntries.make(actions: actions, presenter: presenter))
+        )
+        #expect(checkedTitles(afterSwitch) == ["短縮(疑い 15 秒 / 段ごと 10 秒・デモ用)"])
     }
 
     @Test("「集中継続の間隔」は 15 分 / 1 分を切り替える")

@@ -26,7 +26,10 @@ public final class AttendanceModel: ObservableObject {
 
     /// 認証を打ち切るまでの秒数。指を置かないまま放置されたときに、
     /// ダイアログとカットインを出したままにしないための上限。
-    public static let defaultAuthenticationTimeout: TimeInterval = 10
+    ///
+    /// 検知の閾値(`DetectionThresholds.touchIDTimeoutSeconds`)の既定値としても使うので、
+    /// メインアクタの外からも読めるようにしてある。
+    nonisolated public static let defaultAuthenticationTimeout: TimeInterval = 10
 
     @Published public private(set) var stamps: [AttendanceStamp] = []
     @Published public private(set) var biometryTypeText: String = "未確認"
@@ -76,6 +79,28 @@ public final class AttendanceModel: ObservableObject {
     /// `.timedOut` を返す。
     @discardableResult
     public func stamp() async -> AttendanceStampOutcome {
+        await authenticate(recording: true)
+    }
+
+    /// 指紋だけ確かめる。**履歴には残さない。**
+    ///
+    /// 疑い 1 の Touch ID チェックで使う。ここで猶予(`lastStampAt`)まで更新してしまうと、
+    /// 見張りに促されて置いた指で 5 分間見逃されることになり、チェックの意味が無くなる。
+    @discardableResult
+    public func verify() async -> AttendanceStampOutcome {
+        await authenticate(recording: false)
+    }
+
+    /// 出している認証ダイアログを閉じる。返事を待たずに畳むときに呼ぶ。
+    ///
+    /// 走っている `stamp()` / `verify()` は失敗として返ってくる。呼んだ側が結果を捨てる前提。
+    public func cancelAuthentication() {
+        guard isAuthenticating else { return }
+        authenticator.cancelAuthentication()
+    }
+
+    /// 認証ダイアログを出して結末を返す。`recording` が true のときだけ履歴を増やす。
+    private func authenticate(recording: Bool) async -> AttendanceStampOutcome {
         // 走っている認証があるうちは重ねて出さない。押した側からは空振りに見せる。
         guard !isAuthenticating else { return .failed }
         isAuthenticating = true
@@ -91,6 +116,10 @@ public final class AttendanceModel: ObservableObject {
 
         switch await authenticateWithTimeout(policy: policy) {
         case .authenticated(.success):
+            guard recording else {
+                lastMessage = "在席を確かめた(\(biometryTypeText))"
+                return .stamped
+            }
             let stamp = AttendanceStamp(stampedAt: now(), biometryTypeText: biometryTypeText)
             stamps = store.append(stamp, to: stamps)
             lastMessage = "スタンプを押した(\(biometryTypeText))"

@@ -75,11 +75,14 @@ public final class DiscordController: ObservableObject {
     }
 
     /// 証拠を投稿する。投稿できたら `true`。
+    ///
+    /// `mention` を `false` にすると、メンション先が決まっていても `<@ID>` を付けずに投稿する。
     @discardableResult
     public func post(
         text: String,
         image: Data? = nil,
         filename: String = "evidence.png",
+        mention: Bool = true,
         using client: DaemonClient?
     ) async -> Bool {
         guard let client else {
@@ -87,7 +90,12 @@ public final class DiscordController: ObservableObject {
             return false
         }
         do {
-            let result = try await client.postToDiscord(text: text, image: image, filename: filename)
+            let result = try await client.postToDiscord(
+                text: text,
+                image: image,
+                filename: filename,
+                mention: mention
+            )
             lastPostedMessageID = result.messageID
             lastError = nil
             return true

@@ -26,6 +26,41 @@ struct PetSpeechLines: Codable, Sendable {
         case stampMissed
         /// 在席スタンプの認証を時間切れで打ち切ったとき。
         case stampTimeout
+        // ここから下は監視ループ v2(疑い 1 → 疑い 2 → 疑い 3 → 晒し → メンヘラモード)の区分。
+        /// 疑い 1 で指を差し出させるとき。
+        case suspectReach
+        /// 疑い 1 で指を差し出させるとき(iPhone を触っている)。
+        case suspectReachPhone
+        /// 疑い 1 の認証に成功したとき。
+        case suspectTouched
+        /// 疑い 1 で違う指を当てられたとき。
+        case suspectMissed
+        /// 疑い 1 を時間切れで打ち切ったとき。
+        case suspectTimeout
+        /// 疑い 2 で問いかけるとき。
+        case askQuestion
+        /// 疑い 2 で問いかけるとき(iPhone を触っている)。
+        case askQuestionPhone
+        /// 疑い 2 で首を縦に振られたとき。
+        case gestureYes
+        /// 疑い 2 で首を横に振られたとき。
+        case gestureNo
+        /// 疑い 2 に反応が無かったとき。
+        case askTimeout
+        /// 疑い 3 の最終警告。
+        case finalWarn
+        /// 疑い 3 の最終警告(iPhone を触っている)。
+        case finalWarnPhone
+        /// メンヘラモードの序盤。
+        case clingy1
+        /// メンヘラモードの中盤。
+        case clingy2
+        /// メンヘラモードの終盤。
+        case clingy3
+        /// メンヘラモード中に証拠を撮り直したとき。
+        case clingyEvidence
+        /// メンヘラモードから戻ってきたとき。
+        case returned
 
         /// 同封セリフ側の同じ区分。名前は `lines.json` のキーと揃えてある。
         var bundled: BundledVoiceKind {
@@ -41,6 +76,23 @@ struct PetSpeechLines: Codable, Sendable {
             case .stampTouched: return .stampTouched
             case .stampMissed: return .stampMissed
             case .stampTimeout: return .stampTimeout
+            case .suspectReach: return .suspectReach
+            case .suspectReachPhone: return .suspectReachPhone
+            case .suspectTouched: return .suspectTouched
+            case .suspectMissed: return .suspectMissed
+            case .suspectTimeout: return .suspectTimeout
+            case .askQuestion: return .askQuestion
+            case .askQuestionPhone: return .askQuestionPhone
+            case .gestureYes: return .gestureYes
+            case .gestureNo: return .gestureNo
+            case .askTimeout: return .askTimeout
+            case .finalWarn: return .finalWarn
+            case .finalWarnPhone: return .finalWarnPhone
+            case .clingy1: return .clingy1
+            case .clingy2: return .clingy2
+            case .clingy3: return .clingy3
+            case .clingyEvidence: return .clingyEvidence
+            case .returned: return .returned
             }
         }
     }

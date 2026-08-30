@@ -55,8 +55,10 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
 
     /// 在席スタンプのカットインを出す層。
     private let cutIn: AttendanceCutInPresenting = AttendanceCutInPresenter()
-    /// 在席スタンプの演出をしている最中か。押し直しでカットインが重なるのを防ぐ。
+    /// 在席スタンプ / 疑い 1 の演出をしている最中か。押し直しでカットインが重なるのを防ぐ。
     private var isStampCeremonyRunning = false
+    /// 演出の世代。畳まれたら 1 つ進めて、結末の演出を出さずにカットインだけ閉じる。
+    private var ceremonyGeneration = 0
 
     /// カットインを出してから認証ダイアログを出すまでの間(秒)。
     private static let cutInLeadInSeconds: TimeInterval = 0.45
@@ -129,7 +131,7 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
             .sink { [weak self] mode in
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    self.detection.voiceMode = mode
+                    // 検知のセリフは同封音声で固定なので、切り替えるのはペットのひとりごとと説教。
                     self.pet.controller.voiceMode = mode
                     // メニューバー側のチェックを描き直させる。
                     self.objectWillChange.send()
@@ -314,25 +316,49 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     /// 在席スタンプを押す。ペットが指を差し出し、Touch ID に指を置いて「指を合わせる」演出にする。
     ///
     /// 演出中に押し直されても何もしない。カットインが二重に出てしまうため。
+    /// 押した時点で「いま席にいる」と示されたことになるので、進んでいた疑いはここで畳む。
     public func stampAttendance() {
+        detection.acknowledgePresence()
         guard !isStampCeremonyRunning else { return }
         isStampCeremonyRunning = true
         Task { [weak self] in
             guard let self else { return }
-            await runStampCeremony()
+            await runCeremony(.stamp)
             isStampCeremonyRunning = false
         }
     }
 
-    /// 在席スタンプの演出をひと続きで進める。
-    private func runStampCeremony() async {
+    /// 疑い 1 の Touch ID チェック。在席スタンプと同じ演出を、疑い用のセリフで流す。
+    ///
+    /// 成功しても履歴には残さない(`verify()`)。促されて置いた指で 5 分間見逃されては
+    /// チェックの意味が無い。
+    private func confirmPresence(onPhone: Bool) async -> AttendanceStampOutcome {
+        guard !isStampCeremonyRunning else { return .failed }
+        isStampCeremonyRunning = true
+        defer { isStampCeremonyRunning = false }
+        return await runCeremony(.suspect(onPhone: onPhone))
+    }
+
+    /// 走っている Touch ID の演出を畳む。ダイアログを閉じ、結末を出さずにカットインも引っ込める。
+    private func cancelPresenceCheck() {
+        ceremonyGeneration += 1
+        attendance.cancelAuthentication()
+        cutIn.dismiss()
+    }
+
+    /// Touch ID の演出をひと続きで進める。
+    @discardableResult
+    private func runCeremony(_ variant: AttendanceCeremonyVariant) async -> AttendanceStampOutcome {
+        ceremonyGeneration += 1
+        let generation = ceremonyGeneration
+
         attendance.refreshAvailability()
         let definition = pet.controller.currentPet
         // パスワードにフォールバックする環境では「指を合わせる」が成立しないので、
         // カットインは出さずにペットの動きとセリフだけにする。
         let useCutIn = attendance.isBiometricsAvailable && (definition?.hasCutInImages ?? false)
 
-        let opening = AttendanceCeremonyScript.opening
+        let opening = AttendanceCeremonyScript.opening(variant)
         pet.controller.playOnce(opening.animation)
         pet.controller.say(opening.kind)
         if useCutIn, let definition, let image = opening.cutInImage {
@@ -341,15 +367,19 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
             try? await Task.sleep(for: .seconds(Self.cutInLeadInSeconds))
         }
 
-        let outcome = await attendance.stamp()
+        let outcome = variant == .stamp ? await attendance.stamp() : await attendance.verify()
 
-        let closing = AttendanceCeremonyScript.closing(outcome)
+        // 待っているあいだに畳まれていたら、結末の演出は出さない(カットインは畳んだ側が閉じている)。
+        guard generation == ceremonyGeneration else { return outcome }
+
+        let closing = AttendanceCeremonyScript.closing(outcome, variant: variant)
         pet.controller.playOnce(closing.animation)
         pet.controller.say(closing.kind)
-        guard useCutIn, let image = closing.cutInImage else { return }
+        guard useCutIn, let image = closing.cutInImage else { return outcome }
         cutIn.swap(to: image, flash: outcome == .stamped)
         try? await Task.sleep(for: .seconds(Self.cutInHoldSeconds))
         cutIn.dismiss()
+        return outcome
     }
 
     public func startBreak() {
@@ -388,8 +418,23 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         objectWillChange.send()
     }
 
+    public var isFastThresholds: Bool {
+        detection.thresholds == .fast
+    }
+
+    /// 検知の閾値を preset ごと差し替える。
+    /// 「集中継続の間隔」で個別に変えていた値も preset の値に戻る。
+    public func setFastThresholds(_ enabled: Bool) {
+        detection.thresholds = enabled ? .fast : .standard
+        objectWillChange.send()
+    }
+
     public func replayFocusStreak() {
         pet.sayFocusStreak()
+    }
+
+    public func runDetectionStep(_ step: DetectionDebugStep) {
+        detection.runDebugStep(step)
     }
 
     /// 説教オーバーレイを組み立てる。セリフの取得と読み上げの停止はこのアプリのものを渡す。
@@ -446,14 +491,27 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
             interrupt: { [overlay] request in
                 await MainActor.run { overlay.show(request: request) }
             },
-            post: { [discord, daemon] text, image, filename in
-                await discord.post(text: text, image: image, filename: filename, using: daemon.connectedClient)
+            post: { [discord, daemon] text, image, filename, mention in
+                await discord.post(
+                    text: text,
+                    image: image,
+                    filename: filename,
+                    mention: mention,
+                    using: daemon.connectedClient
+                )
             },
             classify: { data in
                 Self.visionLabel(for: data)
             },
             askHeadGesture: { [questioner] question, answerWindow in
                 await questioner.ask(prompt: question, answerWindow: answerWindow)
+            },
+            confirmPresence: { [weak self] onPhone in
+                guard let self else { return .unavailable }
+                return await self.confirmPresence(onPhone: onPhone)
+            },
+            cancelPresenceCheck: { [weak self] in
+                await MainActor.run { self?.cancelPresenceCheck() }
             }
         )
         detection.onEvent = { [pet] event in

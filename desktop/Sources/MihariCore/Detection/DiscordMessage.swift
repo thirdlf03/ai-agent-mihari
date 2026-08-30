@@ -2,7 +2,7 @@ import Foundation
 
 /// Discord に晒すときの材料。
 ///
-/// `DetectionJudge.confirmedReason` が `reason` を組み立てるのに使っている信号と同じものを引く。
+/// `DetectionEngine` が記録に残す `reason` と同じ信号から引く。
 /// `reason` は記録用に残したままで、投稿の本文はこちらから組み立てる。
 public struct DiscordMessageFacts: Equatable, Sendable {
 
@@ -66,7 +66,33 @@ public enum DiscordMessageComposer {
         _ facts: DiscordMessageFacts,
         using generator: inout Generator
     ) -> String {
-        headline(facts, using: &generator) + subtextPrefix + subtext(facts, using: &generator)
+        compose(headline: headline(facts, using: &generator), facts: facts, using: &generator)
+    }
+
+    /// 1 行目を差し替えて組み立てる。
+    ///
+    /// メンヘラモードの撮り直し(`clingyEvidence`)のように、1 行目を同封セリフから
+    /// 選びたいときに使う。2 行目の事実行は晒しと同じものを並べる。
+    public static func compose(headline: String, facts: DiscordMessageFacts) -> String {
+        var generator = SystemRandomNumberGenerator()
+        return compose(headline: headline, facts: facts, using: &generator)
+    }
+
+    /// 1 行目を差し替えて組み立てる。乱数を渡せるので、テストから出力を固定できる。
+    public static func compose<Generator: RandomNumberGenerator>(
+        headline: String,
+        facts: DiscordMessageFacts,
+        using generator: inout Generator
+    ) -> String {
+        headline + subtextPrefix + subtext(facts, using: &generator)
+    }
+
+    /// メンヘラモードのテキストだけの投稿を組み立てる。
+    ///
+    /// 1 行目は `clingy1` / `clingy2` / `clingy3` から選んだセリフ、
+    /// 2 行目は「戻ってこないまま何分何秒か」だけ。証拠は付けない。
+    public static func clingy(line: String, waitingFor seconds: TimeInterval) -> String {
+        line + subtextPrefix + "戻ってこないまま \(ElapsedText.minutesAndSeconds(seconds))。"
     }
 
     // MARK: - 1 行目
@@ -220,7 +246,7 @@ public enum DiscordMessageComposer {
         pool.randomElement(using: &generator) ?? ""
     }
 
-    /// 秒数の書き方は `DetectionJudge` と同じ(60 秒未満は秒、以上は分)。
+    /// 秒数の書き方は記録に残す `reason` と同じ(60 秒未満は秒、以上は分)。
     private static func fillSeconds(_ template: String, _ value: TimeInterval) -> String {
         template.replacingOccurrences(of: "{seconds}", with: "\(seconds: value)")
     }
