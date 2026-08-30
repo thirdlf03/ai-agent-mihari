@@ -12,6 +12,8 @@ public struct DiscordStatus: Decodable, Equatable, Sendable {
     public let inviteURL: String?
     public let selection: DiscordChannel?
     public let schedule: WatchSchedule
+    /// 証拠を晒すときに呼びつける相手の Discord ユーザー ID。決めていなければ `nil`。
+    public let mentionUserID: String?
 
     enum CodingKeys: String, CodingKey {
         case tokenConfigured = "token_configured"
@@ -22,6 +24,7 @@ public struct DiscordStatus: Decodable, Equatable, Sendable {
         case inviteURL = "invite_url"
         case selection
         case schedule
+        case mentionUserID = "mention_user_id"
     }
 
     /// 画面に出す、いま何をすればよいかの一言。
@@ -125,4 +128,14 @@ public struct DiscordPostResult: Decodable, Equatable, Sendable {
 /// チャンネルを選んだあとの応答。
 public struct DiscordChannelSelection: Decodable, Equatable, Sendable {
     public let selection: DiscordChannel
+}
+
+/// メンション先を決めたあとの応答。
+public struct DiscordMentionSelection: Decodable, Equatable, Sendable {
+    /// 決まったユーザー ID。外したときは `nil`。
+    public let mentionUserID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case mentionUserID = "mention_user_id"
+    }
 }

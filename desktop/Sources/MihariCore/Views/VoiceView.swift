@@ -4,21 +4,28 @@ import SwiftUI
 public struct VoiceView: View {
     @ObservedObject var voice: VoiceController
     @ObservedObject var daemon: DaemonController
+    @ObservedObject var voiceMode: VoiceModeStore
 
     @State private var idleSeconds = 300
     @State private var escalation: SpeechRequest.Escalation = .nudge
     @State private var iphone: SpeechRequest.IPhoneState = .unreachable
     @State private var vision: SpeechRequest.VisionLabel = .unknown
+    @State private var previewKind: BundledVoiceKind = .greeting
+    /// 直近に試聴したセリフ。音声が無ければテキストだけが出る。
+    @State private var previewedLine: BundledVoiceLine?
 
-    public init(voice: VoiceController, daemon: DaemonController) {
+    public init(voice: VoiceController, daemon: DaemonController, voiceMode: VoiceModeStore) {
         self.voice = voice
         self.daemon = daemon
+        self.voiceMode = voiceMode
     }
 
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
+                modeSection
+                bundledSection
                 situation
                 controls
                 if let error = voice.lastError {
@@ -35,10 +42,14 @@ public struct VoiceView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("セリフと声").font(.title2).bold()
-            Text("状況を渡すとセリフが作られ、VOICEVOX で読み上げられる。どちらが欠けても、検知と送信は止まらない。")
+            Text("同封の音声を鳴らすか、その場で VOICEVOX に合成させるかを選ぶ。どちらが欠けても、検知と送信は止まらない。")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            Label("いまは「\(voiceMode.mode.label)」", systemImage: "waveform")
+                .font(.callout)
+                .foregroundStyle(.secondary)
 
             if let status = voice.status {
                 Label(status.summary, systemImage: statusIcon(status))
@@ -56,6 +67,66 @@ public struct VoiceView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    /// いまどちらの音声モードかと、その切り替え。
+    private var modeSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("音声モード").font(.headline)
+            Picker("音声モード", selection: modeBinding) {
+                ForEach(VoiceMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.radioGroup)
+            .labelsHidden()
+            Text(
+                "同封は、あらかじめ作っておいた .m4a をそのまま鳴らす(VOICEVOX は要らない)。"
+                    + "live は bridge にセリフを作らせて VOICEVOX で合成する。"
+                    + "起動時に MIHARI_VOICE_MODE=live / bundled を付けると、そちらが優先される。"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// 選んだ区分から同封音声を 1 本鳴らして、その文面を出す。
+    private var bundledSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("同封音声の試聴").font(.headline)
+            HStack(spacing: 10) {
+                Picker("区分", selection: $previewKind) {
+                    ForEach(BundledVoiceKind.allCases) { kind in
+                        Text(kind.label).tag(kind)
+                    }
+                }
+                .frame(width: 260)
+                Button("再生") { previewedLine = voice.previewBundled(previewKind) }
+                Spacer()
+            }
+            if let previewedLine {
+                Text(previewedLine.text).font(.body).textSelection(.enabled)
+                if previewedLine.audio == nil {
+                    Text("音声ファイルが無い。scripts/generate_voice_lines.py で作り直す。")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            } else {
+                Text("まだ試聴していない。").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// `VoiceModeStore` は自分で値を持つので、Picker には読み書きを繋ぎ直したものを渡す。
+    private var modeBinding: Binding<VoiceMode> {
+        Binding(get: { voiceMode.mode }, set: { voiceMode.set($0) })
     }
 
     private var situation: some View {

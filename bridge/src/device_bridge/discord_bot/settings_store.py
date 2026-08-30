@@ -1,4 +1,4 @@
-"""投稿先チャンネルの保存。
+"""投稿先チャンネルとメンション先の保存。
 
 Bot トークンと違って秘密ではないので、素直にファイルに置く。
 """
@@ -10,11 +10,16 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_DIRECTORY = "~/.mihari"
 SETTINGS_FILE = "discord.json"
+
+#: メンション先のユーザー ID を入れるキー。
+#: Discord の snowflake は 64bit あり JSON の数値では丸められかねないので、文字列で持つ。
+MENTION_KEY = "mention_user_id"
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +54,11 @@ class ChannelSelection:
 
 
 class SettingsStore:
-    """選んだチャンネルを読み書きする。"""
+    """選んだチャンネルとメンション先を読み書きする。
+
+    どちらも同じ ``discord.json`` に別のキーで入れる。片方だけを書き換えても
+    もう片方が消えないよう、書くときは必ず読んでから差分を重ねる。
+    """
 
     def __init__(self, directory: str | Path | None = None) -> None:
         raw = directory or os.environ.get("MIHARI_SETTINGS_DIR") or DEFAULT_DIRECTORY
@@ -60,23 +69,47 @@ class SettingsStore:
         return self._path
 
     def load(self) -> ChannelSelection | None:
+        payload = self._read()
+        if payload is None:
+            return None
+        return ChannelSelection.from_dict(payload)
+
+    def save(self, selection: ChannelSelection) -> None:
+        self._write((self._read() or {}) | selection.to_dict())
+
+    def load_mention_user_id(self) -> str | None:
+        """通知するユーザーの ID。決めていなければ ``None``。"""
+        payload = self._read() or {}
+        text = str(payload.get(MENTION_KEY) or "").strip()
+        return text or None
+
+    def save_mention_user_id(self, user_id: str | None) -> None:
+        """通知先を決める。``None`` や空文字ならキーごと消して解除する。"""
+        payload = self._read() or {}
+        if user_id:
+            payload[MENTION_KEY] = user_id
+        else:
+            payload.pop(MENTION_KEY, None)
+        self._write(payload)
+
+    def clear(self) -> None:
+        self._path.unlink(missing_ok=True)
+
+    def _read(self) -> dict[str, Any] | None:
         try:
             payload = json.loads(self._path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
         except (OSError, ValueError):
-            logger.warning("チャンネル設定を読めなかった: %s", self._path)
+            logger.warning("Discord の設定を読めなかった: %s", self._path)
             return None
         if not isinstance(payload, dict):
             return None
-        return ChannelSelection.from_dict(payload)
+        return payload
 
-    def save(self, selection: ChannelSelection) -> None:
+    def _write(self, payload: dict[str, Any]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(
-            json.dumps(selection.to_dict(), ensure_ascii=False, indent=2),
+            json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-
-    def clear(self) -> None:
-        self._path.unlink(missing_ok=True)

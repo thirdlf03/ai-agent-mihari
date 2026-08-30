@@ -141,6 +141,14 @@ class DiscordService:
     def select_channel(self, selection: ChannelSelection) -> None:
         self._store.save(selection)
 
+    @property
+    def mention_user_id(self) -> str | None:
+        """投稿の先頭でメンションするユーザーの ID。決めていなければ ``None``。"""
+        return self._store.load_mention_user_id()
+
+    def set_mention_user_id(self, user_id: str | None) -> None:
+        self._store.save_mention_user_id(user_id)
+
     async def start(self) -> None:
         """Bot を起動する。トークンが無ければ何もしない。"""
         if not self._config.has_token or self._task is not None:
@@ -207,12 +215,28 @@ class DiscordService:
                 f"チャンネルが見つからない(id={selection.channel_id})。Bot が抜けた可能性がある"
             )
 
+        content = self._with_mention(text)
         file = discord.File(io.BytesIO(image), filename=filename) if image else None
         try:
-            message = await channel.send(content=text or None, file=file)
+            message = await channel.send(
+                content=content or None,
+                file=file,
+                # メンションを書いても既定では通知が飛ばないことがあるので、明示的に許す。
+                # 許すのはユーザー宛てだけ。@everyone やロールを誤爆させない。
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False, roles=False, users=True, replied_user=False
+                ),
+            )
         except discord.HTTPException as error:
             raise DiscordUnavailableError(f"投稿に失敗した: {error}") from error
         return message.id
+
+    def _with_mention(self, text: str) -> str:
+        """メンション先が決まっていれば本文の先頭に付ける。決まっていなければそのまま。"""
+        user_id = self.mention_user_id
+        if not user_id:
+            return text
+        return f"<@{user_id}> {text}" if text else f"<@{user_id}>"
 
     def _require_bot(self) -> MihariBot:
         if not self._config.has_token:

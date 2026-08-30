@@ -81,7 +81,7 @@ public enum PetMenuEntries {
             .separator,
             .submenu(
                 title: "デバッグ",
-                entries: PetDebugMenuEntries.make(presenter: presenter)
+                entries: PetDebugMenuEntries.make(actions: actions, presenter: presenter)
             ),
         ]
     }

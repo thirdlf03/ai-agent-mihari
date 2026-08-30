@@ -28,6 +28,8 @@ struct DetectionSmokeTests {
             frontmostMonitor: FrontmostAppMonitor(probe: { "Xcode" })
         )
         engine.actions = spy.makeActions()
+        // セリフを bridge に作らせる経路まで通す。同封音声のときは speak を呼ばない。
+        engine.voiceMode = .live
         // ループの間隔は 5 秒なので、閾値を秒単位まで縮めて手で進める。
         engine.thresholds = DetectionThresholds(
             suspectSeconds: 1,

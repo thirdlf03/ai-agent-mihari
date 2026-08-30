@@ -122,6 +122,12 @@ public enum NowPlaying: Equatable, Sendable {
         return false
     }
 
+    /// 再生中のプレイヤー名。鳴っていなければ `nil`。
+    public var playerName: String? {
+        guard case .playing(let player) = self else { return nil }
+        return player.scriptName
+    }
+
     /// 画面やログに出す一言。
     public var label: String {
         switch self {

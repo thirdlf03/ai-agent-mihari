@@ -13,6 +13,7 @@ final class ActionSpy: @unchecked Sendable {
     private var _interrupted: [SpeechRequest] = []
     private var _posts: [(String, Data?, String)] = []
     private var _classified = 0
+    private var _screenReads: [SpeechRequest] = []
 
     var macPhotos: Int { lock.withLock { _macPhotos } }
     var iphoneShots: Int { lock.withLock { _iphoneShots } }
@@ -20,6 +21,7 @@ final class ActionSpy: @unchecked Sendable {
     var interrupted: [SpeechRequest] { lock.withLock { _interrupted } }
     var posts: [(String, Data?, String)] { lock.withLock { _posts } }
     var classified: Int { lock.withLock { _classified } }
+    var screenReads: [SpeechRequest] { lock.withLock { _screenReads } }
 
     /// 撮影が失敗する状況を作るためのつまみ。
     var captureSucceeds = true
@@ -27,6 +29,12 @@ final class ActionSpy: @unchecked Sendable {
     var postSucceeds = true
     /// 発話が失敗する状況を作るためのつまみ。
     var speechSucceeds = true
+    /// 画面読み取りが返す内容。`nil` なら読めなかったことにする。
+    var screenReading: SpokenLine.ScreenReading? = SpokenLine.ScreenReading(
+        app: "YouTube",
+        activity: "動画を見ている",
+        category: "slacking"
+    )
 
     func makeActions() -> DetectionEngine.Actions {
         DetectionEngine.Actions(
@@ -40,7 +48,12 @@ final class ActionSpy: @unchecked Sendable {
             },
             speak: { [self] request in
                 lock.withLock { _spoken.append(request) }
-                return speechSucceeds ? SpokenSpeech(text: "喋った") : nil
+                guard speechSucceeds else { return nil }
+                return SpokenSpeech(text: "喋った", screen: screenReading)
+            },
+            readScreen: { [self] request in
+                lock.withLock { _screenReads.append(request) }
+                return ScreenReadResult(screen: screenReading)
             },
             interrupt: { [self] request in
                 lock.withLock { _interrupted.append(request) }
@@ -81,6 +94,8 @@ struct DetectionEngineTests {
         )
         engine.thresholds = .production
         engine.actions = spy.makeActions()
+        // 既存の検証はどれも live(bridge にセリフを作らせる)経路のもの。
+        engine.voiceMode = .live
         return engine
     }
 
@@ -314,6 +329,21 @@ struct DetectionEngineTests {
         #expect(decision.state == .confirmed)
     }
 
+    @Test("Discord には reason ではなく組み立てた本文を送る")
+    func postsComposedMessageInsteadOfReason() async {
+        let spy = ActionSpy()
+        let engine = engine(idle: 600, spy: spy)
+        engine.iphoneState = .unreachable
+
+        let decision = await engine.evaluate()
+
+        let posted = spy.posts.first?.0
+        #expect(posted?.contains(DiscordMessageComposer.subtextPrefix) == true)
+        #expect(posted != decision.reason)
+        // 記録には従来どおり reason が残る。
+        #expect(engine.log.first?.reason == decision.reason)
+    }
+
     @Test("材料には前面アプリ名が入る")
     func signalsCarryFrontmostApp() async {
         let spy = ActionSpy()
@@ -343,6 +373,7 @@ struct DetectionPetNotificationTests {
         engine.thresholds = .production
         engine.actions = spy.makeActions()
         engine.onEvent = { pet.record($0) }
+        engine.voiceMode = .live
         return engine
     }
 

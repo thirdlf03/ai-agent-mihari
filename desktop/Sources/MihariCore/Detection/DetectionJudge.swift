@@ -70,13 +70,21 @@ public struct DetectionJudge: Sendable {
         )
     }
 
+    /// 「画面を見ていない」が確定の理由になっているときだけ、その秒数を返す。
+    ///
+    /// `reason` と Discord の文面が同じ物差しを使えるよう、判定に使っている条件をそのまま貸す。
+    public func notLookingSeconds(for signals: DetectionSignals) -> TimeInterval? {
+        guard signals.gaze.notLookingSeconds >= thresholds.notLookingDurationSeconds else { return nil }
+        return signals.gaze.notLookingSeconds
+    }
+
     /// 確定に至った理由。確定しないなら `nil`。
     ///
     /// 時間切れだけでなく、**画面を見ていないと確認できた**場合も確定させる。
     /// 見ていないことが分かっているなら、時間切れまで待つ理由がない。
     private func confirmationCause(_ signals: DetectionSignals) -> ConfirmationCause? {
         // 「見ていない」が続いた長さで決める。単発のフレームで決めると瞬きで飛ぶ。
-        if signals.gaze.notLookingSeconds >= thresholds.notLookingDurationSeconds {
+        if notLookingSeconds(for: signals) != nil {
             return .notLookingAtScreen
         }
         if signals.macIdleSeconds >= thresholds.confirmSeconds {

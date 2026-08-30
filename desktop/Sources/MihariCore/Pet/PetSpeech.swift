@@ -6,14 +6,6 @@ struct PetSpeechLines: Codable, Sendable {
     enum Kind: String, CaseIterable, CodingKey {
         /// クリックされたときの挨拶。
         case greeting
-        /// 作業中。
-        case running
-        /// 入力や確認を待っているとき。
-        case needsInput
-        /// 完了したとき。
-        case ready
-        /// 失敗して止まっているとき。
-        case blocked
         /// 待機中のひとりごと。
         case idle
         /// ドラッグされ始めたとき。
@@ -24,62 +16,33 @@ struct PetSpeechLines: Codable, Sendable {
         case watchStart
         /// 休憩が明けて監視に戻ったとき。
         case breakEnd
+        /// 集中が続いているとき(褒める)。
+        case focusStreak
+
+        /// 同封セリフ側の同じ区分。名前は `lines.json` のキーと揃えてある。
+        var bundled: BundledVoiceKind {
+            switch self {
+            case .greeting: return .greeting
+            case .idle: return .idle
+            case .dragging: return .dragging
+            case .wake: return .wake
+            case .watchStart: return .watchStart
+            case .breakEnd: return .breakEnd
+            case .focusStreak: return .focusStreak
+            }
+        }
     }
 
-    /// コードに埋め込んだ既定のセリフ。`speech.json` が無いときはこれを使う。
-    static let builtIn = PetSpeechLines(lines: [
-        .greeting: [
-            "こんにちは。", "呼びました?", "なんでしょう?", "はい、ここに。",
-            "お呼びですか?", "ご用ですか?", "見ていましたよ。",
-            "何かお手伝いできますか?", "今日もよろしくお願いします。",
-            "そんなに触ると、くすぐったいです。",
-        ],
-        .running: [
-            "デバイスを探しています…", "少々お待ちを。", "いま確認しています。",
-            "もう少しかかります。", "順番に見ています。", "接続を調べています…",
-            "もうすぐ終わります。", "急かさないでくださいね。", "まだ探しています。",
-        ],
-        .needsInput: [
-            "確認をお願いします。", "どうしますか?", "お返事を待っています。",
-            "ここで止まっています。", "指示をください。", "続けてもいいですか?",
-            "決めてもらえますか?",
-        ],
-        .ready: [
-            "終わりました。", "新しいデバイスが見えました!", "お待たせしました。",
-            "できました。", "準備できました。", "見つけましたよ。", "はい、どうぞ。",
-            "うまくいきました。",
-        ],
-        .blocked: [
-            "うまくいきませんでした…", "エラーが出ています。", "もう一度試してみますか?",
-            "ここで詰まってしまいました。", "つながりませんでした…",
-            "少し休んでから、もう一度どうぞ。", "ケーブルは挿さっていますか?",
-            "見つかりませんでした。",
-        ],
-        .idle: [
-            "…。", "ふぅ。", "今日はいい天気ですね。", "退屈です。", "静かですね。",
-            "…ねむい。", "何か起きるまで、ここにいます。", "お仕事、進んでいますか?",
-            "水分、とりました?", "少し休みませんか?", "外は静かですね。", "背伸び…",
-            "…あ、ごめんなさい、ぼーっとしていました。", "この辺り、落ち着きます。",
-        ],
-        .dragging: [
-            "わっ。", "どこへ行くんです?", "揺れます…", "持ち上げないでください。",
-            "ゆっくりお願いします。", "そこでいいですか?", "高いところは、ちょっと…",
-        ],
-        .wake: [
-            "おはようございます。", "ここにいますよ。", "戻りました。", "起きました。",
-            "呼ばれた気がして。", "はい、起きていますよ。", "また会えましたね。",
-        ],
-        .watchStart: [
-            "作業開始ですね。ここから見ていますよ。",
-            "監視、始めます。作業に集中してくださいね。",
-            "作業スタートです。サボったら分かりますからね。",
-            "いまから見張ります。がんばってください。",
-        ],
-        .breakEnd: [
-            "休憩はおしまいです。作業に戻りましょう。", "そろそろ戻りましょうか。見ていますよ。",
-            "休憩おわりです。続きをどうぞ。",
-        ],
-    ])
+    /// 既定のセリフ。`Resources/voice/lines.json` が唯一の出どころで、`speech.json` が無ければこれを使う。
+    static let builtIn: PetSpeechLines = {
+        var lines: [Kind: [String]] = [:]
+        for kind in Kind.allCases {
+            let values = BundledVoiceLines.shared.lines(for: kind.bundled)
+            guard !values.isEmpty else { continue }
+            lines[kind] = values
+        }
+        return PetSpeechLines(lines: lines)
+    }()
 
     /// 種類ごとのセリフ候補。候補が空の種類は持たない。
     private var lines: [Kind: [String]]

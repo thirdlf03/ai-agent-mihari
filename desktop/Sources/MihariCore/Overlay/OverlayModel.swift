@@ -26,8 +26,10 @@ public final class OverlayModel: ObservableObject {
     static let charactersPerSecondEstimate = 6.0
     /// 画面に残す実行ログの件数。
     public static let logHistoryLimit = 30
-    /// セリフを取得できなかったときに表示する固定文言。
-    public static let fallbackSermonLine = "サボりが確定した。音楽は止めた。ここで最後まで聞いてから戻ってくること。"
+    /// セリフを取得できなかったときに表示する固定文言。同封セリフの `sermon` の 1 本目。
+    public static let fallbackSermonLine =
+        BundledVoiceLines.shared.lines(for: .sermon).first
+        ?? "サボりが確定した。音楽は止めた。ここで最後まで聞いてから戻ってくること。"
     /// 「試す」ボタンが使う既定の状況(サボり確定 = 説教段階)。
     public static let defaultSermonRequest = SpeechRequest(idleSeconds: 900, escalation: .warn)
 

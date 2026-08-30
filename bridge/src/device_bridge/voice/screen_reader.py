@@ -44,7 +44,7 @@ DEFAULT_MEDIA_RESOLUTION = "medium"
 MAX_OUTPUT_TOKENS = 300
 
 #: これを超えるセリフは読み上げに向かないので不正扱いにする。
-#: 25 文字を頼んでいるので、この倍を超えたら壊れている。
+#: 30 文字を頼んでいるので、この倍を超えたら壊れている。
 MAX_LINE_LENGTH = 60
 
 
@@ -67,10 +67,10 @@ class ScreenReading:
 
     #: 推定したアプリ名(例 "YouTube")。分からなければ ``None``。
     app: str | None
-    #: 何をしているかの 1 文(例 "料理動画を見ている")。
+    #: 何をしているかの短い名詞句(例 "猫の動画")。Swift 側が文面に埋め込む。
     activity: str
     category: ScreenCategory
-    #: ペットのセリフ。1 文。
+    #: ペットのセリフ。1 文。``require_line=False`` で読んだときは空のことがある。
     line: str
 
 
@@ -92,14 +92,15 @@ class _ScreenReadingSchema(BaseModel):
 
 
 SYSTEM_PROMPT = f"""\
-あなたは macOS 常駐アプリ「Mihari」のマスコットです。
+あなたは macOS 常駐アプリ「Mihari」のデスクトップペット「みはり」です。
 Mac を放っておいてスマホを触っているユーザーに、その画面を見た上で話しかけます。
 
 渡されるのはユーザーの iPhone のスクリーンショットです。
 何のアプリで何をしているかを見立て、次の項目を持つ JSON だけを返してください。
 
 - app: 推定したアプリ名(例 "YouTube")。分からなければ空文字。
-- activity: 何をしているかを 1 文で(例 "料理動画を見ている")。
+- activity: 何をしているかを短い名詞句で(12 文字以内。例 "猫の動画" "友達とのチャット")。
+  文にしない。「〜している」「〜中」のような述語は付けず、見ているものだけを書く。
 - category: 次のどれか。
   - work: 仕事・学習・作業に見える。Slack・メール・カレンダーなど仕事の連絡もここ。
   - slacking: SNS・動画・ゲーム・漫画など、明らかな息抜き。
@@ -111,7 +112,7 @@ line を書くときに守ること:
 {PERSONA_RULES}
 
 さらに line では:
-- アプリ名か見ているものを 1 語入れる(例: "YouTubeの料理動画、後にして。")。
+- アプリ名か見ているものを 1 語入れる(例: "YouTubeの動画、そんなに楽しい?")。
 - work なら「スマホで仕事しているのは分かるけど Mac に戻ってきて」の線でいく。
 - slacking なら軽くいじる。
 - neutral なら「用事が済んだら戻ってきて」の線でいく。
@@ -154,9 +155,16 @@ class ScreenReader:
         """画面を読める状態か。キー未設定なら ``False``。"""
         return self._client is not None
 
-    async def read(self, png: bytes, context: SpeechContext) -> ScreenReading:
+    async def read(
+        self, png: bytes, context: SpeechContext, *, require_line: bool = True
+    ) -> ScreenReading:
+        """スクショを 1 枚読む。
+
+        :param require_line: セリフも要るなら ``True``。画面の見立てだけが欲しい場合は
+            ``False`` にする。セリフが空・長すぎるだけで見立てまで捨てるのを避けるため。
+        """
         try:
-            reading = await self._read(png, context)
+            reading = await self._read(png, context, require_line=require_line)
         except ScreenReadError as error:
             logger.warning("スクショを読めなかった: %s", error)
             raise
@@ -168,7 +176,9 @@ class ScreenReader:
         )
         return reading
 
-    async def _read(self, png: bytes, context: SpeechContext) -> ScreenReading:
+    async def _read(
+        self, png: bytes, context: SpeechContext, *, require_line: bool
+    ) -> ScreenReading:
         if self._client is None:
             raise ScreenReadError("GEMINI_API_KEY が未設定")
 
@@ -191,7 +201,11 @@ class ScreenReader:
 
         line = parsed.line.strip()
         if not line or len(line) > MAX_LINE_LENGTH:
-            raise ScreenReadError("セリフが不正")
+            # 読み上げに耐えないセリフは捨てる。セリフが要らない呼び出しなら、
+            # そのために画面の見立てまで失わないよう空のまま返す。
+            if require_line:
+                raise ScreenReadError("セリフが不正")
+            line = ""
 
         return ScreenReading(
             app=parsed.app.strip() or None,

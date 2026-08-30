@@ -7,9 +7,18 @@ import Foundation
 /// 検知エンジン・撮影・Discord への送信はどれも動かない。
 public enum PetDebugMenuEntries {
 
+    /// 「集中継続の間隔」に並べる選択肢。本来の 15 分と、動かして確かめるための 1 分。
+    public static let focusStreakIntervals: [(title: String, seconds: TimeInterval)] = [
+        ("15 分", 900),
+        ("1 分", 60),
+    ]
+
     /// デバッグメニューの並びを組み立てる。呼ぶたびに、そのときの状態でチェックを決める。
     @MainActor
-    public static func make(presenter: LivePetPresenter) -> [PetMenuEntry] {
+    public static func make<Actions: PetMenuActions>(
+        actions: Actions,
+        presenter: LivePetPresenter
+    ) -> [PetMenuEntry] {
         let pet = presenter.controller
         return [
             .submenu(
@@ -28,6 +37,31 @@ public enum PetDebugMenuEntries {
                         action: { pet.playOnce(animation) }
                     )
                 }
+            ),
+            .separator,
+            .submenu(
+                title: "音声",
+                entries: VoiceMode.allCases.map { mode -> PetMenuEntry in
+                    .item(
+                        title: mode.label,
+                        isChecked: actions.voiceMode == mode,
+                        action: { actions.setVoiceMode(mode) }
+                    )
+                }
+            ),
+            .submenu(
+                title: "集中継続の間隔",
+                entries: focusStreakIntervals.map { choice -> PetMenuEntry in
+                    .item(
+                        title: choice.title,
+                        isChecked: actions.focusStreakIntervalSeconds == choice.seconds,
+                        action: { actions.setFocusStreakInterval(choice.seconds) }
+                    )
+                }
+            ),
+            .item(
+                title: "集中継続のセリフを再現",
+                action: { actions.replayFocusStreak() }
             ),
             .separator,
             .item(

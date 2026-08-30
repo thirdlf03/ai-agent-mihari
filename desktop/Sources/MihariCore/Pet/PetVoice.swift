@@ -65,7 +65,7 @@ final class PetVoice {
             // 通信のあいだに次のセリフが来ていたら、古い音声は鳴らさない。
             guard currentGeneration == generation else { return nil }
 
-            guard player.play(wav: wave, priority: .chatter) else { return nil }
+            guard player.play(audio: wave, priority: .chatter) else { return nil }
             // `SpeechPlayer` は長さを返さないので、鳴らせたときだけ別に測る。
             // 再生はしないので二重には鳴らない。
             return (try? AVAudioPlayer(data: wave))?.duration
@@ -77,15 +77,17 @@ final class PetVoice {
         }
     }
 
-    /// すでに用意してある WAV を検知のセリフとして鳴らす。鳴らせたら音声の長さを返す。
+    /// すでに用意してある音声(検知の WAV / 同封の .m4a)を鳴らす。鳴らせたら音声の長さを返す。
     ///
     /// 合成は挟まないので、ペットが吹き出しを出した瞬間にそのまま鳴らせる。
-    /// 検知のセリフ(`.detection`)なので、ひとりごとが鳴っていれば割り込んで差し替える。
-    func playPrepared(_ wav: Data) -> TimeInterval? {
-        guard player.play(wav: wav, priority: .detection) else { return nil }
+    ///
+    /// - Parameter priority: 検知のセリフ(`.detection`)ならひとりごとに割り込む。
+    ///   同封音声のひとりごと(`.chatter`)なら、検知のセリフが鳴っているあいだは譲る。
+    func playPrepared(_ audio: Data, priority: SpeechPriority) -> TimeInterval? {
+        guard player.play(audio: audio, priority: priority) else { return nil }
         // `SpeechPlayer` は長さを返さないので、鳴らせたときだけ別に測る。
         // 再生はしないので二重には鳴らない。
-        return (try? AVAudioPlayer(data: wav))?.duration
+        return (try? AVAudioPlayer(data: audio))?.duration
     }
 
     /// 再生中のひとりごとを止める。合成中の結果も捨てる。検知のセリフは止めない。

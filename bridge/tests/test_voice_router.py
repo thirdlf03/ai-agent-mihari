@@ -21,9 +21,9 @@ PNG_B64 = base64.b64encode(PNG).decode("ascii")
 
 READING = ScreenReading(
     app="YouTube",
-    activity="料理動画を見ている",
+    activity="料理動画",
     category=ScreenCategory.SLACKING,
-    line="その料理動画、あとで作るんですか？",
+    line="その料理動画、そんなに楽しい?",
 )
 
 
@@ -65,9 +65,13 @@ class _StubScreenReader:
         self.is_configured = is_configured
         self.model = "test-screen-model"
         self.seen: list[bytes] = []
+        self.require_line: list[bool] = []
 
-    async def read(self, png: bytes, context: SpeechContext) -> ScreenReading:
+    async def read(
+        self, png: bytes, context: SpeechContext, *, require_line: bool = True
+    ) -> ScreenReading:
         self.seen.append(png)
+        self.require_line.append(require_line)
         await asyncio.sleep(self._delay)
         if isinstance(self._result, Exception):
             raise self._result
@@ -197,6 +201,7 @@ def test_voice_endpoints_need_a_token(client: TestClient) -> None:
     assert client.get("/voice/status").status_code == 401
     assert client.post("/voice/line", json={}).status_code == 401
     assert client.post("/voice/speak", json={}).status_code == 401
+    assert client.post("/voice/screen", json={}).status_code == 401
 
 
 def test_a_screenshot_makes_the_line_from_the_screen(
@@ -216,11 +221,13 @@ def test_a_screenshot_makes_the_line_from_the_screen(
     assert body["from_llm"] is True
     assert body["screen"] == {
         "app": "YouTube",
-        "activity": "料理動画を見ている",
+        "activity": "料理動画",
         "category": "slacking",
     }
     assert body["screen_error"] is None
     assert reader.seen == [PNG]
+    # 喋るときはセリフごと要る。
+    assert reader.require_line == [True]
     # 画面が読めたなら Claude は呼ばない。1 回の呼び出しで読み取りとセリフを賄う。
     assert generator.seen == []
 
@@ -386,3 +393,154 @@ def test_line_falls_back_when_it_is_too_slow(
     assert "用意できなかった" in body["screen_error"]
     # 読み上げの鍵は返さない。/voice/line は音声を扱わない。
     assert "audio" not in body
+
+
+def test_screen_reads_the_screenshot_without_making_a_line(
+    client: TestClient, auth: dict[str, str]
+) -> None:
+    # 同封済みの音声を鳴らすモード用。Discord の文面の材料だけが要る。
+    generator = _StubGenerator(GeneratedLine(text="使われないはず", from_llm=True))
+    voicevox = _StubVoicevox()
+    reader = _StubScreenReader(READING)
+    _install(client, generator, voicevox, reader)
+
+    response = client.post(
+        "/voice/screen",
+        json={"idle_seconds": 300, "iphone": "active", "screenshot_png": PNG_B64},
+        headers=auth,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "screen": {"app": "YouTube", "activity": "料理動画", "category": "slacking"},
+        "screen_error": None,
+    }
+    assert reader.seen == [PNG]
+    # セリフも音声も作らない。セリフが壊れていても見立てを捨てないよう、読み取りにも要求しない。
+    assert reader.require_line == [False]
+    assert generator.seen == []
+
+
+def test_screen_passes_the_situation_to_the_reader(
+    client: TestClient, auth: dict[str, str]
+) -> None:
+    class _Recording(_StubScreenReader):
+        def __init__(self) -> None:
+            super().__init__(READING)
+            self.contexts: list[SpeechContext] = []
+
+        async def read(
+            self, png: bytes, context: SpeechContext, *, require_line: bool = True
+        ) -> ScreenReading:
+            self.contexts.append(context)
+            return await super().read(png, context, require_line=require_line)
+
+    reader = _Recording()
+    _install(
+        client, _StubGenerator(GeneratedLine(text="x", from_llm=True)), _StubVoicevox(), reader
+    )
+
+    client.post(
+        "/voice/screen",
+        json={
+            "idle_seconds": 120,
+            "escalation": "expose",
+            "iphone": "active",
+            "iphone_app": "YouTube",
+            "screenshot_png": PNG_B64,
+        },
+        headers=auth,
+    )
+
+    context = reader.contexts[0]
+    assert context.idle_seconds == 120
+    assert context.escalation is Escalation.EXPOSE
+    assert context.iphone is IPhoneState.ACTIVE
+    assert context.iphone_app == "YouTube"
+
+
+def test_screen_without_a_screenshot_says_so(client: TestClient, auth: dict[str, str]) -> None:
+    # 読めないことは Discord へ送るのをやめる理由にならないので、200 で理由だけ返す。
+    reader = _StubScreenReader(READING)
+    _install(
+        client, _StubGenerator(GeneratedLine(text="x", from_llm=True)), _StubVoicevox(), reader
+    )
+
+    response = client.post("/voice/screen", json={"idle_seconds": 300}, headers=auth)
+
+    assert response.status_code == 200
+    assert response.json()["screen"] is None
+    assert "スクリーンショット" in response.json()["screen_error"]
+    assert reader.seen == []
+
+
+def test_screen_without_a_gemini_key_says_so(client: TestClient, auth: dict[str, str]) -> None:
+    _install(
+        client,
+        _StubGenerator(GeneratedLine(text="x", from_llm=True)),
+        _StubVoicevox(),
+        _StubScreenReader(READING, is_configured=False),
+    )
+
+    body = client.post(
+        "/voice/screen",
+        json={"idle_seconds": 300, "screenshot_png": PNG_B64},
+        headers=auth,
+    ).json()
+
+    assert body["screen"] is None
+    assert body["screen_error"] == "GEMINI_API_KEY が未設定"
+
+
+def test_screen_returns_the_reason_when_the_read_fails(
+    client: TestClient, auth: dict[str, str]
+) -> None:
+    _install(
+        client,
+        _StubGenerator(GeneratedLine(text="x", from_llm=True)),
+        _StubVoicevox(),
+        _StubScreenReader(ScreenReadError("レート制限に当たった")),
+    )
+
+    body = client.post(
+        "/voice/screen",
+        json={"idle_seconds": 300, "screenshot_png": PNG_B64},
+        headers=auth,
+    ).json()
+
+    assert body["screen"] is None
+    assert body["screen_error"] == "レート制限に当たった"
+
+
+def test_screen_falls_back_when_the_read_is_too_slow(
+    client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(voice_router, "SCREEN_DEADLINE_SECONDS", 0.05)
+    _install(
+        client,
+        _StubGenerator(GeneratedLine(text="x", from_llm=True)),
+        _StubVoicevox(),
+        _StubScreenReader(READING, delay=5.0),
+    )
+
+    response = client.post(
+        "/voice/screen",
+        json={"idle_seconds": 300, "screenshot_png": PNG_B64},
+        headers=auth,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["screen"] is None
+    assert "読めなかった" in response.json()["screen_error"]
+
+
+def test_screen_rejects_a_broken_screenshot(client: TestClient, auth: dict[str, str]) -> None:
+    _install(client, _StubGenerator(GeneratedLine(text="x", from_llm=True)), _StubVoicevox())
+
+    response = client.post(
+        "/voice/screen",
+        json={"idle_seconds": 1, "screenshot_png": "これは base64 ではない"},
+        headers=auth,
+    )
+
+    assert response.status_code == 422

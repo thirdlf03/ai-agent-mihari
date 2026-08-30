@@ -11,10 +11,14 @@ public struct SpokenSpeech: Sendable, Equatable {
     public let text: String
     /// 読み上げ用の音声(WAV)。作れていなければ `nil`。
     public let audio: Data?
+    /// セリフを作るときに読み取れた iPhone の画面。読ませていなければ `nil`。
+    /// Discord の文面に使う。
+    public let screen: SpokenLine.ScreenReading?
 
-    public init(text: String, audio: Data? = nil) {
+    public init(text: String, audio: Data? = nil, screen: SpokenLine.ScreenReading? = nil) {
         self.text = text
         self.audio = audio
+        self.screen = screen
     }
 }
 
@@ -38,7 +42,7 @@ public final class DetectionEngine: ObservableObject {
     public static let logHistoryLimit = 50
 
     /// 疑いに入ったときにペットが投げる問いかけ。
-    public static let breakQuestion = "休憩中?"
+    public static let breakQuestion = "休憩中?…ちゃんと答えて。"
 
     /// タイマーの待ち方。本番は `Task.sleep`、テストでは短時間で解決するものに差し替える。
     public typealias Sleeping = (Duration) async -> Void
@@ -77,12 +81,17 @@ public final class DetectionEngine: ObservableObject {
     private let sleep: Sleeping
     /// いま出している「休憩中?」の問いかけ。出していなければ `nil`。
     private var promptSession: BreakPromptSession?
+    /// 正常が続き始めた時刻。褒めるたびにここを now へ進める。続いていなければ `nil`。
+    private var focusStreakSince: Date?
 
     /// 実行部。テストからはここを差し替えて、実際に撮らず送らずに筋道だけを確かめる。
     public struct Actions: Sendable {
         public var captureMacPhoto: @Sendable () async -> Data?
         public var captureIPhoneScreenshot: @Sendable () async -> Data?
         public var speak: @Sendable (SpeechRequest) async -> SpokenSpeech?
+        /// iPhone の画面だけを読ませる。セリフも音声も作らせない。
+        /// 同封音声のモードで、Discord の文面のためだけに呼ぶ。
+        public var readScreen: @Sendable (SpeechRequest) async -> ScreenReadResult?
         public var interrupt: @Sendable (SpeechRequest) async -> Void
         public var post: @Sendable (String, Data?, String) async -> Bool
         public var classify: @Sendable (Data) async -> SpeechRequest.VisionLabel
@@ -93,6 +102,7 @@ public final class DetectionEngine: ObservableObject {
             captureMacPhoto: @escaping @Sendable () async -> Data? = { nil },
             captureIPhoneScreenshot: @escaping @Sendable () async -> Data? = { nil },
             speak: @escaping @Sendable (SpeechRequest) async -> SpokenSpeech? = { _ in nil },
+            readScreen: @escaping @Sendable (SpeechRequest) async -> ScreenReadResult? = { _ in nil },
             interrupt: @escaping @Sendable (SpeechRequest) async -> Void = { _ in },
             post: @escaping @Sendable (String, Data?, String) async -> Bool = { _, _, _ in false },
             classify: @escaping @Sendable (Data) async -> SpeechRequest.VisionLabel = { _ in .unknown },
@@ -104,6 +114,7 @@ public final class DetectionEngine: ObservableObject {
             self.captureMacPhoto = captureMacPhoto
             self.captureIPhoneScreenshot = captureIPhoneScreenshot
             self.speak = speak
+            self.readScreen = readScreen
             self.interrupt = interrupt
             self.post = post
             self.classify = classify
@@ -112,6 +123,11 @@ public final class DetectionEngine: ObservableObject {
     }
 
     public var actions = Actions()
+
+    /// 同封の音声を鳴らすか、bridge にその場で作らせるか。外から入れてもらう。
+    ///
+    /// 同封のときは `actions.speak` を呼ばず、`lines.json` の区分から選んで喋る。
+    public var voiceMode: VoiceMode = .bundled
 
     /// iPhone の様子。SSE で流れてくる値を外から入れてもらう。
     public var iphoneState: SpeechRequest.IPhoneState = .unreachable
@@ -122,6 +138,9 @@ public final class DetectionEngine: ObservableObject {
     /// 判定のたびにペットへ渡す通知口。
     /// エンジンはペットの中身を知らないので、渡す形だけ決めて外で繋ぐ。
     public var onEvent: ((PetEvent) -> Void)?
+
+    /// 集中が続いたときの合図。`focusStreakIntervalSeconds` ごとに呼ぶ。
+    public var onFocusStreak: (() -> Void)?
 
     /// 出している問いかけを引っ込めてもらう合図。
     /// はい / いいえ / 無反応 / エピソード終了、どの終わり方でも必ず呼ぶ。
@@ -148,6 +167,8 @@ public final class DetectionEngine: ObservableObject {
     public func start() {
         guard !isWatching else { return }
         isWatching = true
+        // 監視を始めた瞬間から数え始める。
+        focusStreakSince = Date()
         loop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.evaluate()
@@ -160,6 +181,7 @@ public final class DetectionEngine: ObservableObject {
         loop?.cancel()
         loop = nil
         isWatching = false
+        focusStreakSince = nil
         let previous = state
         state = .normal
         gazeMonitor.stop()
@@ -233,6 +255,8 @@ public final class DetectionEngine: ObservableObject {
     public func evaluate(now: Date = Date()) async -> DetectionDecision {
         if let resting = restingDecision(now: now) {
             state = .normal
+            // 休んでいる時間は集中の続きではない。
+            focusStreakSince = nil
             return resting
         }
 
@@ -249,8 +273,11 @@ public final class DetectionEngine: ObservableObject {
 
         guard decision.state != .normal else {
             if previous != .normal { finishEpisode() }
+            advanceFocusStreak(now: now)
             return decision
         }
+        // 疑い以上になったら、集中は途切れたものとして数え直す。
+        focusStreakSince = nil
 
         // 疑いに入った瞬間だけ問いかけを添える。同じエピソードの中では二度と出さない。
         let prompt = previous == .normal && decision.state == .suspected ? makeBreakPrompt() : nil
@@ -268,11 +295,12 @@ public final class DetectionEngine: ObservableObject {
     public func startBreak(now: Date = Date()) {
         breakUntil = now.addingTimeInterval(thresholds.breakDurationSeconds)
         escalationStage = 0
+        focusStreakSince = nil
         // 休むと言った相手のカメラを開けたままにしない。緑ランプを点けておく理由がない。
         gazeMonitor.stop()
         gaze = .none
         onEvent?(
-            PetEvent(state: .normal, escalationStage: 0, line: "\(breakMinutes) 分休むね")
+            PetEvent(state: .normal, escalationStage: 0, line: "\(breakMinutes) 分だけ、待ってる。")
         )
     }
 
@@ -295,6 +323,21 @@ public final class DetectionEngine: ObservableObject {
             return nil
         }
         return .idle(reason: "休憩中(残り \(seconds: breakUntil.timeIntervalSince(now)))")
+    }
+
+    // MARK: - 集中継続
+
+    /// 正常が続いている時間を進め、間隔ぶん経っていれば褒めてもらう。
+    ///
+    /// 数え始めるのは監視を始めた瞬間。疑い以上・休憩・監視停止でいったん忘れる。
+    private func advanceFocusStreak(now: Date) {
+        guard let since = focusStreakSince else {
+            focusStreakSince = now
+            return
+        }
+        guard now.timeIntervalSince(since) >= thresholds.focusStreakIntervalSeconds else { return }
+        focusStreakSince = now
+        onFocusStreak?()
     }
 
     // MARK: - 問いかけ
@@ -403,27 +446,78 @@ public final class DetectionEngine: ObservableObject {
         var line = ""
         // 音声は鳴らさずに持ち回る。ペットが吹き出しを出す瞬間に、そこで鳴らしてもらう。
         var audio: Data?
+        // iPhone の画面から読み取れた内容。Discord の文面に使う。
+        var screen: SpokenLine.ScreenReading?
         if decision.shouldInterrupt {
             await actions.interrupt(request)
-            line = decision.reason
-            notes.append("音楽を止めて聞かせた")
-        } else if decision.shouldSpeak {
-            if let spoken = await actions.speak(request) {
+            // 本文はオーバーレイが喋る。吹き出しには「確定・声だけ」の一言を出す。
+            if let spoken = bundledSpeech(for: .warn) {
                 line = spoken.text
                 audio = spoken.audio
+            } else {
+                line = decision.reason
+            }
+            notes.append("音楽を止めて聞かせた")
+        } else if decision.shouldSpeak {
+            let kind = BundledVoiceKind.forDetection(
+                vision: label,
+                iphone: signals.iphone,
+                escalation: escalation(for: decision)
+            )
+            if let spoken = bundledSpeech(for: kind) {
+                line = spoken.text
+                audio = spoken.audio
+            } else if voiceMode == .live, let spoken = await actions.speak(request) {
+                line = spoken.text
+                audio = spoken.audio
+                screen = spoken.screen
             } else {
                 line = decision.reason
                 notes.append("喋れなかった")
             }
         }
+        // 先に喋らせる。画面を読ませるのは Discord の文面のためだけなので、吹き出しを待たせない。
         notifyPet(decision, label: label, line: line, audio: audio, prompt: prompt)
 
+        if voiceMode == .bundled, screenshot != nil {
+            // 読めなくても、喋ることも送ることも止めない。
+            screen = await actions.readScreen(request)?.screen
+        }
+
         if let evidence {
-            let sent = await actions.post(decision.reason, evidence, filename(for: decision.evidence))
+            let text = DiscordMessageComposer.compose(
+                discordFacts(decision, signals: signals, label: label, screen: screen)
+            )
+            let sent = await actions.post(text, evidence, filename(for: decision.evidence))
             notes.append(sent ? "Discord に送った" : "Discord に送れなかった")
         }
 
         return notes.isEmpty ? "声をかけた" : notes.joined(separator: " / ")
+    }
+
+    /// 同封音声のモードのときだけ、区分から 1 本選んで返す。live のときは `nil`。
+    private func bundledSpeech(for kind: BundledVoiceKind) -> SpokenSpeech? {
+        guard voiceMode == .bundled, let picked = BundledVoiceLines.shared.pick(kind) else { return nil }
+        return SpokenSpeech(text: picked.text, audio: picked.audio)
+    }
+
+    /// Discord の文面の材料。`DetectionJudge` が `reason` を組み立てるのと同じ信号から引く。
+    private func discordFacts(
+        _ decision: DetectionDecision,
+        signals: DetectionSignals,
+        label: SpeechRequest.VisionLabel,
+        screen: SpokenLine.ScreenReading?
+    ) -> DiscordMessageFacts {
+        DiscordMessageFacts(
+            evidence: decision.evidence,
+            vision: label,
+            iphone: signals.iphone,
+            screen: screen,
+            notLookingSeconds: DetectionJudge(thresholds: thresholds).notLookingSeconds(for: signals),
+            macIdleSeconds: signals.macIdleSeconds,
+            musicPlayer: signals.music.playerName,
+            frontmostApp: signals.frontmostApp
+        )
     }
 
     /// ペットに状態とセリフを渡す。ペット側の実装は知らない。

@@ -16,9 +16,11 @@ let package = Package(
         .target(
             name: "MihariCore",
             path: "Sources/MihariCore",
-            // ディレクトリ階層 pets/<id>/pet.json をそのまま保つため .process ではなく .copy にする。
+            // ディレクトリ階層 pets/<id>/pet.json と voice/<kind>/<NN>.m4a をそのまま保つため
+            // .process ではなく .copy にする。
             resources: [
-                .copy("Resources/pets")
+                .copy("Resources/pets"),
+                .copy("Resources/voice"),
             ]
         ),
         .testTarget(

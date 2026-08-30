@@ -15,6 +15,8 @@ public final class DiscordController: ObservableObject {
     @Published public private(set) var channels: [DiscordChannel] = []
     @Published public private(set) var lastError: String?
     @Published public private(set) var lastPostedMessageID: Int?
+    /// 直近の操作が成功したときの一言。失敗は `lastError` に出す。
+    @Published public private(set) var lastNotice: String?
 
     public init() {}
 
@@ -94,6 +96,43 @@ public final class DiscordController: ObservableObject {
             lastError = describe(error)
             Self.logger.error("Discord へ投稿できなかった: \(self.lastError ?? "", privacy: .public)")
             return false
+        }
+    }
+
+    /// 証拠を晒すときに呼びつける相手を決める。数字だけの ID を渡す。空文字ならメンションを外す。
+    public func setMention(_ userID: String?, using client: DaemonClient?) async {
+        guard let client else {
+            lastError = DaemonError.notRunning.errorDescription
+            return
+        }
+        let trimmed = userID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        do {
+            let result = try await client.setDiscordMention(value)
+            lastError = nil
+            lastNotice = result.mentionUserID.map { "メンション先を \($0) にした" } ?? "メンションを外した"
+            await refresh(using: client)
+        } catch {
+            lastNotice = nil
+            lastError = describe(error)
+        }
+    }
+
+    /// メンション付きのテスト投稿をさせる。
+    public func postTest(using client: DaemonClient?) async {
+        guard let client else {
+            lastError = DaemonError.notRunning.errorDescription
+            return
+        }
+        do {
+            let result = try await client.postDiscordTest()
+            lastPostedMessageID = result.messageID
+            lastError = nil
+            lastNotice = "テスト投稿を送った (message id: \(result.messageID))"
+        } catch {
+            lastNotice = nil
+            lastError = describe(error)
+            Self.logger.error("Discord へテスト投稿できなかった: \(self.lastError ?? "", privacy: .public)")
         }
     }
 

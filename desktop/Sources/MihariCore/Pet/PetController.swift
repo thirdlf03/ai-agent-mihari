@@ -25,8 +25,10 @@ public enum SpeechVoice {
     case none
     /// その場で VOICEVOX に合成させて読み上げる。ひとりごと扱いなので検知のセリフには譲る。
     case chatter
-    /// すでに用意してある WAV を鳴らす。検知のセリフ扱いで、ひとりごとには割り込む。
-    case prepared(Data)
+    /// すでに用意してある音声(検知の WAV / 同封の .m4a)を鳴らす。
+    ///
+    /// `priority` が `.detection` ならひとりごとに割り込み、`.chatter` なら検知のセリフに譲る。
+    case prepared(Data, priority: SpeechPriority)
 }
 
 /// デスクトップペットの表示状態とふるまいをまとめて管理する。
@@ -58,6 +60,11 @@ public final class PetController {
     public private(set) var promptQuestion: String?
     /// セリフを VOICEVOX で読み上げるか。
     public private(set) var isVoiceEnabled: Bool
+    /// 同封の音声を鳴らすか、その場で VOICEVOX に合成させるか。
+    ///
+    /// 種類を指定して喋るセリフ(`say(_ kind:)`)にだけ効く。文字列を直接渡す `say(_:)` は
+    /// 呼び出し側が読み上げ方を決めるので、ここは見ない。
+    public var voiceMode: VoiceMode = .bundled
     /// スプライトシートの読み込みに失敗したときの理由。
     private(set) var loadErrorMessage: String?
     /// 直近に種類を指定して言おうとしたセリフの種類。ペットを出していないあいだは実際には喋らない。テストからの観測点。
@@ -317,7 +324,8 @@ public final class PetController {
     ///
     /// - Parameters:
     ///   - duration: 吹き出しを出しておく時間。nil なら文字数から決める。
-    ///   - voice: どう読み上げるか。検知エンジンのセリフは用意済みの音声を `.prepared` で渡す。
+    ///   - voice: どう読み上げるか。検知エンジンのセリフは用意済みの音声を
+    ///     `.prepared(_, priority: .detection)` で渡す。
     public func say(_ text: String, duration: TimeInterval? = nil, voice speechVoice: SpeechVoice = .chatter) {
         let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !line.isEmpty else { return }
@@ -367,9 +375,9 @@ public final class PetController {
     /// 用意済みの音声があれば鳴らし、その長さを返す。読み上げを切っていれば鳴らさない。
     @discardableResult
     private func playPrepared(_ speechVoice: SpeechVoice) -> TimeInterval? {
-        guard isVoiceEnabled, case .prepared(let wav) = speechVoice else { return nil }
-        lastPreparedAudio = wav
-        return voice.playPrepared(wav)
+        guard isVoiceEnabled, case .prepared(let audio, let priority) = speechVoice else { return nil }
+        lastPreparedAudio = audio
+        return voice.playPrepared(audio, priority: priority)
     }
 
     /// 吹き出しが音声より先に消えないよう、音声の長さに合わせて表示時間を延ばす。
@@ -390,7 +398,17 @@ public final class PetController {
     func say(_ kind: PetSpeechLines.Kind) {
         guard let line = speechLines.randomLine(for: kind) else { return }
         lastSpokenKind = kind
-        say(line)
+        say(line, voice: chatterVoice(for: line, kind: kind))
+    }
+
+    /// ひとりごとの読み上げ方を決める。
+    ///
+    /// 同封音声のモードでは VOICEVOX を叩かず、いま選んだセリフに対応する .m4a を鳴らす。
+    /// `speech.json` で差し替えたセリフには音声が無いので、そのときは吹き出しだけになる。
+    private func chatterVoice(for line: String, kind: PetSpeechLines.Kind) -> SpeechVoice {
+        guard voiceMode == .bundled else { return .chatter }
+        guard let audio = BundledVoiceLines.shared.audio(for: kind.bundled, text: line) else { return .none }
+        return .prepared(audio, priority: .chatter)
     }
 
     /// はい/いいえ の問いかけを吹き出しに出す。時間では消さず、答えるか捨てるまで残す。

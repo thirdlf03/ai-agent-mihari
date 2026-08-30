@@ -7,6 +7,10 @@ public struct DiscordView: View {
 
     @State private var scheduleTime = "19:00"
     @State private var testMessage = "テスト投稿です。"
+    /// 呼びつける相手の Discord ユーザー ID。数字だけを受け付ける。
+    @State private var mentionUserID = ""
+    /// `discord.status` から ID を書き戻したか。手で編集した内容を上書きしないため 1 回だけにする。
+    @State private var hasLoadedMention = false
 
     public init(discord: DiscordController, daemon: DaemonController) {
         self.discord = discord
@@ -19,8 +23,12 @@ public struct DiscordView: View {
                 header
                 setupSteps
                 channelSection
+                mentionSection
                 scheduleSection
                 postSection
+                if let notice = discord.lastNotice {
+                    noticeBox(notice)
+                }
                 if let error = discord.lastError {
                     errorBox(error)
                 }
@@ -29,6 +37,11 @@ public struct DiscordView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .task { await discord.refresh(using: daemon.connectedClient) }
+        .onChange(of: discord.status?.mentionUserID) { _, saved in
+            guard !hasLoadedMention else { return }
+            hasLoadedMention = true
+            mentionUserID = saved ?? ""
+        }
     }
 
     private var header: some View {
@@ -129,6 +142,47 @@ public struct DiscordView: View {
         .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
     }
 
+    /// 証拠を晒すときに呼びつける相手。本文の先頭に付く `<@ID>` は bridge が足す。
+    private var mentionSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("メンション先").font(.headline)
+            HStack(spacing: 10) {
+                TextField("ユーザー ID(数字だけ)", text: $mentionUserID)
+                    .frame(width: 220)
+                Button("保存") {
+                    Task { await discord.setMention(mentionUserID, using: daemon.connectedClient) }
+                }
+                .disabled(!isMentionInputValid)
+                Button("テスト投稿") {
+                    Task { await discord.postTest(using: daemon.connectedClient) }
+                }
+                .disabled(discord.status?.isReadyToPost != true)
+                Spacer()
+            }
+            if !isMentionInputValid {
+                Text("数字だけを入れる。空にして保存するとメンションを外す。")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            Text(
+                "ID の調べ方: Discord の 設定 → 詳細設定 → 開発者モードを ON → "
+                    + "自分のアイコンを右クリック →「ユーザー ID をコピー」。"
+            )
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// 空(＝メンションを外す)か、数字だけなら保存できる。
+    private var isMentionInputValid: Bool {
+        let trimmed = mentionUserID.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty || trimmed.allSatisfy(\.isNumber)
+    }
+
     private var scheduleSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("監視の予約").font(.headline)
@@ -167,6 +221,17 @@ public struct DiscordView: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func noticeBox(_ message: String) -> some View {
+        Text(message)
+            .font(.callout)
+            .foregroundStyle(.green)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.green.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
     }
 
     private func errorBox(_ message: String) -> some View {

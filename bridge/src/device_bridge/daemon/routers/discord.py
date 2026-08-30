@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -15,6 +16,13 @@ from device_bridge.discord_bot.schedule import InvalidTimeError, parse_time_of_d
 from device_bridge.discord_bot.settings_store import ChannelSelection
 
 router = APIRouter(prefix="/discord", tags=["discord"], dependencies=[Depends(verify_token)])
+
+#: メンション先として受け付けるユーザー ID。Discord の snowflake は数字だけの文字列。
+#: 64bit あるので int には直さず、桁数だけ見て素通しする。
+_USER_ID_PATTERN = re.compile(r"[0-9]{1,25}")
+
+#: 「テスト送信」で流す文。届いたかどうかが一目で分かればよいので、短く 1 文だけ。
+TEST_MESSAGE = "テスト。ちゃんと届いてる?私はここにいるよ。"
 
 
 @router.get("/status")
@@ -31,6 +39,7 @@ def discord_status(request: Request) -> dict[str, Any]:
         "last_error": service.last_error,
         "invite_url": invite_url(config.client_id) if config.has_client_id else None,
         "selection": selection.to_dict() if selection else None,
+        "mention_user_id": service.mention_user_id,
         "schedule": request.app.state.watch_scheduler.status(),
     }
 
@@ -63,6 +72,31 @@ def select_channel(request: Request, body: dict[str, Any]) -> dict[str, Any]:
 
     request.app.state.discord.select_channel(selection)
     return {"selection": selection.to_dict()}
+
+
+@router.post("/mention")
+def set_mention(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """投稿の先頭でメンションするユーザーを決める。``null`` か空文字で解除する。"""
+    raw = body.get("user_id")
+    user_id = "" if raw is None else str(raw).strip()
+    if user_id and not _USER_ID_PATTERN.fullmatch(user_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="メンション先のユーザー ID は数字のみ(1〜25 桁)",
+        )
+
+    request.app.state.discord.set_mention_user_id(user_id or None)
+    return {"mention_user_id": user_id or None}
+
+
+@router.post("/test")
+async def post_test(request: Request) -> dict[str, Any]:
+    """設定が済んでいるかを確かめるためのテスト投稿。メンションも一緒に試せる。"""
+    try:
+        message_id = await request.app.state.discord.post(TEST_MESSAGE)
+    except DiscordUnavailableError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    return {"posted": True, "message_id": message_id}
 
 
 @router.post("/post")
