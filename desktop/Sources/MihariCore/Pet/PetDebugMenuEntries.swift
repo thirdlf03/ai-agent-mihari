@@ -5,6 +5,8 @@ import Foundation
 /// 検知が起きるのを待たなくても、状態・アニメーション・セリフをその場で起こして見た目を確かめられる。
 /// 「検知の状態を再現」は `LivePetPresenter.present(_:)` に偽の `PetEvent` を流すだけなので、
 /// 検知エンジン・撮影・Discord への送信はどれも動かない。
+///
+/// **「実際に進める」だけは別物。** 検知エンジンに直接投げるので、本物の遷移・撮影・投稿が走る。
 public enum PetDebugMenuEntries {
 
     /// 「集中継続の間隔」に並べる選択肢。本来の 15 分と、動かして確かめるための 1 分。
@@ -24,6 +26,12 @@ public enum PetDebugMenuEntries {
             .submenu(
                 title: "検知の状態を再現",
                 entries: detectionStateEntries(presenter: presenter)
+            ),
+            .submenu(
+                title: "実際に進める(撮影・投稿あり)",
+                entries: DetectionDebugStep.allCases.map { step -> PetMenuEntry in
+                    .item(title: step.title, action: { actions.runDetectionStep(step) })
+                }
             ),
             .submenu(
                 title: "アニメーションを固定",
@@ -83,32 +91,54 @@ public enum PetDebugMenuEntries {
                 }
             ),
             .item(
-                title: "疑い(段階 1)",
+                title: "疑い 1(Touch ID)",
                 isChecked: presenter.state == .suspected,
                 action: {
                     presenter.present(
-                        PetEvent(state: .suspected, escalationStage: 1, line: "まだ作業中ですか?")
+                        PetEvent(state: .suspected, escalationStage: 1, line: "指、出して。")
                     )
                 }
             ),
             .item(
-                title: "サボり確定・声だけ(段階 2)",
-                isChecked: presenter.state == .confirmed,
+                title: "疑い 2(首振り)",
+                isChecked: presenter.state == .suspected,
                 action: {
                     presenter.present(
-                        PetEvent(state: .confirmed, escalationStage: 2, line: "サボっていませんか?")
+                        PetEvent(state: .suspected, escalationStage: 2, line: "ねぇ、まだそこにいる?")
                     )
                 }
             ),
             .item(
-                title: "サボり確定・撮影(段階 3)",
+                title: "疑い 3(最終警告)",
+                isChecked: presenter.state == .suspected,
+                action: {
+                    presenter.present(
+                        PetEvent(state: .suspected, escalationStage: 3, line: "これで最後だからね。")
+                    )
+                }
+            ),
+            .item(
+                title: "晒し",
                 isChecked: presenter.state == .confirmed,
                 action: {
                     presenter.present(
                         PetEvent(
                             state: .confirmed,
-                            escalationStage: 3,
+                            escalationStage: PetEvent.exposingStage,
                             line: "撮りました。Discord に送ります。"
+                        )
+                    )
+                }
+            ),
+            .item(
+                title: "メンヘラ",
+                isChecked: presenter.state == .confirmed,
+                action: {
+                    presenter.present(
+                        PetEvent(
+                            state: .confirmed,
+                            escalationStage: PetEvent.clingyStage,
+                            line: "ねぇ、まだ戻ってこないの?"
                         )
                     )
                 }
@@ -118,7 +148,7 @@ public enum PetDebugMenuEntries {
                 title: "問いかけ(はい / いいえ)",
                 action: {
                     // 回答が届いたことが分かるよう、押されたボタンを吹き出しに出すだけの問いかけにする。
-                    let prompt = PetYesNoPrompt(question: "まだ作業中ですか?") { [weak presenter] answer in
+                    let prompt = PetYesNoPrompt(question: "ねぇ、まだそこにいる?") { [weak presenter] answer in
                         Task { @MainActor in
                             presenter?.controller.say(
                                 answer ? "「はい」を受け取りました" : "「いいえ」を受け取りました",

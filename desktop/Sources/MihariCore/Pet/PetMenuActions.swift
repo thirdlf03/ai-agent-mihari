@@ -39,4 +39,7 @@ public protocol PetMenuActions: AnyObject, ObservableObject {
     func setFocusStreakInterval(_ seconds: TimeInterval)
     /// 集中継続のセリフをその場で喋らせる(デバッグ用)。
     func replayFocusStreak()
+    /// 検知エンジンを実際に次の段へ進める(デバッグ用)。
+    /// 見た目だけの再現と違い、**本物の撮影・投稿が走る。**
+    func runDetectionStep(_ step: DetectionDebugStep)
 }
