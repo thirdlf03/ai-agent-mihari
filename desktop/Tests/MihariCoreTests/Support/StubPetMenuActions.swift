@@ -12,6 +12,8 @@ final class StubPetMenuActions: ObservableObject, PetMenuActions {
     var focusStreakIntervalSeconds: TimeInterval = 900
     /// 「集中継続のセリフを再現」が押された回数。
     private(set) var focusStreakReplays = 0
+    /// 「実際に進める」で投げられた操作。
+    private(set) var detectionSteps: [DetectionDebugStep] = []
 
     func startWatching() {}
     func stopWatching() {}
@@ -24,4 +26,5 @@ final class StubPetMenuActions: ObservableObject, PetMenuActions {
     func setVoiceMode(_ mode: VoiceMode) { voiceMode = mode }
     func setFocusStreakInterval(_ seconds: TimeInterval) { focusStreakIntervalSeconds = seconds }
     func replayFocusStreak() { focusStreakReplays += 1 }
+    func runDetectionStep(_ step: DetectionDebugStep) { detectionSteps.append(step) }
 }

@@ -75,24 +75,50 @@ struct PetDebugMenuEntriesTests {
         )
     }
 
-    @Test("「疑い(段階 1)」で waiting に固定する")
+    @Test("「検知の状態を再現」は新フローの 6 状態を並べる")
+    func detectionStateSubmenuFollowsTheNewFlow() throws {
+        let presenter = makePresenter()
+        let entries = PetDebugMenuEntries.make(actions: StubPetMenuActions(), presenter: presenter)
+
+        let submenu = try #require(findSubmenu("検知の状態を再現", in: entries))
+
+        #expect(
+            itemTitles(submenu).prefix(6)
+                == ["正常に戻す", "疑い 1(Touch ID)", "疑い 2(首振り)", "疑い 3(最終警告)", "晒し", "メンヘラ"]
+        )
+    }
+
+    @Test("「疑い 1(Touch ID)」で waiting に固定する")
     func suspectedEntryFixesWaiting() {
         let presenter = makePresenter()
 
-        tap("疑い(段階 1)", in: PetDebugMenuEntries.make(actions: StubPetMenuActions(), presenter: presenter))
+        tap("疑い 1(Touch ID)", in: PetDebugMenuEntries.make(actions: StubPetMenuActions(), presenter: presenter))
 
         #expect(presenter.state == .suspected)
         #expect(presenter.lastDirective.fixedAnimation == .waiting)
     }
 
-    @Test("「サボり確定・撮影(段階 3)」で failed に固定して 1 回跳ねる")
-    func confirmedEntryFixesFailedAndJumps() {
+    @Test("「晒し」で failed に固定して 1 回跳ねる")
+    func exposingEntryFixesFailedAndJumps() {
         let presenter = makePresenter()
 
-        tap("サボり確定・撮影(段階 3)", in: PetDebugMenuEntries.make(actions: StubPetMenuActions(), presenter: presenter))
+        tap("晒し", in: PetDebugMenuEntries.make(actions: StubPetMenuActions(), presenter: presenter))
 
         #expect(presenter.lastDirective.fixedAnimation == .failed)
         #expect(presenter.lastDirective.playOnce == .jumping)
+    }
+
+    @Test("「実際に進める」は検知エンジンへの操作をそのまま並べて投げる")
+    func realStepsSubmenuForwardsToTheEngine() throws {
+        let presenter = makePresenter()
+        let actions = StubPetMenuActions()
+        let entries = PetDebugMenuEntries.make(actions: actions, presenter: presenter)
+
+        let submenu = try #require(findSubmenu("実際に進める(撮影・投稿あり)", in: entries))
+        #expect(itemTitles(submenu) == DetectionDebugStep.allCases.map(\.title))
+
+        tap(DetectionDebugStep.expose.title, in: entries)
+        #expect(actions.detectionSteps == [.expose])
     }
 
     @Test("問いかけを出して、閉じる項目で捨てる")

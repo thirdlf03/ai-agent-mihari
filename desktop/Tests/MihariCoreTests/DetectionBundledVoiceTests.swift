@@ -3,164 +3,175 @@ import Testing
 
 @testable import MihariCore
 
-/// 同封音声のモード(既定)での検知のふるまい。
-/// bridge にセリフを作らせず、`lines.json` の区分から選んで喋る。
-@Suite("同封音声での検知")
+/// メンヘラモード。間隔ごとの投稿、証拠の撮り直し、戻ってきたときの締め方を見る。
+@Suite("メンヘラモード")
 @MainActor
-struct DetectionBundledVoiceTests {
+struct DetectionClingyTests {
 
-    /// 音楽の有無を固定するためのスタブ。
-    private struct StubMusic: MusicControlling {
-        let playing: NowPlaying
-        func nowPlaying() async -> NowPlaying { playing }
-        func stopPlaying() async -> MusicStopOutcome { .nothingWasPlaying }
-        func resumePlaying(_ outcome: MusicStopOutcome) async {}
-    }
-
-    /// ペットに届いたイベントを覚えておく箱。
-    private final class PetSpy: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _events: [PetEvent] = []
-        var events: [PetEvent] { lock.withLock { _events } }
-        func record(_ event: PetEvent) { lock.withLock { _events.append(event) } }
-    }
-
-    private func engine(
-        idle: TimeInterval,
+    /// メンヘラモードに入った状態のエンジンを作る。
+    private func clingyEngine(
+        idle: IdleClock,
         spy: ActionSpy,
-        pet: PetSpy,
-        music: NowPlaying = .silent
-    ) -> DetectionEngine {
-        let engine = DetectionEngine(
-            idleMonitor: MacIdleMonitor(probe: { idle }),
-            frontmostMonitor: FrontmostAppMonitor(probe: { "Safari" }),
-            musicController: StubMusic(playing: music)
+        pet: PetSpy? = nil,
+        thresholds: DetectionThresholds,
+        iphone: SpeechRequest.IPhoneState = .unreachable
+    ) async -> DetectionEngine {
+        let engine = makeDetectionEngine(
+            idle: idle,
+            spy: spy,
+            pet: pet,
+            thresholds: thresholds,
+            iphone: iphone
         )
-        engine.thresholds = .production
-        engine.actions = spy.makeActions()
-        engine.onEvent = { pet.record($0) }
+        engine.runDebugStep(.startClingy)
+        await settle(until: {
+            if case .clingy = engine.state { return true }
+            return false
+        })
         return engine
     }
 
-    @Test("既定は同封音声")
-    func bundledIsTheDefault() {
-        let engine = DetectionEngine(idleMonitor: MacIdleMonitor(probe: { 0 }))
-        #expect(engine.voiceMode == .bundled)
+    /// 投稿の 1 行目。
+    private func headline(_ post: ActionSpy.Post) -> String {
+        post.text.components(separatedBy: "\n").first ?? ""
     }
 
-    @Test("bridge にセリフを作らせず、iPhone 操作中の区分から喋る")
-    func speaksBundledIPhoneLine() async {
+    @Test("間隔ごとにテキストだけを投げ、回数でセリフの区分が変わる")
+    func postsTextOnEveryInterval() async {
         let spy = ActionSpy()
         let pet = PetSpy()
-        let engine = engine(idle: 600, spy: spy, pet: pet)
-        engine.iphoneState = .active
+        let base = Date()
+        let engine = await clingyEngine(
+            idle: IdleClock(600),
+            spy: spy,
+            pet: pet,
+            // 撮り直しは来ないところまで遠ざけて、テキストだけの投稿を見る。
+            thresholds: .quick(clingyIntervalSeconds: 20, clingyEvidenceIntervalSeconds: 100_000)
+        )
 
-        await engine.evaluate()
+        // 入った直後は投げない。間隔ぶん待ってから 1 通目。
+        await engine.evaluate(now: base.addingTimeInterval(5))
+        #expect(spy.posts.isEmpty)
 
-        #expect(spy.spoken.isEmpty)
-        let line = pet.events.first?.line ?? ""
-        #expect(BundledVoiceLines.shared.lines(for: .iphoneActive).contains(line))
-        #expect(pet.events.first?.audio != nil)
+        for round in 1...6 {
+            await engine.evaluate(now: base.addingTimeInterval(Double(round) * 20 + 1))
+        }
+
+        #expect(spy.posts.count == 6)
+        #expect(spy.posts.allSatisfy { $0.image == nil })
+        #expect(spy.posts.allSatisfy { $0.mention })
+        #expect(spy.posts.allSatisfy { $0.text.contains("戻ってこないまま") })
+
+        let clingy1 = BundledVoiceLines.shared.lines(for: .clingy1)
+        let clingy2 = BundledVoiceLines.shared.lines(for: .clingy2)
+        let clingy3 = BundledVoiceLines.shared.lines(for: .clingy3)
+        #expect(clingy1.contains(headline(spy.posts[0])))
+        #expect(clingy1.contains(headline(spy.posts[1])))
+        #expect(clingy2.contains(headline(spy.posts[2])))
+        #expect(clingy2.contains(headline(spy.posts[4])))
+        #expect(clingy3.contains(headline(spy.posts[5])))
+
+        // 同じセリフをペットも喋る。
+        #expect(pet.lines.contains(headline(spy.posts[0])))
+        #expect(engine.escalationStage == PetEvent.clingyStage)
     }
 
-    @Test("寝ていると見立てたら、寝ている区分から喋る")
-    func speaksBundledSleepingLine() async {
-        // `ActionSpy.classify` は常に .sleeping を返す。
+    @Test("撮り直しの回は、テキストと重ねずに証拠つき 1 件にまとめる")
+    func evidenceRoundIsASinglePost() async {
         let spy = ActionSpy()
-        let pet = PetSpy()
-        let engine = engine(idle: 600, spy: spy, pet: pet)
-        engine.iphoneState = .unreachable
+        let base = Date()
+        let engine = await clingyEngine(
+            idle: IdleClock(600),
+            spy: spy,
+            thresholds: .quick(clingyIntervalSeconds: 20, clingyEvidenceIntervalSeconds: 60)
+        )
 
-        await engine.evaluate()
+        await engine.evaluate(now: base.addingTimeInterval(21))
+        await engine.evaluate(now: base.addingTimeInterval(42))
+        await engine.evaluate(now: base.addingTimeInterval(63))
 
-        let line = pet.events.first?.line ?? ""
-        #expect(BundledVoiceLines.shared.lines(for: .sleeping).contains(line))
+        #expect(spy.posts.count == 3)
+        #expect(spy.posts[0].image == nil)
+        #expect(spy.posts[1].image == nil)
+        let evidence = spy.posts[2]
+        #expect(evidence.image != nil)
+        #expect(evidence.filename == "camera.png")
+        #expect(BundledVoiceLines.shared.lines(for: .clingyEvidence).contains(headline(evidence)))
+        #expect(spy.macPhotos == 1)
+        #expect(engine.lastEvidenceAt != nil)
     }
 
-    @Test("疑いの段階は nudge の区分から喋る")
-    func speaksBundledNudgeLine() async {
+    @Test("撮り直しの取り先は晒しと同じで、iPhone を触っていれば画面を撮る")
+    func evidenceFollowsThePhone() async {
         let spy = ActionSpy()
-        let pet = PetSpy()
-        let engine = engine(idle: 150, spy: spy, pet: pet)
-        engine.iphoneState = .idle
+        let base = Date()
+        let engine = await clingyEngine(
+            idle: IdleClock(600),
+            spy: spy,
+            thresholds: .quick(clingyIntervalSeconds: 10, clingyEvidenceIntervalSeconds: 10),
+            iphone: .active
+        )
 
-        await engine.evaluate()
+        await engine.evaluate(now: base.addingTimeInterval(11))
 
-        let line = pet.events.first?.line ?? ""
-        #expect(BundledVoiceLines.shared.lines(for: .nudge).contains(line))
+        #expect(spy.iphoneShots == 1)
+        #expect(spy.posts.first?.filename == "iphone.png")
     }
 
-    @Test("音楽を止めて聞かせるときは、吹き出しに warn の区分を出す")
-    func interruptShowsBundledWarnLine() async {
+    @Test("戻ってきたら returned をメンションなしで 1 件だけ送り、正常に戻る")
+    func returningPostsOnceWithoutMention() async {
         let spy = ActionSpy()
         let pet = PetSpy()
-        let engine = engine(idle: 600, spy: spy, pet: pet, music: .playing(.spotify))
-        engine.iphoneState = .unreachable
+        let idle = IdleClock(600)
+        let base = Date()
+        let engine = await clingyEngine(
+            idle: idle,
+            spy: spy,
+            pet: pet,
+            thresholds: .quick(clingyIntervalSeconds: 20)
+        )
 
-        let decision = await engine.evaluate()
+        idle.set(0)
+        let decision = await engine.evaluate(now: base.addingTimeInterval(30))
 
-        #expect(spy.interrupted.count == 1)
-        let line = pet.events.first?.line ?? ""
-        #expect(BundledVoiceLines.shared.lines(for: .warn).contains(line))
-        #expect(line != decision.reason)
-    }
-
-    @Test("iPhone のスクショは Discord の文面のために読ませる")
-    func readsTheScreenForDiscord() async {
-        let spy = ActionSpy()
-        let pet = PetSpy()
-        let engine = engine(idle: 600, spy: spy, pet: pet)
-        engine.iphoneState = .active
-
-        await engine.evaluate()
-
-        #expect(spy.screenReads.count == 1)
-        #expect(spy.screenReads.first?.screenshotPNG == Data("iphone".utf8))
-        // 読み取れた内容が投稿の 1 行目に出る。
-        #expect(spy.posts.first?.0.contains("YouTube") == true)
-    }
-
-    @Test("カメラで撮ったときは画面を読ませない")
-    func doesNotReadTheScreenForCameraPhotos() async {
-        let spy = ActionSpy()
-        let pet = PetSpy()
-        let engine = engine(idle: 600, spy: spy, pet: pet)
-        engine.iphoneState = .unreachable
-
-        await engine.evaluate()
-
-        #expect(spy.screenReads.isEmpty)
-    }
-
-    @Test("画面を読めなくても、喋ることも送ることも止めない")
-    func keepsGoingWhenTheScreenCannotBeRead() async {
-        let spy = ActionSpy()
-        spy.screenReading = nil
-        let pet = PetSpy()
-        let engine = engine(idle: 600, spy: spy, pet: pet)
-        engine.iphoneState = .active
-
-        await engine.evaluate()
-
-        #expect(pet.events.first?.line.isEmpty == false)
+        #expect(decision.state == .normal)
+        #expect(engine.state == .normal)
+        #expect(engine.escalationStage == 0)
         #expect(spy.posts.count == 1)
+        #expect(spy.posts.first?.mention == false)
+        #expect(spy.posts.first?.image == nil)
+        let returned = BundledVoiceLines.shared.lines(for: .returned)
+        #expect(returned.contains(spy.posts.first?.text ?? ""))
+        #expect(returned.contains(pet.lines.last ?? ""))
+
+        // 二度は送らない。疑いの数え直しも済んでいる。
+        await engine.evaluate(now: base.addingTimeInterval(60))
+        #expect(spy.posts.count == 1)
+        #expect(engine.state == .normal)
+    }
+}
+
+/// 新フローで使うセリフの区分が、同封セリフに揃っているかを見る。
+@Suite("監視ループ v2 のセリフ区分")
+struct DetectionVoiceKindTests {
+
+    @Test("疑い〜メンヘラの 17 区分はすべて同封セリフから引ける")
+    func everyKindHasBundledLines() {
+        let kinds: [BundledVoiceKind] = [
+            .suspectReach, .suspectReachPhone, .suspectTouched, .suspectMissed, .suspectTimeout,
+            .askQuestion, .askQuestionPhone, .gestureYes, .gestureNo, .askTimeout,
+            .finalWarn, .finalWarnPhone,
+            .clingy1, .clingy2, .clingy3, .clingyEvidence, .returned,
+        ]
+        for kind in kinds {
+            #expect(!BundledVoiceLines.shared.lines(for: kind).isEmpty, "\(kind.rawValue) のセリフが無い")
+        }
     }
 }
 
 @Suite("集中継続")
 @MainActor
 struct DetectionFocusStreakTests {
-
-    /// 無操作秒数をテストの途中で変えるための箱。
-    private final class IdleBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _seconds: TimeInterval
-        init(_ seconds: TimeInterval) { _seconds = seconds }
-        var seconds: TimeInterval {
-            get { lock.withLock { _seconds } }
-            set { lock.withLock { _seconds = newValue } }
-        }
-    }
 
     /// 褒められた回数を数える箱。
     private final class PraiseCounter: @unchecked Sendable {
@@ -170,19 +181,12 @@ struct DetectionFocusStreakTests {
         func record() { lock.withLock { _count += 1 } }
     }
 
-    private struct SilentMusic: MusicControlling {
-        func nowPlaying() async -> NowPlaying { .silent }
-        func stopPlaying() async -> MusicStopOutcome { .nothingWasPlaying }
-        func resumePlaying(_ outcome: MusicStopOutcome) async {}
-    }
-
-    private func engine(idle: IdleBox, praise: PraiseCounter) -> DetectionEngine {
-        let engine = DetectionEngine(
-            idleMonitor: MacIdleMonitor(probe: { idle.seconds }),
-            musicController: SilentMusic()
+    private func engine(idle: IdleClock, praise: PraiseCounter) -> DetectionEngine {
+        let engine = makeDetectionEngine(
+            idle: idle,
+            spy: ActionSpy(),
+            thresholds: DetectionThresholds.production.withFocusStreakInterval(60)
         )
-        engine.thresholds = DetectionThresholds.production.withFocusStreakInterval(60)
-        engine.actions = ActionSpy().makeActions()
         engine.onFocusStreak = { praise.record() }
         return engine
     }
@@ -194,7 +198,7 @@ struct DetectionFocusStreakTests {
 
     @Test("正常が続くと間隔ごとに褒める")
     func praisesOnEveryInterval() async {
-        let idle = IdleBox(10)
+        let idle = IdleClock(10)
         let praise = PraiseCounter()
         let engine = engine(idle: idle, praise: praise)
         let start = Date()
@@ -214,16 +218,17 @@ struct DetectionFocusStreakTests {
 
     @Test("疑いに入ったら数え直す")
     func suspicionResetsTheStreak() async {
-        let idle = IdleBox(10)
+        let idle = IdleClock(10)
         let praise = PraiseCounter()
         let engine = engine(idle: idle, praise: praise)
         let start = Date()
 
         await engine.evaluate(now: start)
         // 疑いに入る(= 集中が途切れた)。
-        idle.seconds = 150
+        idle.set(150)
         await engine.evaluate(now: start.addingTimeInterval(30))
-        idle.seconds = 10
+        await settle(until: { !engine.isCheckRunning })
+        idle.set(10)
 
         // 途切れる前から数えていれば、ここで 1 回目が出てしまう。
         await engine.evaluate(now: start.addingTimeInterval(61))
@@ -235,7 +240,7 @@ struct DetectionFocusStreakTests {
 
     @Test("休憩に入ったら数え直す")
     func breakResetsTheStreak() async {
-        let idle = IdleBox(10)
+        let idle = IdleClock(10)
         let praise = PraiseCounter()
         let engine = engine(idle: idle, praise: praise)
         let start = Date()
@@ -257,7 +262,7 @@ struct DetectionFocusStreakTests {
 
     @Test("監視を止めたら数え直す")
     func stoppingResetsTheStreak() async {
-        let idle = IdleBox(10)
+        let idle = IdleClock(10)
         let praise = PraiseCounter()
         let engine = engine(idle: idle, praise: praise)
         let start = Date()

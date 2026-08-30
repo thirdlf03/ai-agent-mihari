@@ -21,21 +21,36 @@ struct LivePetPresenterTests {
     func suspectedFixesWaiting() {
         let presenter = makePresenter()
 
-        presenter.present(PetEvent(state: .suspected, escalationStage: 0, line: "まだ作業中？"))
+        presenter.present(PetEvent(state: .suspected, escalationStage: 1, line: "まだ作業中？"))
 
         #expect(presenter.lastDirective.fixedAnimation == .waiting)
         #expect(presenter.lastDirective.line == "まだ作業中？")
-        #expect(presenter.lastDirective.playOnce == nil)
     }
 
-    @Test("サボり確定は failed に固定する")
+    @Test("晒し以降は failed に固定する")
     func confirmedFixesFailed() {
         let presenter = makePresenter()
 
-        presenter.present(PetEvent(state: .confirmed, escalationStage: 0, line: "サボり確定"))
+        presenter.present(
+            PetEvent(state: .confirmed, escalationStage: PetEvent.exposingStage, line: "晒すね")
+        )
 
         #expect(presenter.lastDirective.fixedAnimation == .failed)
-        #expect(presenter.lastDirective.line == "サボり確定")
+        #expect(presenter.lastDirective.line == "晒すね")
+    }
+
+    @Test("疑いの段が上がったときだけ跳ねる")
+    func jumpsWhenSuspectStageRises() {
+        let presenter = makePresenter()
+
+        presenter.present(PetEvent(state: .suspected, escalationStage: 1, line: "疑い 1"))
+        #expect(presenter.lastDirective.playOnce == .jumping)
+
+        presenter.present(PetEvent(state: .suspected, escalationStage: 1, line: "疑い 1 のまま"))
+        #expect(presenter.lastDirective.playOnce == nil)
+
+        presenter.present(PetEvent(state: .suspected, escalationStage: 2, line: "疑い 2"))
+        #expect(presenter.lastDirective.playOnce == .jumping)
     }
 
     @Test("エスカレーション段階が上がったときだけ跳ねる")
@@ -51,14 +66,45 @@ struct LivePetPresenterTests {
         presenter.present(PetEvent(state: .confirmed, escalationStage: 3, line: "三段階目"))
         #expect(presenter.lastDirective.playOnce == nil)
 
-        presenter.present(PetEvent(state: .confirmed, escalationStage: 4, line: "四段階目"))
+        presenter.present(
+            PetEvent(state: .confirmed, escalationStage: PetEvent.exposingStage, line: "晒し")
+        )
         #expect(presenter.lastDirective.playOnce == .jumping)
+    }
+
+    @Test("メンヘラモードは晒しの続きなので跳ね直さない")
+    func clingyDoesNotJumpAgain() {
+        let presenter = makePresenter()
+
+        presenter.present(
+            PetEvent(state: .confirmed, escalationStage: PetEvent.exposingStage, line: "晒し")
+        )
+        #expect(presenter.lastDirective.playOnce == .jumping)
+
+        presenter.present(
+            PetEvent(state: .confirmed, escalationStage: PetEvent.clingyStage, line: "メンヘラ")
+        )
+        #expect(presenter.lastDirective.playOnce == nil)
+        #expect(presenter.lastDirective.fixedAnimation == .failed)
+    }
+
+    @Test("正常に戻るときも、セリフが載っていれば吹き出しに出す")
+    func normalCanCarryALine() {
+        let presenter = makePresenter()
+        presenter.present(
+            PetEvent(state: .confirmed, escalationStage: PetEvent.clingyStage, line: "まだ戻らないの?")
+        )
+
+        presenter.present(PetEvent(state: .normal, escalationStage: 0, line: "やっと戻ってきた。"))
+
+        #expect(presenter.lastDirective.playOnce == .waving)
+        #expect(presenter.lastDirective.line == "やっと戻ってきた。")
     }
 
     @Test("正常に戻ると固定を解いて一度だけ手を振る")
     func wavesWhenBackToNormal() {
         let presenter = makePresenter()
-        presenter.present(PetEvent(state: .suspected, escalationStage: 0, line: "まだ作業中？"))
+        presenter.present(PetEvent(state: .suspected, escalationStage: 1, line: "まだ作業中？"))
 
         presenter.present(PetEvent(state: .normal, escalationStage: 0, line: ""))
 
@@ -92,10 +138,10 @@ struct LivePetPresenterTests {
         let presenter = makePresenter()
         let recorder = AnswerRecorder()
         let prompt = PetYesNoPrompt(question: "作業中？") { recorder.record($0) }
-        presenter.present(PetEvent(state: .suspected, escalationStage: 0, line: "", prompt: prompt))
+        presenter.present(PetEvent(state: .suspected, escalationStage: 2, line: "", prompt: prompt))
         #expect(presenter.pendingPrompt != nil)
 
-        presenter.present(PetEvent(state: .suspected, escalationStage: 0, line: "まだいる？"))
+        presenter.present(PetEvent(state: .suspected, escalationStage: 2, line: "まだいる？"))
 
         #expect(presenter.pendingPrompt != nil)
         #expect(presenter.lastDirective.fixedAnimation == .waiting)
@@ -106,7 +152,7 @@ struct LivePetPresenterTests {
         let presenter = makePresenter()
         let recorder = AnswerRecorder()
         let prompt = PetYesNoPrompt(question: "作業中？") { recorder.record($0) }
-        presenter.present(PetEvent(state: .suspected, escalationStage: 0, line: "", prompt: prompt))
+        presenter.present(PetEvent(state: .suspected, escalationStage: 2, line: "", prompt: prompt))
 
         presenter.dismissPrompt()
 
@@ -121,10 +167,10 @@ struct LivePetPresenterTests {
         let recorder = AnswerRecorder()
         let audio = Data("wav".utf8)
         let prompt = PetYesNoPrompt(question: "休憩中?") { recorder.record($0) }
-        presenter.present(PetEvent(state: .suspected, escalationStage: 1, line: "", prompt: prompt))
+        presenter.present(PetEvent(state: .suspected, escalationStage: 2, line: "", prompt: prompt))
 
         presenter.present(
-            PetEvent(state: .confirmed, escalationStage: 2, line: "サボってる?", audio: audio)
+            PetEvent(state: .confirmed, escalationStage: 4, line: "サボってる?", audio: audio)
         )
         #expect(presenter.controller.lastPreparedAudio == nil)
 
@@ -138,13 +184,25 @@ struct LivePetPresenterTests {
         let presenter = makePresenter()
         let recorder = AnswerRecorder()
         let prompt = PetYesNoPrompt(question: "作業中？") { recorder.record($0) }
-        presenter.present(PetEvent(state: .suspected, escalationStage: 0, line: "", prompt: prompt))
+        presenter.present(PetEvent(state: .suspected, escalationStage: 2, line: "", prompt: prompt))
 
         presenter.answerPrompt(true)
         presenter.answerPrompt(false)
 
         #expect(recorder.answers == [true])
         #expect(presenter.pendingPrompt == nil)
+    }
+
+    @Test("問いかけに音声が付いていれば、出した瞬間に鳴らす")
+    func promptPlaysItsAudio() {
+        let presenter = makePresenter()
+        let recorder = AnswerRecorder()
+        let audio = Data("m4a".utf8)
+        let prompt = PetYesNoPrompt(question: "作業中？", audio: audio) { recorder.record($0) }
+
+        presenter.present(PetEvent(state: .suspected, escalationStage: 2, line: "", prompt: prompt))
+
+        #expect(presenter.controller.lastPreparedAudio == audio)
     }
 
     @Test("監視を止めているあいだと休憩中は静止させる")

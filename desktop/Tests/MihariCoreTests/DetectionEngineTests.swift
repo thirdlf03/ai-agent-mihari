@@ -1,432 +1,422 @@
 import Foundation
+import LocalAuthentication
 import Testing
 
 @testable import MihariCore
 
-/// 実行部が何を呼ばれたかを記録するスパイ。
-/// `@Sendable` クロージャから触るのでロックで守る。
-final class ActionSpy: @unchecked Sendable {
-    private let lock = NSLock()
-    private var _macPhotos = 0
-    private var _iphoneShots = 0
-    private var _spoken: [SpeechRequest] = []
-    private var _interrupted: [SpeechRequest] = []
-    private var _posts: [(String, Data?, String)] = []
-    private var _classified = 0
-    private var _screenReads: [SpeechRequest] = []
-
-    var macPhotos: Int { lock.withLock { _macPhotos } }
-    var iphoneShots: Int { lock.withLock { _iphoneShots } }
-    var spoken: [SpeechRequest] { lock.withLock { _spoken } }
-    var interrupted: [SpeechRequest] { lock.withLock { _interrupted } }
-    var posts: [(String, Data?, String)] { lock.withLock { _posts } }
-    var classified: Int { lock.withLock { _classified } }
-    var screenReads: [SpeechRequest] { lock.withLock { _screenReads } }
-
-    /// 撮影が失敗する状況を作るためのつまみ。
-    var captureSucceeds = true
-    /// 送信が失敗する状況を作るためのつまみ。
-    var postSucceeds = true
-    /// 発話が失敗する状況を作るためのつまみ。
-    var speechSucceeds = true
-    /// 画面読み取りが返す内容。`nil` なら読めなかったことにする。
-    var screenReading: SpokenLine.ScreenReading? = SpokenLine.ScreenReading(
-        app: "YouTube",
-        activity: "動画を見ている",
-        category: "slacking"
-    )
-
-    func makeActions() -> DetectionEngine.Actions {
-        DetectionEngine.Actions(
-            captureMacPhoto: { [self] in
-                lock.withLock { _macPhotos += 1 }
-                return captureSucceeds ? Data("camera".utf8) : nil
-            },
-            captureIPhoneScreenshot: { [self] in
-                lock.withLock { _iphoneShots += 1 }
-                return captureSucceeds ? Data("iphone".utf8) : nil
-            },
-            speak: { [self] request in
-                lock.withLock { _spoken.append(request) }
-                guard speechSucceeds else { return nil }
-                return SpokenSpeech(text: "喋った", screen: screenReading)
-            },
-            readScreen: { [self] request in
-                lock.withLock { _screenReads.append(request) }
-                return ScreenReadResult(screen: screenReading)
-            },
-            interrupt: { [self] request in
-                lock.withLock { _interrupted.append(request) }
-            },
-            post: { [self] text, image, filename in
-                lock.withLock { _posts.append((text, image, filename)) }
-                return postSucceeds
-            },
-            classify: { [self] _ in
-                lock.withLock { _classified += 1 }
-                return .sleeping
-            }
-        )
-    }
-}
-
-@Suite("検知エンジン")
+/// 遷移表(正常 → 疑い 1 → 疑い 2 → 疑い 3 → 晒し → メンヘラ)の 1 行ずつを確かめる。
+@Suite("検知の状態遷移")
 @MainActor
-struct DetectionEngineTests {
+struct DetectionStateMachineTests {
 
-    /// 音楽が鳴っている状況を作るためのスタブ。
-    private struct StubMusic: MusicControlling {
-        let playing: NowPlaying
-        func nowPlaying() async -> NowPlaying { playing }
-        func stopPlaying() async -> MusicStopOutcome { .nothingWasPlaying }
-        func resumePlaying(_ outcome: MusicStopOutcome) async {}
-    }
-
-    private func engine(
-        idle: TimeInterval,
-        spy: ActionSpy,
-        music: NowPlaying = .playing(.spotify)
-    ) -> DetectionEngine {
-        let engine = DetectionEngine(
-            idleMonitor: MacIdleMonitor(probe: { idle }),
-            frontmostMonitor: FrontmostAppMonitor(probe: { "Safari" }),
-            musicController: StubMusic(playing: music)
-        )
-        engine.thresholds = .production
-        engine.actions = spy.makeActions()
-        // 既存の検証はどれも live(bridge にセリフを作らせる)経路のもの。
-        engine.voiceMode = .live
-        return engine
+    /// 疑い 1 の Touch ID チェックが決着するまで待つ。
+    private func settleCheck(_ engine: DetectionEngine) async {
+        await settle(until: { !engine.isCheckRunning })
     }
 
     @Test("触っている間は何も呼ばれない")
     func normalDoesNothing() async {
         let spy = ActionSpy()
-        let engine = engine(idle: 10, spy: spy)
+        let pet = PetSpy()
+        let engine = makeDetectionEngine(idle: IdleClock(1), spy: spy, pet: pet)
 
         let decision = await engine.evaluate()
 
         #expect(decision.state == .normal)
+        #expect(spy.presenceChecks.isEmpty)
         #expect(spy.macPhotos == 0)
-        #expect(spy.spoken.isEmpty)
         #expect(spy.posts.isEmpty)
+        #expect(pet.events.isEmpty)
         #expect(engine.log.isEmpty)
     }
 
-    @Test("疑いの段階では喋るだけで、撮らないし送らない")
-    func suspectedOnlySpeaks() async {
+    @Test("無操作が閾値を超えると疑い 1 に入り、すぐ Touch ID を確かめる")
+    func idleEntersFirstSuspect() async {
         let spy = ActionSpy()
-        let engine = engine(idle: 150, spy: spy)
+        let pet = PetSpy()
+        let engine = makeDetectionEngine(idle: IdleClock(10), spy: spy, pet: pet)
 
-        await engine.evaluate()
+        let decision = await engine.evaluate()
 
-        #expect(spy.spoken.count == 1)
-        #expect(spy.spoken.first?.escalation == .nudge)
-        #expect(spy.macPhotos == 0)
-        #expect(spy.posts.isEmpty)
+        #expect(decision.state == .suspect(stage: 1))
+        #expect(engine.isCheckRunning)
+        await settleCheck(engine)
+        #expect(spy.presenceChecks == [false])
+        // ペットは待つ姿に固定される。セリフとカットインは演出側が出す。
+        #expect(pet.events.first?.state == .suspected)
+        #expect(pet.events.first?.escalationStage == 1)
     }
 
-    @Test("確定 × iPhone 応答なし → カメラで撮って送る")
-    func confirmedUnreachableCapturesCamera() async {
+    @Test("iPhone を触っていると、疑い 1 の演出にもそれを伝える")
+    func firstSuspectKnowsAboutThePhone() async {
         let spy = ActionSpy()
-        let engine = engine(idle: 600, spy: spy)
-        engine.iphoneState = .unreachable
+        let engine = makeDetectionEngine(idle: IdleClock(10), spy: spy, iphone: .active)
 
         await engine.evaluate()
+        await settleCheck(engine)
 
-        #expect(spy.macPhotos == 1)
-        #expect(spy.iphoneShots == 0)
-        #expect(spy.posts.count == 1)
-        #expect(spy.posts.first?.2 == "camera.png")
+        #expect(spy.presenceChecks == [true])
     }
 
-    @Test("確定 × iPhone 操作中 → iPhone のスクショを撮って送る")
-    func confirmedActivePhoneCapturesScreenshot() async {
+    @Test("Touch ID に成功したら正常に戻る。猶予は付けない")
+    func touchIDSuccessReturnsToNormal() async {
         let spy = ActionSpy()
-        let engine = engine(idle: 600, spy: spy)
-        engine.iphoneState = .active
+        spy.presenceOutcome = .stamped
+        let pet = PetSpy()
+        let engine = makeDetectionEngine(idle: IdleClock(10), spy: spy, pet: pet)
 
         await engine.evaluate()
+        await settle(until: { engine.state == .normal })
 
-        #expect(spy.iphoneShots == 1)
-        #expect(spy.macPhotos == 0)
-        #expect(spy.posts.first?.2 == "iphone.png")
-    }
-
-    @Test("iPhone のスクショはセリフの要求に添えて読ませる")
-    func iphoneScreenshotIsAttachedToTheRequest() async {
-        // 音楽が鳴っていると割り込み経路に入って speak を通らないので、鳴っていない状況にする。
-        let spy = ActionSpy()
-        let engine = engine(idle: 600, spy: spy, music: .silent)
-        engine.iphoneState = .active
-
-        await engine.evaluate()
-
-        #expect(spy.spoken.first?.screenshotPNG == Data("iphone".utf8))
-    }
-
-    @Test("iPhone で開いているアプリはセリフの要求に載せる")
-    func iphoneForegroundAppReachesTheRequest() async {
-        let spy = ActionSpy()
-        let engine = engine(idle: 600, spy: spy, music: .silent)
-        engine.iphoneState = .active
-        engine.iphoneForegroundApp = "YouTube"
-
-        await engine.evaluate()
-
-        #expect(spy.spoken.first?.iphoneApp == "YouTube")
-    }
-
-    @Test("カメラ写真はセリフの要求に添えない")
-    func cameraPhotoIsNotAttachedToTheRequest() async {
-        // 顔しか写っていない写真を読ませても何も出てこない。
-        let spy = ActionSpy()
-        let engine = engine(idle: 600, spy: spy, music: .silent)
-        engine.iphoneState = .unreachable
-
-        await engine.evaluate()
-
-        #expect(spy.spoken.first?.screenshotPNG == nil)
-    }
-
-    @Test("Vision のラベル付けはカメラ写真のときだけ走る")
-    func visionRunsOnlyForCameraPhotos() async {
-        // iPhone の画面に顔は写らない。無駄に走らせない。
-        let spy = ActionSpy()
-        let engine = engine(idle: 600, spy: spy)
-        engine.iphoneState = .active
-
-        await engine.evaluate()
-
-        #expect(spy.classified == 0)
-    }
-
-    @Test("カメラ写真にはラベルが付いてセリフに渡る")
-    func visionLabelReachesTheLine() async {
-        let spy = ActionSpy()
-        let engine = engine(idle: 600, spy: spy)
-        engine.iphoneState = .unreachable
-
-        await engine.evaluate()
-
-        #expect(spy.classified == 1)
-        #expect(spy.interrupted.first?.vision == .sleeping)
-    }
-
-    @Test("確定すると音楽を止めて聞かせる")
-    func confirmedInterrupts() async {
-        let spy = ActionSpy()
-        let engine = engine(idle: 600, spy: spy)
-
-        await engine.evaluate()
-
-        #expect(spy.interrupted.count == 1)
-        #expect(spy.interrupted.first?.escalation == .expose)
-        // 割り込んだときは普通の発話はしない。二重に喋らせない。
-        #expect(spy.spoken.isEmpty)
-    }
-
-    @Test("撮れなくても送信を試みず、評価は続く")
-    func captureFailureDoesNotPost() async {
-        let spy = ActionSpy()
-        spy.captureSucceeds = false
-        let engine = engine(idle: 600, spy: spy)
-
-        await engine.evaluate()
-
-        #expect(spy.macPhotos == 1)
-        #expect(spy.posts.isEmpty)
-        #expect(engine.log.first?.outcome.contains("取れなかった") == true)
-    }
-
-    @Test("撮れなければクールダウンを始めず、次の評価で撮り直す")
-    func captureFailureDoesNotStartCooldown() async {
-        // 失敗でクールダウンを始めると、tunneld が不調なだけで 3 分間何も撮らなくなる。
-        let spy = ActionSpy()
-        spy.captureSucceeds = false
-        let engine = engine(idle: 600, spy: spy)
-        engine.iphoneState = .active
-
-        await engine.evaluate()
-        await engine.evaluate()
-
-        #expect(engine.lastEvidenceAt == nil)
-        #expect(spy.iphoneShots == 2)
-        #expect(engine.log.first?.outcome.contains("次の評価で撮り直す") == true)
-    }
-
-    @Test("送れなくても記録には残る")
-    func postFailureIsRecorded() async {
-        let spy = ActionSpy()
-        spy.postSucceeds = false
-        let engine = engine(idle: 600, spy: spy)
-
-        await engine.evaluate()
-
-        #expect(engine.log.first?.outcome.contains("送れなかった") == true)
-    }
-
-    @Test("直前に撮っていれば撮り直さない")
-    func cooldownPreventsRepeatedCapture() async {
-        // これが無いと 5 秒ごとに撮って送り続けることになる。
-        let spy = ActionSpy()
-        let engine = engine(idle: 600, spy: spy)
-
-        await engine.evaluate()
-        await engine.evaluate()
-
-        #expect(spy.macPhotos == 1)
-        #expect(spy.posts.count == 1)
-    }
-
-    @Test("判断の根拠と結果が必ず記録される")
-    func everyDecisionIsLogged() async {
-        let spy = ActionSpy()
-        let engine = engine(idle: 600, spy: spy)
-
-        await engine.evaluate()
-
-        let entry = engine.log.first
-        #expect(entry?.state == .confirmed)
-        #expect(entry?.evidence == .macCamera)
-        #expect(entry?.reason.isEmpty == false)
-        #expect(entry?.outcome.isEmpty == false)
-    }
-
-    @Test("記録は上限を超えると古いものから消える")
-    func logIsCapped() async {
-        let spy = ActionSpy()
-        let engine = engine(idle: 150, spy: spy)
-
-        for _ in 0...(DetectionEngine.logHistoryLimit + 3) {
-            await engine.evaluate()
-        }
-
-        #expect(engine.log.count == DetectionEngine.logHistoryLimit)
-    }
-
-    @Test("止めると監視状態が戻る")
-    func stopResetsState() async {
-        let spy = ActionSpy()
-        let engine = engine(idle: 600, spy: spy)
-        engine.start()
-        #expect(engine.isWatching)
-
-        engine.stop()
-
-        #expect(engine.isWatching == false)
         #expect(engine.state == .normal)
+        #expect(engine.escalationStage == 0)
+        #expect(pet.returnSignals == 1)
+        // 猶予が付いていたら、次の評価で疑い直さないはず。付けていないので疑い直す。
+        await engine.evaluate()
+        #expect(engine.state == .suspect(stage: 1))
     }
 
-    @Test("閾値を差し替えると判定も変わる")
-    func thresholdsApply() async {
+    @Test("Touch ID が空振りしたら待ちに入り、段の間隔ぶんで疑い 2 へ上がる")
+    func touchIDMissMovesToSecondSuspect() async throws {
         let spy = ActionSpy()
-        let engine = engine(idle: 30, spy: spy)
-        engine.thresholds = DetectionThresholds(suspectSeconds: 10, confirmSeconds: 20)
+        spy.presenceOutcome = .failed
+        let pet = PetSpy()
+        let engine = makeDetectionEngine(idle: IdleClock(10), spy: spy, pet: pet)
+        let base = Date()
 
-        let decision = await engine.evaluate()
+        await engine.evaluate(now: base)
+        await settleCheck(engine)
+        #expect(engine.state == .suspect(stage: 1))
 
-        #expect(decision.state == .confirmed)
+        // 待ちが明けるまでは上がらない。
+        await engine.evaluate(now: base.addingTimeInterval(1))
+        #expect(engine.state == .suspect(stage: 1))
+
+        await engine.evaluate(now: base.addingTimeInterval(6))
+        #expect(engine.state == .suspect(stage: 2))
+        // 疑い 2 は同封の質問を、はい / いいえの問いかけとして出す。
+        let prompt = try #require(pet.prompts.first)
+        #expect(BundledVoiceLines.shared.lines(for: .askQuestion).contains(prompt.question))
     }
 
-    @Test("Discord には reason ではなく組み立てた本文を送る")
-    func postsComposedMessageInsteadOfReason() async {
+    @Test("疑い 2 でうなずいたら、縦に振ったと言って正常に戻る")
+    func nodReturnsToNormal() async {
         let spy = ActionSpy()
-        let engine = engine(idle: 600, spy: spy)
-        engine.iphoneState = .unreachable
+        spy.presenceOutcome = .failed
+        let pet = PetSpy()
+        let engine = makeDetectionEngine(
+            idle: IdleClock(10),
+            spy: spy,
+            pet: pet,
+            headGesture: { _, _ in .yes }
+        )
+        let base = Date()
 
-        let decision = await engine.evaluate()
+        await engine.evaluate(now: base)
+        await settleCheck(engine)
+        await engine.evaluate(now: base.addingTimeInterval(6))
+        await settle(until: { engine.state == .normal })
 
-        let posted = spy.posts.first?.0
-        #expect(posted?.contains(DiscordMessageComposer.subtextPrefix) == true)
-        #expect(posted != decision.reason)
-        // 記録には従来どおり reason が残る。
-        #expect(engine.log.first?.reason == decision.reason)
+        #expect(engine.state == .normal)
+        #expect(pet.dismissals == 1)
+        #expect(pet.lines.contains { BundledVoiceLines.shared.lines(for: .gestureYes).contains($0) })
     }
 
-    @Test("材料には前面アプリ名が入る")
-    func signalsCarryFrontmostApp() async {
+    @Test("疑い 2 で首を横に振ったら、横に振ったと言って待ちに入る")
+    func shakeKeepsSuspecting() async {
         let spy = ActionSpy()
-        let engine = engine(idle: 600, spy: spy)
+        spy.presenceOutcome = .failed
+        let pet = PetSpy()
+        let engine = makeDetectionEngine(
+            idle: IdleClock(10),
+            spy: spy,
+            pet: pet,
+            headGesture: { _, _ in .no }
+        )
+        let base = Date()
+
+        await engine.evaluate(now: base)
+        await settleCheck(engine)
+        await engine.evaluate(now: base.addingTimeInterval(6))
+        await settle(until: { !engine.isCheckRunning })
+
+        #expect(engine.state == .suspect(stage: 2))
+        #expect(pet.lines.contains { BundledVoiceLines.shared.lines(for: .gestureNo).contains($0) })
+    }
+
+    @Test("疑い 2 に反応が無ければ、無反応のセリフを言って待ちに入る")
+    func silenceKeepsSuspecting() async {
+        let spy = ActionSpy()
+        spy.presenceOutcome = .failed
+        let pet = PetSpy()
+        let engine = makeDetectionEngine(
+            idle: IdleClock(10),
+            spy: spy,
+            pet: pet,
+            // 実時間を待たずに時間切れへ倒す。
+            sleep: { _ in }
+        )
+        let base = Date()
+
+        await engine.evaluate(now: base)
+        await settleCheck(engine)
+        await engine.evaluate(now: base.addingTimeInterval(6))
+        await settle(until: { !engine.isCheckRunning })
+
+        #expect(engine.state == .suspect(stage: 2))
+        #expect(pet.dismissals == 1)
+        #expect(pet.lines.contains { BundledVoiceLines.shared.lines(for: .askTimeout).contains($0) })
+    }
+
+    @Test("疑い 3 は最終警告を言うだけで、確かめない")
+    func thirdSuspectOnlyWarns() async {
+        let spy = ActionSpy()
+        spy.presenceOutcome = .failed
+        let pet = PetSpy()
+        let engine = makeDetectionEngine(idle: IdleClock(10), spy: spy, pet: pet, sleep: { _ in })
+        let base = Date()
+
+        await engine.evaluate(now: base)
+        await settleCheck(engine)
+        await engine.evaluate(now: base.addingTimeInterval(6))
+        await settle(until: { !engine.isCheckRunning })
+        await engine.evaluate(now: base.addingTimeInterval(12))
+
+        #expect(engine.state == .suspect(stage: 3))
+        #expect(engine.isCheckRunning == false)
+        #expect(spy.presenceChecks.count == 1)
+        #expect(pet.lines.contains { BundledVoiceLines.shared.lines(for: .finalWarn).contains($0) })
+        #expect(spy.posts.isEmpty)
+    }
+
+    @Test("疑い 3 のあとも動かなければ晒し、そのままメンヘラモードに入る")
+    func exposureLeadsToClingy() async {
+        let spy = ActionSpy()
+        spy.presenceOutcome = .failed
+        let pet = PetSpy()
+        let engine = makeDetectionEngine(idle: IdleClock(10), spy: spy, pet: pet, sleep: { _ in })
+        let base = Date()
+
+        await engine.evaluate(now: base)
+        await settleCheck(engine)
+        await engine.evaluate(now: base.addingTimeInterval(6))
+        await settle(until: { !engine.isCheckRunning })
+        await engine.evaluate(now: base.addingTimeInterval(12))
+        let decision = await engine.evaluate(now: base.addingTimeInterval(18))
+
+        #expect(decision.state == .exposing)
+        #expect(decision.evidence == .macCamera)
+        #expect(spy.macPhotos == 1)
+        #expect(spy.posts.count == 1)
+        #expect(spy.posts.first?.mention == true)
+        #expect(engine.state == .clingy(since: base.addingTimeInterval(18), count: 0))
+        #expect(engine.escalationStage == PetEvent.clingyStage)
+    }
+
+    @Test("疑いの途中で入力があれば、黙って正常に戻る")
+    func inputDuringSuspicionReturnsSilently() async {
+        let spy = ActionSpy()
+        spy.presenceOutcome = .failed
+        let idle = IdleClock(10)
+        let pet = PetSpy()
+        let engine = makeDetectionEngine(idle: idle, spy: spy, pet: pet)
 
         await engine.evaluate()
+        await settleCheck(engine)
+        idle.set(0)
+        let decision = await engine.evaluate()
 
-        #expect(engine.lastSignals?.frontmostApp == "Safari")
-        #expect(spy.interrupted.first?.frontmostApp == "Safari")
+        #expect(decision.state == .normal)
+        #expect(engine.state == .normal)
+        // 責める理由がないのでセリフは出さない。
+        #expect(pet.lines.isEmpty)
+        #expect(pet.returnSignals == 1)
+        #expect(spy.posts.isEmpty)
+    }
+
+    @Test("チェックの最中に入力があれば、結果を待たずに正常へ戻す")
+    func inputDuringCheckDropsTheResult() async {
+        let spy = ActionSpy()
+        spy.presenceOutcome = .stamped
+        let idle = IdleClock(10)
+        let pet = PetSpy()
+        let engine = makeDetectionEngine(idle: idle, spy: spy, pet: pet)
+
+        await engine.evaluate()
+        #expect(engine.isCheckRunning)
+        idle.set(0)
+        await engine.evaluate()
+
+        #expect(engine.state == .normal)
+        // ダイアログとカットインを閉じてもらう。
+        await settle(until: { spy.presenceCancels == 1 })
+        #expect(spy.presenceCancels == 1)
+
+        // 遅れて届いた「成功」で段が動かないことを見る。
+        await settle(until: { spy.presenceChecks.count == 1 })
+        #expect(engine.state == .normal)
+        #expect(pet.returnSignals == 1)
+    }
+
+    @Test("メニューの在席スタンプの猶予中は疑い始めない")
+    func stampGraceKeepsUsQuiet() async {
+        let spy = ActionSpy()
+        let attendance = AttendanceModel(
+            store: AttendanceStore(defaults: emptyDefaults()),
+            authenticator: AlwaysSucceedingAuthenticator()
+        )
+        await attendance.stamp()
+
+        let engine = DetectionEngine(
+            idleMonitor: MacIdleMonitor(probe: { 600 }),
+            attendance: attendance,
+            musicController: StubMusic()
+        )
+        engine.actions = spy.makeActions()
+        engine.thresholds = .quick(stampGraceSeconds: 300)
+
+        let decision = await engine.evaluate()
+
+        #expect(decision.state == .normal)
+        #expect(engine.state == .normal)
+        #expect(spy.presenceChecks.isEmpty)
     }
 }
 
-@Suite("ペットへの通知")
-@MainActor
-struct DetectionPetNotificationTests {
+/// テストごとに空の UserDefaults を用意する。在席の履歴をテスト同士で共有しない。
+private func emptyDefaults() -> UserDefaults {
+    let suiteName = "mihari.test.detection.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defaults.removePersistentDomain(forName: suiteName)
+    return defaults
+}
 
-    /// 受け取った通知を記録する箱。
-    private final class PetSpy: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _events: [PetEvent] = []
-        var events: [PetEvent] { lock.withLock { _events } }
-        func record(_ event: PetEvent) { lock.withLock { _events.append(event) } }
+/// 認証に必ず成功するスタブ。在席スタンプの猶予を作るのに使う。
+private struct AlwaysSucceedingAuthenticator: TouchIDAuthenticating {
+    private var available: TouchIDAvailability {
+        TouchIDAvailability(canEvaluate: true, biometryType: .touchID, error: nil)
     }
+    func biometricsAvailability() -> TouchIDAvailability { available }
+    func deviceOwnerAvailability() -> TouchIDAvailability { available }
+    func authenticate(policy: LAPolicy, reason: String) async -> TouchIDAuthenticationResult { .success }
+    func cancelAuthentication() {}
+}
 
-    private func engine(idle: TimeInterval, spy: ActionSpy, pet: PetSpy) -> DetectionEngine {
-        let engine = DetectionEngine(idleMonitor: MacIdleMonitor(probe: { idle }))
-        engine.thresholds = .production
-        engine.actions = spy.makeActions()
-        engine.onEvent = { pet.record($0) }
-        engine.voiceMode = .live
+/// 晒し(証拠の取り先・セリフ・投稿)だけを見る。
+@Suite("晒し")
+@MainActor
+struct DetectionExposureTests {
+
+    /// 疑い 3 まで進めてから晒す。
+    private func exposeNow(
+        spy: ActionSpy,
+        pet: PetSpy? = nil,
+        music: NowPlaying = .silent,
+        iphone: SpeechRequest.IPhoneState = .unreachable,
+        captureSucceeds: Bool = true
+    ) async -> DetectionEngine {
+        spy.captureSucceeds = captureSucceeds
+        let engine = makeDetectionEngine(
+            idle: IdleClock(600),
+            spy: spy,
+            pet: pet,
+            music: music,
+            iphone: iphone
+        )
+        engine.runDebugStep(.expose)
+        // 晒しが終わるとメンヘラモードに入る。そこまで待つ。
+        await settle(until: {
+            if case .clingy = engine.state { return true }
+            return false
+        })
         return engine
     }
 
-    @Test("触っている間はペットに何も届かない")
-    func normalSendsNothing() async {
+    @Test("iPhone から返事が無ければ、カメラで撮ってラベルを付ける")
+    func unreachablePhoneUsesTheCamera() async {
+        let spy = ActionSpy()
         let pet = PetSpy()
-        await engine(idle: 10, spy: ActionSpy(), pet: pet).evaluate()
-        #expect(pet.events.isEmpty)
+        let engine = await exposeNow(spy: spy, pet: pet)
+
+        #expect(spy.macPhotos == 1)
+        #expect(spy.iphoneShots == 0)
+        #expect(spy.classified == 1)
+        #expect(spy.posts.first?.filename == "camera.png")
+        // 晒しのイベントにラベルが載る(そのあとメンヘラモードのイベントが続く)。
+        #expect(pet.events.contains { $0.visionLabel == .asleep })
+        #expect(engine.lastEvidenceAt != nil)
     }
 
-    @Test("疑いの段階でペットにセリフが届く")
-    func suspectedReachesPet() async {
+    @Test("iPhone を触っていれば、画面を撮ってその中身に触れたセリフを作らせる")
+    func activePhoneUsesTheScreenshot() async {
+        let spy = ActionSpy()
+        spy.speechSucceeds = true
         let pet = PetSpy()
-        await engine(idle: 150, spy: ActionSpy(), pet: pet).evaluate()
+        _ = await exposeNow(spy: spy, pet: pet, iphone: .active)
 
-        let event = pet.events.first
-        #expect(event?.state == .suspected)
-        #expect(event?.escalationStage == 1)
-        #expect(event?.line.isEmpty == false)
+        #expect(spy.iphoneShots == 1)
+        #expect(spy.macPhotos == 0)
+        #expect(spy.spoken.first?.screenshotPNG == Data("iphone".utf8))
+        #expect(pet.lines.contains("画面、見えてるよ。"))
+        #expect(spy.posts.first?.filename == "iphone.png")
     }
 
-    @Test("確定して晒すときは段階が上がる")
-    func confirmedRaisesStage() async {
-        let pet = PetSpy()
-        let engine = engine(idle: 600, spy: ActionSpy(), pet: pet)
-        engine.iphoneState = .unreachable
-
-        await engine.evaluate()
-
-        #expect(pet.events.first?.state == .confirmed)
-        #expect(pet.events.first?.escalationStage == 3)
-    }
-
-    @Test("Vision のラベルがペットにも渡る")
-    func visionLabelReachesPet() async {
-        let pet = PetSpy()
-        let engine = engine(idle: 600, spy: ActionSpy(), pet: pet)
-        engine.iphoneState = .unreachable
-
-        await engine.evaluate()
-
-        #expect(pet.events.first?.visionLabel == .asleep)
-    }
-
-    @Test("喋れなくてもペットには判断の根拠が届く")
-    func petStillGetsALineWhenSpeechFails() async {
-        // 声が出ないだけで吹き出しまで消えると、何が起きたのか分からなくなる。
+    @Test("セリフを作れなければ同封音声に倒し、文面のためだけに画面を読ませる")
+    func fallsBackToBundledLineButStillReadsTheScreen() async {
         let spy = ActionSpy()
         spy.speechSucceeds = false
         let pet = PetSpy()
+        _ = await exposeNow(spy: spy, pet: pet, iphone: .active)
 
-        await engine(idle: 150, spy: spy, pet: pet).evaluate()
+        #expect(spy.screenReads.count == 1)
+        let line = pet.lines.last ?? ""
+        #expect(BundledVoiceLines.shared.lines(for: .iphoneActive).contains(line))
+        // 読み取れた内容が投稿の 1 行目に出る。
+        #expect(spy.posts.first?.text.contains("YouTube") == true)
+    }
 
-        #expect(pet.events.first?.line.isEmpty == false)
+    @Test("音楽が鳴っているときだけ画面を奪う")
+    func interruptsOnlyWhenMusicIsPlaying() async {
+        let quiet = ActionSpy()
+        _ = await exposeNow(spy: quiet)
+        #expect(quiet.interrupted.isEmpty)
+
+        let loud = ActionSpy()
+        _ = await exposeNow(spy: loud, music: .playing(.spotify))
+        #expect(loud.interrupted.count == 1)
+        #expect(loud.interrupted.first?.escalation == .expose)
+    }
+
+    @Test("撮れなくても送信を試みず、メンヘラモードには進む")
+    func captureFailureStillEntersClingy() async {
+        let spy = ActionSpy()
+        let engine = await exposeNow(spy: spy, captureSucceeds: false)
+
+        #expect(spy.macPhotos == 1)
+        #expect(spy.posts.isEmpty)
+        #expect(engine.lastEvidenceAt == nil)
+        #expect(engine.log.contains { $0.outcome.contains("証拠を取れなかった") })
+        if case .clingy = engine.state {} else { Issue.record("メンヘラモードに入っていない") }
+    }
+
+    @Test("送れなくても記録には残り、メンヘラモードには進む")
+    func postFailureIsRecorded() async {
+        let spy = ActionSpy()
+        spy.postSucceeds = false
+        let engine = await exposeNow(spy: spy)
+
+        #expect(engine.log.contains { $0.outcome.contains("送れなかった") })
+        if case .clingy = engine.state {} else { Issue.record("メンヘラモードに入っていない") }
+    }
+
+    @Test("Discord には reason ではなく組み立てた本文をメンション付きで送る")
+    func postsComposedMessage() async {
+        let spy = ActionSpy()
+        let engine = await exposeNow(spy: spy)
+
+        let posted = spy.posts.first
+        #expect(posted?.text.contains(DiscordMessageComposer.subtextPrefix) == true)
+        #expect(posted?.mention == true)
+        #expect(engine.log.contains { $0.reason.isEmpty == false })
     }
 }

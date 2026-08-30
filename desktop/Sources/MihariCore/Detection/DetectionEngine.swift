@@ -82,6 +82,10 @@ public final class DetectionEngine: ObservableObject {
     /// 走っているチェックの種類。走っていなければ `nil`。
     private enum RunningCheck { case touchID, headGesture }
     private var runningCheck: RunningCheck?
+
+    /// Touch ID / 首振りのチェックが走っているか。返事を待っているあいだは段が進まない。
+    public var isCheckRunning: Bool { runningCheck != nil }
+
     /// チェックの世代。畳んだら 1 つ進めて、遅れて届いた結果を捨てる。
     private var checkGeneration = 0
 
@@ -329,10 +333,14 @@ public final class DetectionEngine: ObservableObject {
             // 疑いの途中で戻ってきただけ。責める理由がないので黙って戻す。
             let decision = DetectionDecision(state: .normal, reason: "疑い \(stage) 回目の途中で戻ってきた")
             finishEpisode()
+            // 戻ってきたこの瞬間から、集中が続いている時間を数え直す。
+            advanceFocusStreak(now: now)
             record(decision, outcome: "黙って正常に戻す", at: now)
             return decision
         case .clingy(let since, _):
-            return await finishClingy(since: since, now: now)
+            let decision = await finishClingy(since: since, now: now)
+            advanceFocusStreak(now: now)
+            return decision
         }
     }
 
