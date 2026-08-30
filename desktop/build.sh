@@ -58,6 +58,14 @@ if [ ! -x "${BIN_PATH}" ]; then
     exit 1
 fi
 
+# 本体を見張る監視プロセス。Contents/MacOS に本体と並べて置く(WatchdogSetup が
+# 前提にしているパス)。
+WATCHDOG_BIN_PATH="${BIN_DIR}/MihariWatchdog"
+if [ ! -x "${WATCHDOG_BIN_PATH}" ]; then
+    echo "error: ビルド済みバイナリが見つからない: ${WATCHDOG_BIN_PATH}" >&2
+    exit 1
+fi
+
 # staging は ./Mihari.app と同じファイルシステム上に置く。最後の差し替えを
 # コピーではなく rename にするため。
 mkdir -p ./.build
@@ -69,6 +77,7 @@ mkdir -p "${STAGING_APP}/Contents/MacOS"
 mkdir -p "${STAGING_APP}/Contents/Resources"
 
 cp "${BIN_PATH}" "${STAGING_APP}/Contents/MacOS/${APP_NAME}"
+cp "${WATCHDOG_BIN_PATH}" "${STAGING_APP}/Contents/MacOS/MihariWatchdog"
 cp "Resources/Info.plist" "${STAGING_APP}/Contents/Info.plist"
 printf 'APPL????' > "${STAGING_APP}/Contents/PkgInfo"
 
