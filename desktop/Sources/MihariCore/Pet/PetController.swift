@@ -417,7 +417,14 @@ public final class PetController {
     }
 
     /// はい/いいえ の問いかけを吹き出しに出す。時間では消さず、答えるか捨てるまで残す。
-    public func showPrompt(question: String, onAnswer: @escaping (Bool) -> Void) {
+    ///
+    /// - Parameter voice: 問いかけの読み上げ方。吹き出しがボタンに変わるので普通のセリフとしては
+    ///   喋らせられない。用意済みの音声を渡すと、問いかけを出した瞬間にここで鳴らす。
+    public func showPrompt(
+        question: String,
+        voice speechVoice: SpeechVoice = .none,
+        onAnswer: @escaping (Bool) -> Void
+    ) {
         let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         promptQuestion = text
@@ -427,6 +434,9 @@ public final class PetController {
         speechTimer?.invalidate()
         speechTimer = nil
         speechText = nil
+
+        // ペットをしまっていても問いかけの声は聞こえるようにする(セリフと同じ扱い)。
+        playPrepared(speechVoice)
 
         guard isAwake, let window else { return }
         let panel = speechWindow ?? PetSpeechWindow()

@@ -40,10 +40,16 @@ public enum VisionLabel: String, Sendable, Equatable, CaseIterable {
 /// AirPods の首振り判定（#18）からも、同じコールバックを呼べば分岐できる。
 public struct PetYesNoPrompt: Sendable {
     public let question: String
+    /// 問いかけを読み上げる音声(同封の .m4a)。無ければ吹き出しだけ出す。
+    ///
+    /// 問いかけは吹き出しがボタンに変わるので、普通のセリフとしては喋らせられない。
+    /// 出した瞬間に鳴らせるよう、問いかけ自身に音声を持たせる。
+    public let audio: Data?
     public let onAnswer: @Sendable (Bool) -> Void
 
-    public init(question: String, onAnswer: @escaping @Sendable (Bool) -> Void) {
+    public init(question: String, audio: Data? = nil, onAnswer: @escaping @Sendable (Bool) -> Void) {
         self.question = question
+        self.audio = audio
         self.onAnswer = onAnswer
     }
 }
@@ -55,6 +61,11 @@ public struct PetYesNoPrompt: Sendable {
 public struct PetEvent: Sendable {
     /// エスカレーション段階の下限。負の値は組み立て時に丸める。
     public static let minimumEscalationStage = 0
+
+    /// 晒し(exposing)のエスカレーション段階。疑い 3 段の続き。
+    public static let exposingStage = 4
+    /// メンヘラモード(clingy)のエスカレーション段階。ここが最終段。
+    public static let clingyStage = 5
 
     /// 正常 / 疑い / サボり確定。
     public let state: SaboriState

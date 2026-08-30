@@ -28,7 +28,7 @@ public struct StatusPanelSnapshot: Equatable, Sendable {
 
     /// 1 行目の丸の色。
     public let tone: Tone
-    /// 1 行目の状態。「疑い(段階 1)」。
+    /// 1 行目の状態。「疑い 1 回目(段階 1)」「メンヘラ(3 回目)(段階 5)」。
     public let stateText: String
     /// 1 行目の右。「監視中」「休憩中(残り 12:30)」「停止中」。
     public let watchText: String
@@ -39,14 +39,10 @@ public struct StatusPanelSnapshot: Equatable, Sendable {
     public let breakUntil: Date?
     /// Mac の無操作秒数。
     public let idleText: String
-    /// 確定までの進捗(0...1)。確定に達したら満タン。
+    /// 疑いに入るまでの進捗(0...1)。疑いに達したら満タン。
     public let idleProgress: Double
-    /// 無操作の閾値。「疑い 12 / 確定 30」。
+    /// 無操作の閾値。「疑い 60 / 段ごと 30」。
     public let thresholdText: String
-    /// 視線。「見ていない 6.2 秒」「見ている」「不明(カメラ閉)」。
-    public let gazeText: String
-    /// 目の開き具合。取れていなければ nil。
-    public let eyeOpennessText: String?
     /// iPhone の様子。
     public let iphoneText: String
     /// 音楽。
@@ -55,10 +51,6 @@ public struct StatusPanelSnapshot: Equatable, Sendable {
     public let frontmostAppText: String
     /// 在席スタンプ。「4 分前(猶予中)」「押されていない」。
     public let attendanceText: String
-    /// クールダウン。「残り 1:20」「なし」。
-    public let cooldownText: String
-    /// 次に証拠を取れるようになる時刻。非 nil のときだけ残り時間を滑らかに動かす。
-    public let cooldownUntil: Date?
     /// 最後の判断。「「Mac が 2分 無操作 → 声をかけた」」。
     public let judgementText: String
     /// 最後の判断の時刻。まだ何も起きていなければ nil。
@@ -70,7 +62,7 @@ public struct StatusPanelSnapshot: Equatable, Sendable {
     ///
     /// - Parameters:
     ///   - signals: 直近の評価で見た材料。まだ評価していなければ nil。全行が「—」になる。
-    ///   - lastEvidenceAt: 最後に証拠を撮った時刻。クールダウンの残りを出すのに使う。
+    ///   - lastEvidenceAt: 最後に証拠を撮った時刻。まだ撮っていなければ nil。
     ///   - lastLog: 判断の記録の先頭(最新)。
     ///   - daemonPort: デーモンに繋がっていればそのポート。繋がっていなければ nil。
     public static func make(
@@ -86,8 +78,6 @@ public struct StatusPanelSnapshot: Equatable, Sendable {
         now: Date = Date()
     ) -> StatusPanelSnapshot {
         let onBreak = breakUntil.map { now < $0 } ?? false
-        let cooldownUntil = lastEvidenceAt?.addingTimeInterval(thresholds.cooldownSeconds)
-        let isCoolingDown = cooldownUntil.map { now < $0 } ?? false
 
         return StatusPanelSnapshot(
             tone: tone(isWatching: isWatching, onBreak: onBreak, state: state),
@@ -96,16 +86,11 @@ public struct StatusPanelSnapshot: Equatable, Sendable {
             breakUntil: onBreak ? breakUntil : nil,
             idleText: signals.map { "\(Int($0.macIdleSeconds)) 秒" } ?? placeholder,
             idleProgress: idleProgress(signals: signals, thresholds: thresholds),
-            thresholdText: "疑い \(Int(thresholds.suspectSeconds)) / 確定 \(Int(thresholds.confirmSeconds))",
-            gazeText: signals.map { gazeText(signals: $0, thresholds: thresholds) } ?? placeholder,
-            eyeOpennessText: signals?.gaze.eyeOpenness.map { String(format: "%.2f", $0) },
+            thresholdText: "疑い \(Int(thresholds.suspectSeconds)) / 段ごと \(Int(thresholds.stageIntervalSeconds))",
             iphoneText: signals.map { iphoneText($0.iphone) } ?? placeholder,
             musicText: signals?.music.label ?? placeholder,
             frontmostAppText: signals.map { $0.frontmostApp ?? "不明" } ?? placeholder,
             attendanceText: signals.map { attendanceText(signals: $0, thresholds: thresholds) } ?? placeholder,
-            cooldownText: isCoolingDown
-                ? "残り \(remainingText(until: cooldownUntil ?? now, now: now))" : "なし",
-            cooldownUntil: isCoolingDown ? cooldownUntil : nil,
             judgementText: lastLog.map { "「\($0.reason) → \($0.outcome)」" } ?? placeholder,
             judgementTimeText: lastLog.map { $0.at.formatted(date: .omitted, time: .standard) },
             daemonText: daemonPort.map { "接続中(port \($0))" } ?? "未接続"
@@ -125,8 +110,8 @@ public struct StatusPanelSnapshot: Equatable, Sendable {
         guard isWatching, !onBreak else { return .inactive }
         switch state {
         case .normal: return .normal
-        case .suspected: return .suspected
-        case .confirmed: return .confirmed
+        case .suspect: return .suspected
+        case .exposing, .clingy: return .confirmed
         }
     }
 
@@ -135,22 +120,10 @@ public struct StatusPanelSnapshot: Equatable, Sendable {
         return isWatching ? "監視中" : "停止中"
     }
 
-    /// 確定までどれだけ来ているか。確定に達したら満タンで止める。
+    /// 疑いに入るまでどれだけ来ているか。疑いに達したら満タンで止める。
     private static func idleProgress(signals: DetectionSignals?, thresholds: DetectionThresholds) -> Double {
-        guard let signals, thresholds.confirmSeconds > 0 else { return 0 }
-        return min(1, max(0, signals.macIdleSeconds / thresholds.confirmSeconds))
-    }
-
-    /// カメラを開けていない間の `.unknown` は「見えない」ではなく「見ていない」。両者を混ぜない。
-    private static func gazeText(signals: DetectionSignals, thresholds: DetectionThresholds) -> String {
-        switch signals.gaze.state {
-        case .notLooking:
-            return String(format: "見ていない %.1f 秒", signals.gaze.notLookingSeconds)
-        case .lookingAtScreen:
-            return "見ている"
-        case .unknown:
-            return signals.macIdleSeconds < thresholds.gazeWatchSeconds ? "不明(カメラ閉)" : "不明"
-        }
+        guard let signals, thresholds.suspectSeconds > 0 else { return 0 }
+        return min(1, max(0, signals.macIdleSeconds / thresholds.suspectSeconds))
     }
 
     private static func iphoneText(_ state: SpeechRequest.IPhoneState) -> String {
