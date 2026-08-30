@@ -25,6 +25,25 @@ public enum BundledVoiceKind: String, Sendable, CaseIterable, Identifiable {
     case absent
     /// 説教オーバーレイの本文。
     case sermon
+    // 監視ループ v2 の区分(疑い 1 → 疑い 2 → 疑い 3 → 晒し → メンヘラモード)。
+    // ここも `PetSpeechLines.Kind` と同じ名前。
+    case suspectReach
+    case suspectReachPhone
+    case suspectTouched
+    case suspectMissed
+    case suspectTimeout
+    case askQuestion
+    case askQuestionPhone
+    case gestureYes
+    case gestureNo
+    case askTimeout
+    case finalWarn
+    case finalWarnPhone
+    case clingy1
+    case clingy2
+    case clingy3
+    case clingyEvidence
+    case returned
 
     public var id: String { rawValue }
 
@@ -49,6 +68,23 @@ public enum BundledVoiceKind: String, Sendable, CaseIterable, Identifiable {
         case .sleeping: return "寝ている"
         case .absent: return "席にいない"
         case .sermon: return "説教"
+        case .suspectReach: return "疑い1・指を出す"
+        case .suspectReachPhone: return "疑い1・指を出す(iPhone)"
+        case .suspectTouched: return "疑い1・成功"
+        case .suspectMissed: return "疑い1・指が違う"
+        case .suspectTimeout: return "疑い1・時間切れ"
+        case .askQuestion: return "疑い2・質問"
+        case .askQuestionPhone: return "疑い2・質問(iPhone)"
+        case .gestureYes: return "疑い2・縦に振った"
+        case .gestureNo: return "疑い2・横に振った"
+        case .askTimeout: return "疑い2・無反応"
+        case .finalWarn: return "疑い3・最終警告"
+        case .finalWarnPhone: return "疑い3・最終警告(iPhone)"
+        case .clingy1: return "メンヘラ・序盤"
+        case .clingy2: return "メンヘラ・中盤"
+        case .clingy3: return "メンヘラ・終盤"
+        case .clingyEvidence: return "メンヘラ・撮り直し"
+        case .returned: return "戻ってきた"
         }
     }
 
