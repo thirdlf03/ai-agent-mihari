@@ -53,6 +53,16 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     /// 状態パネルを出しているか。メニューの表示に使う。
     @Published public private(set) var isStatusPanelVisible = false
 
+    /// 在席スタンプのカットインを出す層。
+    private let cutIn: AttendanceCutInPresenting = AttendanceCutInPresenter()
+    /// 在席スタンプの演出をしている最中か。押し直しでカットインが重なるのを防ぐ。
+    private var isStampCeremonyRunning = false
+
+    /// カットインを出してから認証ダイアログを出すまでの間(秒)。
+    private static let cutInLeadInSeconds: TimeInterval = 0.45
+    /// 結末の絵に差し替えてからカットインを閉じるまでの時間(秒)。
+    private static let cutInHoldSeconds: TimeInterval = 1.8
+
     /// 音を出す口。検知のセリフとペットのひとりごとで 1 つを共有する。
     private let speechPlayer: SpeechPlayer
     /// アプリの外(Claude Code のフックなど)からの合図の受け口。
@@ -301,15 +311,45 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         detection.stop()
     }
 
+    /// 在席スタンプを押す。ペットが指を差し出し、Touch ID に指を置いて「指を合わせる」演出にする。
+    ///
+    /// 演出中に押し直されても何もしない。カットインが二重に出てしまうため。
     public func stampAttendance() {
+        guard !isStampCeremonyRunning else { return }
+        isStampCeremonyRunning = true
         Task { [weak self] in
             guard let self else { return }
-            let before = attendance.stamps.count
-            await attendance.stamp()
-            let stamped = attendance.stamps.count > before
-            // 音声は検知のセリフと取り合いになるので、吹き出しだけ出す。
-            pet.controller.say(stamped ? "いるね。ちゃんと確認した。" : "…いない。どこ?", voiced: false)
+            await runStampCeremony()
+            isStampCeremonyRunning = false
         }
+    }
+
+    /// 在席スタンプの演出をひと続きで進める。
+    private func runStampCeremony() async {
+        attendance.refreshAvailability()
+        let definition = pet.controller.currentPet
+        // パスワードにフォールバックする環境では「指を合わせる」が成立しないので、
+        // カットインは出さずにペットの動きとセリフだけにする。
+        let useCutIn = attendance.isBiometricsAvailable && (definition?.hasCutInImages ?? false)
+
+        let opening = AttendanceCeremonyScript.opening
+        pet.controller.playOnce(opening.animation)
+        pet.controller.say(opening.kind)
+        if useCutIn, let definition, let image = opening.cutInImage {
+            cutIn.present(image, of: definition, on: pet.controller.currentScreen)
+            // スライドインを見せてから認証ダイアログを出す。
+            try? await Task.sleep(for: .seconds(Self.cutInLeadInSeconds))
+        }
+
+        let outcome = await attendance.stamp()
+
+        let closing = AttendanceCeremonyScript.closing(outcome)
+        pet.controller.playOnce(closing.animation)
+        pet.controller.say(closing.kind)
+        guard useCutIn, let image = closing.cutInImage else { return }
+        cutIn.swap(to: image, flash: outcome == .stamped)
+        try? await Task.sleep(for: .seconds(Self.cutInHoldSeconds))
+        cutIn.dismiss()
     }
 
     public func startBreak() {

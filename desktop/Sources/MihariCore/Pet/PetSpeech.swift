@@ -18,6 +18,14 @@ struct PetSpeechLines: Codable, Sendable {
         case breakEnd
         /// 集中が続いているとき(褒める)。
         case focusStreak
+        /// 在席スタンプで指を差し出したとき。
+        case stampReach
+        /// 在席スタンプの認証に成功したとき。
+        case stampTouched
+        /// 在席スタンプの認証に失敗・キャンセルしたとき。
+        case stampMissed
+        /// 在席スタンプの認証を時間切れで打ち切ったとき。
+        case stampTimeout
 
         /// 同封セリフ側の同じ区分。名前は `lines.json` のキーと揃えてある。
         var bundled: BundledVoiceKind {
@@ -29,6 +37,10 @@ struct PetSpeechLines: Codable, Sendable {
             case .watchStart: return .watchStart
             case .breakEnd: return .breakEnd
             case .focusStreak: return .focusStreak
+            case .stampReach: return .stampReach
+            case .stampTouched: return .stampTouched
+            case .stampMissed: return .stampMissed
+            case .stampTimeout: return .stampTimeout
             }
         }
     }

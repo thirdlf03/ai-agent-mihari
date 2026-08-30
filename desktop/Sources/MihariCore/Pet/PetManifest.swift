@@ -30,4 +30,20 @@ public struct PetDefinition: Identifiable, Hashable, Sendable {
     public var spritesheetURL: URL {
         directoryURL.appendingPathComponent(manifest.spritesheetPath)
     }
+
+    /// カットイン用の画像の位置。置かれていなければ nil。
+    ///
+    /// `pet.json` には書かず、`cutin/<name>.png` という置き場所の規約だけで解決する。
+    public func cutInImageURL(_ image: AttendanceCutInImage) -> URL? {
+        let url =
+            directoryURL
+            .appendingPathComponent("cutin")
+            .appendingPathComponent("\(image.rawValue).png")
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// カットインに必要な画像が 3 枚とも揃っているか。揃っているペットだけが演出を出せる。
+    public var hasCutInImages: Bool {
+        AttendanceCutInImage.allCases.allSatisfy { cutInImageURL($0) != nil }
+    }
 }
