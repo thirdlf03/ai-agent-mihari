@@ -39,7 +39,7 @@ class _StubService:
         self.last_error = error
         self.mention_user_id: str | None = None
         self.lock_hours: float = 4.0
-        self.posted: list[tuple[str, bytes | None, str]] = []
+        self.posted: list[tuple[str, bytes | None, str, bool]] = []
         self.selected: list[ChannelSelection] = []
 
     def channels(self) -> list[ChannelInfo]:
@@ -55,13 +55,18 @@ class _StubService:
         self.mention_user_id = user_id
 
     async def post(
-        self, text: str, *, image: bytes | None = None, filename: str = "evidence.png"
+        self,
+        text: str,
+        *,
+        image: bytes | None = None,
+        filename: str = "evidence.png",
+        mention: bool = True,
     ) -> int:
         if not self.is_ready:
             raise DiscordUnavailableError("Bot がまだ起動していない")
         if self.selection is None:
             raise DiscordUnavailableError("投稿先のチャンネルが選ばれていない")
-        self.posted.append((text, image, filename))
+        self.posted.append((text, image, filename, mention))
         return 999
 
 
@@ -140,6 +145,30 @@ def test_posting_text_and_image(
     assert response.json()["message_id"] == 999
     assert service.posted[0][0] == "寝てますね"
     assert service.posted[0][1] == PNG
+
+
+def test_posting_mentions_by_default(
+    client: TestClient, auth: dict[str, str], service: _StubService
+) -> None:
+    service.selection = ChannelSelection(guild_id=1, channel_id=2)
+
+    client.post("/discord/post", json={"text": "寝てますね"}, headers=auth)
+
+    assert service.posted[0][3] is True
+
+
+def test_posting_without_a_mention(
+    client: TestClient, auth: dict[str, str], service: _StubService
+) -> None:
+    # 呼びつける必要のない知らせ(戻ってきた、など)は静かに流したい。
+    service.selection = ChannelSelection(guild_id=1, channel_id=2)
+
+    response = client.post(
+        "/discord/post", json={"text": "戻ってきた", "mention": False}, headers=auth
+    )
+
+    assert response.status_code == 200
+    assert service.posted[0][3] is False
 
 
 def test_posting_nothing_is_422(
@@ -327,6 +356,16 @@ async def test_post_prefixes_the_mention(tmp_path: Path) -> None:
     assert allowed.everyone is False
     assert allowed.roles is False
     assert allowed.replied_user is False
+
+
+async def test_post_can_skip_the_mention(tmp_path: Path) -> None:
+    # メンション先は決まったままでも、この 1 件だけは呼びつけない。
+    service, channel = _service(tmp_path)
+    service.set_mention_user_id("123456789012345678")
+
+    await service.post("戻ってきた", mention=False)
+
+    assert channel.send.call_args.kwargs["content"] == "戻ってきた"
 
 
 async def test_post_without_a_mention_target_is_left_alone(tmp_path: Path) -> None:

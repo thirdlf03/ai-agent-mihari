@@ -221,10 +221,17 @@ class DiscordService:
         return found
 
     async def post(
-        self, text: str, *, image: bytes | None = None, filename: str = "evidence.png"
+        self,
+        text: str,
+        *,
+        image: bytes | None = None,
+        filename: str = "evidence.png",
+        mention: bool = True,
     ) -> int:
         """選んだチャンネルに投稿する。投稿したメッセージ ID を返す。
 
+        :param mention: ``False`` にすると、メンション先が決まっていても ``<@ID>`` を付けない。
+            呼びつける必要のない知らせ(戻ってきた、など)で使う。
         :raises DiscordUnavailableError: Bot 未起動、またはチャンネル未選択。
         """
         bot = self._require_bot()
@@ -238,7 +245,7 @@ class DiscordService:
                 f"チャンネルが見つからない(id={selection.channel_id})。Bot が抜けた可能性がある"
             )
 
-        content = self._with_mention(text)
+        content = self._with_mention(text) if mention else text
         file = discord.File(io.BytesIO(image), filename=filename) if image else None
         try:
             message = await channel.send(
