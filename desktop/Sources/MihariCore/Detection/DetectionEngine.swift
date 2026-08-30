@@ -2,6 +2,22 @@ import Foundation
 import SwiftUI
 import os
 
+/// 検知で作らせたセリフと、あればその読み上げ用の音声。
+///
+/// 音声を取れた瞬間に鳴らすと、ペットが吹き出しを待たせているあいだに声だけ先に出てしまう。
+/// 鳴らすのはペット側に任せ、ここでは文と音声を一緒に運ぶ。
+public struct SpokenSpeech: Sendable, Equatable {
+    /// 吹き出しに出す文。
+    public let text: String
+    /// 読み上げ用の音声(WAV)。作れていなければ `nil`。
+    public let audio: Data?
+
+    public init(text: String, audio: Data? = nil) {
+        self.text = text
+        self.audio = audio
+    }
+}
+
 /// サボりを見張って、決まったことを実行する。
 ///
 /// 判定そのものは `DetectionJudge`(純粋関数)が持つ。ここがやるのは
@@ -66,7 +82,7 @@ public final class DetectionEngine: ObservableObject {
     public struct Actions: Sendable {
         public var captureMacPhoto: @Sendable () async -> Data?
         public var captureIPhoneScreenshot: @Sendable () async -> Data?
-        public var speak: @Sendable (SpeechRequest) async -> String?
+        public var speak: @Sendable (SpeechRequest) async -> SpokenSpeech?
         public var interrupt: @Sendable (SpeechRequest) async -> Void
         public var post: @Sendable (String, Data?, String) async -> Bool
         public var classify: @Sendable (Data) async -> SpeechRequest.VisionLabel
@@ -76,7 +92,7 @@ public final class DetectionEngine: ObservableObject {
         public init(
             captureMacPhoto: @escaping @Sendable () async -> Data? = { nil },
             captureIPhoneScreenshot: @escaping @Sendable () async -> Data? = { nil },
-            speak: @escaping @Sendable (SpeechRequest) async -> String? = { _ in nil },
+            speak: @escaping @Sendable (SpeechRequest) async -> SpokenSpeech? = { _ in nil },
             interrupt: @escaping @Sendable (SpeechRequest) async -> Void = { _ in },
             post: @escaping @Sendable (String, Data?, String) async -> Bool = { _, _, _ in false },
             classify: @escaping @Sendable (Data) async -> SpeechRequest.VisionLabel = { _ in .unknown },
@@ -99,6 +115,9 @@ public final class DetectionEngine: ObservableObject {
 
     /// iPhone の様子。SSE で流れてくる値を外から入れてもらう。
     public var iphoneState: SpeechRequest.IPhoneState = .unreachable
+
+    /// iPhone で開いているアプリ名。SSE で流れてくる値を外から入れてもらう。操作中でなければ nil。
+    public var iphoneForegroundApp: String? = nil
 
     /// 判定のたびにペットへ渡す通知口。
     /// エンジンはペットの中身を知らないので、渡す形だけ決めて外で繋ぐ。
@@ -167,6 +186,7 @@ public final class DetectionEngine: ObservableObject {
         return DetectionSignals(
             macIdleSeconds: idle,
             iphone: iphoneState,
+            iphoneForegroundApp: iphoneForegroundApp,
             gaze: gaze,
             music: music,
             secondsSinceStamp: attendance?.secondsSinceLastStamp,
@@ -354,8 +374,14 @@ public final class DetectionEngine: ObservableObject {
 
         let evidence = await collectEvidence(decision.evidence)
         if decision.evidence != .none {
-            lastEvidenceAt = now
-            notes.append(evidence == nil ? "証拠を取れなかった" : "証拠を取った")
+            // クールダウンを始めるのは撮れたときだけ。失敗でも始めてしまうと、
+            // tunneld が不調なだけで 3 分間何も撮らないまま過ぎる。
+            if evidence == nil {
+                notes.append("証拠を取れなかった(次の評価で撮り直す)")
+            } else {
+                lastEvidenceAt = now
+                notes.append("証拠を取った")
+            }
         }
 
         var label = SpeechRequest.VisionLabel.unknown
@@ -364,22 +390,33 @@ public final class DetectionEngine: ObservableObject {
             // 判定そのものには使わず、セリフと Discord の文面に添えるだけ。
             label = await actions.classify(evidence)
         }
-        let request = makeRequest(signals: signals, decision: decision, label: label)
+        // iPhone の画面を撮ったときだけ、その PNG を添えて「何をしているか」まで読ませる。
+        // Mac のカメラ写真には顔しか写らないので送らない(読ませても何も出てこない)。
+        let screenshot = decision.evidence == .iphoneScreenshot ? evidence : nil
+        let request = makeRequest(
+            signals: signals,
+            decision: decision,
+            label: label,
+            screenshot: screenshot
+        )
 
         var line = ""
+        // 音声は鳴らさずに持ち回る。ペットが吹き出しを出す瞬間に、そこで鳴らしてもらう。
+        var audio: Data?
         if decision.shouldInterrupt {
             await actions.interrupt(request)
             line = decision.reason
             notes.append("音楽を止めて聞かせた")
         } else if decision.shouldSpeak {
             if let spoken = await actions.speak(request) {
-                line = spoken
+                line = spoken.text
+                audio = spoken.audio
             } else {
                 line = decision.reason
                 notes.append("喋れなかった")
             }
         }
-        notifyPet(decision, label: label, line: line, prompt: prompt)
+        notifyPet(decision, label: label, line: line, audio: audio, prompt: prompt)
 
         if let evidence {
             let sent = await actions.post(decision.reason, evidence, filename(for: decision.evidence))
@@ -394,6 +431,7 @@ public final class DetectionEngine: ObservableObject {
         _ decision: DetectionDecision,
         label: SpeechRequest.VisionLabel,
         line: String,
+        audio: Data?,
         prompt: PetYesNoPrompt?
     ) {
         escalationStage = petStage(decision)
@@ -402,6 +440,7 @@ public final class DetectionEngine: ObservableObject {
                 state: petState(decision.state),
                 escalationStage: escalationStage,
                 line: line,
+                audio: audio,
                 visionLabel: petLabel(label),
                 prompt: prompt
             )
@@ -445,14 +484,17 @@ public final class DetectionEngine: ObservableObject {
     private func makeRequest(
         signals: DetectionSignals,
         decision: DetectionDecision,
-        label: SpeechRequest.VisionLabel
+        label: SpeechRequest.VisionLabel,
+        screenshot: Data?
     ) -> SpeechRequest {
         SpeechRequest(
             idleSeconds: Int(signals.macIdleSeconds),
             escalation: escalation(for: decision),
             frontmostApp: signals.frontmostApp,
             iphone: signals.iphone,
-            vision: label
+            iphoneApp: signals.iphoneForegroundApp,
+            vision: label,
+            screenshotPNG: screenshot
         )
     }
 

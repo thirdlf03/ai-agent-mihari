@@ -22,6 +22,10 @@ public final class VoiceController: ObservableObject {
         public let spokenAloud: Bool
         public let note: String?
         public let at: Date
+        /// スクショを添えたときに読み取れた画面。読ませていなければ `nil`。
+        public let screen: SpokenLine.ScreenReading?
+        /// スクショを送ったのに読めなかった理由。
+        public let screenError: String?
     }
 
     @Published public private(set) var status: VoiceStatus?
@@ -58,11 +62,13 @@ public final class VoiceController: ObservableObject {
         }
     }
 
-    /// 状況を渡してセリフを作らせ、音声があれば鳴らす。
+    /// 状況を渡してセリフを作らせる。**鳴らすのは呼び出し側に任せる。**
     ///
-    /// - Returns: 喋った(または表示した)セリフ。作れなかったときは `nil`。
-    @discardableResult
-    public func speak(_ request: SpeechRequest, using client: DaemonClient?) async -> String? {
+    /// 検知のセリフは、取れた瞬間ではなくペットの吹き出しが出る瞬間に鳴らしたい。
+    /// そのため取得だけをここで済ませ、音声は `SpokenLine` に載せたまま返す。
+    ///
+    /// - Returns: 作れたセリフ。作れなかったときは `nil`。
+    public func fetchLine(_ request: SpeechRequest, using client: DaemonClient?) async -> SpokenLine? {
         guard let client else {
             lastError = DaemonError.notRunning.errorDescription
             return nil
@@ -79,9 +85,51 @@ public final class VoiceController: ObservableObject {
             return nil
         }
 
-        let spokenAloud = playIfPossible(line)
-        record(line, spokenAloud: spokenAloud)
+        logScreen(line)
+        logVoice(line)
+        // 実際に鳴らすのは呼び出し側なので、ここでは音声が付いてきたかどうかを記録する。
+        record(line, spokenAloud: line.audioData != nil)
+        return line
+    }
+
+    /// 状況を渡してセリフを作らせ、音声があればその場で鳴らす。
+    ///
+    /// - Returns: 喋った(または表示した)セリフ。作れなかったときは `nil`。
+    @discardableResult
+    public func speak(_ request: SpeechRequest, using client: DaemonClient?) async -> String? {
+        guard let line = await fetchLine(request, using: client) else { return nil }
+        if !playIfPossible(line) {
+            Self.logger.warning("鳴らせなかった: \(line.text, privacy: .public)")
+        }
         return line.text
+    }
+
+    /// 画面を読ませた結果をログに残す。
+    ///
+    /// セリフだけ見ても「何を見て言ったのか」が分からない。読めなかったときも
+    /// 黙って画面情報なしのセリフになるだけなので、理由を残さないと気付けない。
+    private func logScreen(_ line: SpokenLine) {
+        if let screen = line.screen {
+            Self.logger.info(
+                "画面: \(screen.app ?? "不明", privacy: .public) / \(screen.category, privacy: .public) / \(screen.activity, privacy: .public)"
+            )
+        }
+        if let screenError = line.screenError {
+            Self.logger.warning("画面を読めなかった: \(screenError, privacy: .public)")
+        }
+    }
+
+    /// セリフと音声がどう作られたかをログに残す。
+    ///
+    /// 音声が付いてこなくても、固定文言に落ちても、画面には同じようにセリフが並ぶ。
+    /// 理由を残さないと「なぜか喋らない」で終わってしまう。
+    private func logVoice(_ line: SpokenLine) {
+        if let audioError = line.audioError {
+            Self.logger.warning("音声が付いてこなかった: \(audioError, privacy: .public)")
+        }
+        if let fallbackReason = line.fallbackReason {
+            Self.logger.info("固定文言に落ちた: \(fallbackReason, privacy: .public)")
+        }
     }
 
     /// 喋っている途中で止める。オーバーレイの解除などから使う。
@@ -124,7 +172,9 @@ public final class VoiceController: ObservableObject {
                 fromLLM: line.fromLLM,
                 spokenAloud: spokenAloud,
                 note: line.audioError ?? line.fallbackReason,
-                at: Date()
+                at: Date(),
+                screen: line.screen,
+                screenError: line.screenError
             ),
             at: 0
         )

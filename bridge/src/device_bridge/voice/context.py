@@ -44,8 +44,10 @@ class SpeechContext:
 
     :param idle_seconds: Mac が無操作だった秒数。
     :param escalation: 当たりの強さ。
-    :param frontmost_app: 直前まで前面にあったアプリ名。分からなければ ``None``。
+    :param frontmost_app: 直前まで Mac で前面にあったアプリ名。分からなければ ``None``。
     :param iphone: iPhone の様子。
+    :param iphone_app: iPhone で開いているアプリ名(表示名、無ければ bundle ID)。
+        分からなければ ``None``。
     :param vision: 写真から付けたラベル。
     """
 
@@ -53,6 +55,7 @@ class SpeechContext:
     escalation: Escalation = Escalation.NUDGE
     frontmost_app: str | None = None
     iphone: IPhoneState = IPhoneState.UNREACHABLE
+    iphone_app: str | None = None
     vision: VisionLabel = VisionLabel.UNKNOWN
 
     def __post_init__(self) -> None:
@@ -69,9 +72,14 @@ class SpeechContext:
 
     def describe(self) -> str:
         """LLM に渡す 1 行の状況説明。"""
+        iphone_text = f"iPhone は{_IPHONE_TEXT[self.iphone]}"
+        # 触っていないときのアプリ名は「さっき何を見ていたか」でしかなく、
+        # セリフの根拠にならないので触れない。
+        if self.iphone_app and self.iphone is IPhoneState.ACTIVE:
+            iphone_text = f"{iphone_text}(開いているのは {self.iphone_app})"
         parts = [
             f"Mac が {self.idle_phrase} 無操作",
-            f"iPhone は{_IPHONE_TEXT[self.iphone]}",
+            iphone_text,
             f"様子は{_VISION_TEXT[self.vision]}",
             f"当たりの強さは{_ESCALATION_TEXT[self.escalation]}",
         ]

@@ -275,11 +275,17 @@ make run   # 「権限の確認」ウィンドウが出るので、まとめて�
 ペットの発話は `bridge/` 側で作る。macOS 側は「状況を渡す」「返ってきた WAV を鳴らす」だけ。
 
 ```
-Swift ──POST /voice/speak（状況）──▶ Python
-                                    ├ Claude API でセリフ生成
+Swift ──POST /voice/speak（状況・iPhone 操作中ならスクショ）──▶ Python
+                                    ├ スクショあり → Gemini が画面を読んでセリフ
+                                    ├ それ以外・読めなかった → Claude API でセリフ生成
                                     └ VOICEVOX で WAV 合成
-      ◀── {text, audio(base64), ...} ─┘
+      ◀── {text, screen, audio(base64), ...} ─┘
 ```
+
+スクショを添えるのは、**iPhone 操作中（`iphone == active`）のサボりで証拠のスクショを撮れたとき**だけ。
+Mac のカメラ写真は顔しか写らないので送らない。手で試すときは「撮影」タブで iPhone のスクショを
+撮ってから「この画面を読ませて喋らせる」を押すと、同じ経路を 1 回だけ通せる（読み取れた内容と、
+読めなかった理由がその場に出る）。
 
 **片方が欠けても止まらないことを最優先にしている。** サボりを検知したのに、喋れないせいで
 撮影も送信も起きない、という壊れ方をさせない。
@@ -288,14 +294,21 @@ Swift ──POST /voice/speak（状況）──▶ Python
 | --- | --- |
 | `ANTHROPIC_API_KEY` 未設定 | 状況別の固定文言で喋る（`from_llm: false`） |
 | Claude API が遅い / 失敗 | 待たずに固定文言へ切り替える（既定 4 秒で打ち切り） |
+| `GEMINI_API_KEY` 未設定 | 画面は読まず、従来どおり Claude のセリフになる |
+| Gemini が遅い / 失敗 | Claude → 固定文言の順に落ちる（既定 6 秒で打ち切り） |
 | VOICEVOX が未起動 | 音声は `null`。セリフは返るので吹き出しには出る |
 
 ### セットアップ
 
 1. [VOICEVOX](https://voicevox.hiroshiba.jp/) をインストールして起動する（既定 `http://127.0.0.1:50021`）
 2. `cp bridge/.env.example bridge/.env` して `ANTHROPIC_API_KEY` を入れる
+3. iPhone の画面まで読ませるなら、同じ `.env` に `GEMINI_API_KEY` を入れる
 
-どちらも任意。入れなくてもアプリは動く。「セリフと声」タブに、いま何が足りないかが出る。
+どれも任意。入れなくてもアプリは動く（`GEMINI_API_KEY` が無ければ画面は読まず、従来どおり
+Claude / 固定文言になる）。「セリフと声」タブに、いま何が足りないかが出る。
+
+画面を読ませると 1 回およそ $0.0003（画像は medium で 560 トークン固定 + 短い JSON。
+[料金](https://ai.google.dev/gemini-api/docs/pricing)）。スクショは Gemini API に送られる。
 
 ### 設定（`bridge/.env`）
 
@@ -303,6 +316,9 @@ Swift ──POST /voice/speak（状況）──▶ Python
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | なし | セリフ生成。未設定なら固定文言 |
 | `MIHARI_LLM_MODEL` | `claude-haiku-4-5` | 喋り出しの速さを優先した既定。品質重視なら `claude-opus-5` |
+| `GEMINI_API_KEY` | なし | iPhone のスクショを読む。`GOOGLE_API_KEY` でも可。未設定なら画面を読まない |
+| `MIHARI_SCREEN_MODEL` | `gemini-3.1-flash-lite` | 画面を読むモデル。ここも喋り出しの速さ優先 |
+| `MIHARI_SCREEN_MEDIA_RESOLUTION` | `medium` | スクショを送る解像度（`low` / `medium` / `high`）。上げるのは読み違いが多いときだけ |
 | `MIHARI_VOICEVOX_URL` | `http://127.0.0.1:50021` | エンジンの場所 |
 | `MIHARI_VOICEVOX_SPEAKER` | `14` | 話者 ID。`/speakers` で一覧を引ける。既定の 14 は冥鳴ひまり |
 | `MIHARI_VOICEVOX_SPEED` | `1.1` | 話す速さ（`speedScale`）。1.0 がエンジンの既定 |
@@ -329,8 +345,9 @@ Swift ──POST /voice/speak（状況）──▶ Python
 
 ### キャラの口調を変える
 
-`bridge/src/device_bridge/voice/generator.py` の `SYSTEM_PROMPT` を書き換える。
-固定文言は `bridge/src/device_bridge/voice/fallback.py`。
+Claude と Gemini に共通の「守ること」は `bridge/src/device_bridge/voice/persona.py` の `PERSONA_RULES`。
+Claude 向けの前置きは `voice/generator.py` の `SYSTEM_PROMPT`、スクショを見るときの指示は
+`voice/screen_reader.py` の `SYSTEM_PROMPT`。固定文言は `voice/fallback.py`。
 
 ## Discord
 

@@ -19,6 +19,16 @@ enum PetScale: CGFloat, CaseIterable, Identifiable {
     }
 }
 
+/// セリフをどう読み上げるか。
+public enum SpeechVoice {
+    /// 読み上げない。吹き出しだけ出す。
+    case none
+    /// その場で VOICEVOX に合成させて読み上げる。ひとりごと扱いなので検知のセリフには譲る。
+    case chatter
+    /// すでに用意してある WAV を鳴らす。検知のセリフ扱いで、ひとりごとには割り込む。
+    case prepared(Data)
+}
+
 /// デスクトップペットの表示状態とふるまいをまとめて管理する。
 ///
 /// 検知エンジンからのイベントは `LivePetPresenter` が解釈し、ここへは
@@ -52,6 +62,8 @@ public final class PetController {
     private(set) var loadErrorMessage: String?
     /// 直近に種類を指定して言おうとしたセリフの種類。ペットを出していないあいだは実際には喋らない。テストからの観測点。
     @ObservationIgnored private(set) var lastSpokenKind: PetSpeechLines.Kind?
+    /// 直近に鳴らそうとした、用意済みの音声。どの瞬間に鳴らしたかを見るテストからの観測点。
+    @ObservationIgnored private(set) var lastPreparedAudio: Data?
     /// ペットを右クリックしたときに出すメニュー。アプリ側が `PetContextMenu` で組み立てて差し込む。
     public var contextMenuBuilder: (@MainActor () -> NSMenu)?
 
@@ -63,7 +75,7 @@ public final class PetController {
     @ObservationIgnored private let voice: PetVoice
     @ObservationIgnored private var speechTimer: Timer?
     /// いま喋っているあいだに来たセリフ。言い終わってから続けて言う。
-    @ObservationIgnored private var pendingSpeech: (text: String, duration: TimeInterval, voiced: Bool)?
+    @ObservationIgnored private var pendingSpeech: (text: String, duration: TimeInterval, voice: SpeechVoice)?
     @ObservationIgnored private var lastSpeechAt: Date?
     /// 問いかけの回答を受け取るコールバック。答えた時点で捨てて、二度は呼ばない。
     @ObservationIgnored private var promptAnswer: ((Bool) -> Void)?
@@ -305,16 +317,22 @@ public final class PetController {
     ///
     /// - Parameters:
     ///   - duration: 吹き出しを出しておく時間。nil なら文字数から決める。
-    ///   - voiced: VOICEVOX で読み上げるか。検知エンジンのセリフは音声を別経路で鳴らすので false にする。
-    public func say(_ text: String, duration: TimeInterval? = nil, voiced: Bool = true) {
+    ///   - voice: どう読み上げるか。検知エンジンのセリフは用意済みの音声を `.prepared` で渡す。
+    public func say(_ text: String, duration: TimeInterval? = nil, voice speechVoice: SpeechVoice = .chatter) {
         let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isAwake, !line.isEmpty, let window else { return }
+        guard !line.isEmpty else { return }
+        guard isAwake, let window else {
+            // 吹き出しは出せないが、用意済みの音声はここで鳴らす。
+            // ペットをしまっていても検知の声は聞こえる、という従来の挙動を保つため。
+            playPrepared(speechVoice)
+            return
+        }
         let duration = duration ?? Self.speechDuration(for: line)
 
         // 問いかけを出しているあいだは割り込まず、閉じてから言う。
         // 喋っている最中も同じく、言い終わってから続けて言う。
         guard promptQuestion == nil, speechText == nil else {
-            pendingSpeech = (line, duration, voiced)
+            pendingSpeech = (line, duration, speechVoice)
             return
         }
 
@@ -327,17 +345,45 @@ public final class PetController {
         panel.show(text: line, above: window, animated: !isReduceMotionEnabled)
         scheduleSpeechTimer(duration: duration)
 
-        // 読み上げを切っているあいだ、または音声を別経路で鳴らすときは吹き出しだけ出す。
-        guard isVoiceEnabled, voiced else { return }
+        // 読み上げを切っているあいだは吹き出しだけ出す。
+        guard isVoiceEnabled else { return }
 
-        Task { [weak self] in
-            guard let self else { return }
-            guard let audioDuration = await voice.speak(line) else { return }
-            // 吹き出しが音声より先に消えないよう、音声の長さに合わせて表示時間を延ばす。
-            guard speechText == line else { return }
-            let extended = audioDuration + Self.speechAudioTrailingSeconds
-            if extended > duration { scheduleSpeechTimer(duration: extended) }
+        switch speechVoice {
+        case .none:
+            return
+        case .prepared:
+            // 用意済みの音声は、吹き出しを出したこの瞬間に鳴らす。
+            guard let audioDuration = playPrepared(speechVoice) else { return }
+            extendSpeech(for: line, audioDuration: audioDuration, over: duration)
+        case .chatter:
+            Task { [weak self] in
+                guard let self else { return }
+                guard let audioDuration = await voice.speak(line) else { return }
+                extendSpeech(for: line, audioDuration: audioDuration, over: duration)
+            }
         }
+    }
+
+    /// 用意済みの音声があれば鳴らし、その長さを返す。読み上げを切っていれば鳴らさない。
+    @discardableResult
+    private func playPrepared(_ speechVoice: SpeechVoice) -> TimeInterval? {
+        guard isVoiceEnabled, case .prepared(let wav) = speechVoice else { return nil }
+        lastPreparedAudio = wav
+        return voice.playPrepared(wav)
+    }
+
+    /// 吹き出しが音声より先に消えないよう、音声の長さに合わせて表示時間を延ばす。
+    private func extendSpeech(for line: String, audioDuration: TimeInterval, over duration: TimeInterval) {
+        guard speechText == line else { return }
+        let extended = audioDuration + Self.speechAudioTrailingSeconds
+        if extended > duration { scheduleSpeechTimer(duration: extended) }
+    }
+
+    /// 読み上げの有無だけを指定してセリフを出す。
+    ///
+    /// - Parameter voiced: VOICEVOX で読み上げるか。
+    public func say(_ text: String, duration: TimeInterval? = nil, voiced: Bool) {
+        say(text, duration: duration, voice: voiced ? .chatter : .none)
     }
 
     /// 種類に応じたセリフをランダムに 1 つ選んで言う。候補が無ければ何もしない。
@@ -408,7 +454,7 @@ public final class PetController {
     private func speakPendingSpeech() {
         guard isAwake, let next = pendingSpeech else { return }
         pendingSpeech = nil
-        say(next.text, duration: next.duration, voiced: next.voiced)
+        say(next.text, duration: next.duration, voice: next.voice)
     }
 
     /// 表示時間が過ぎたら吹き出しを消すタイマーを張り直す。

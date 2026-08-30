@@ -12,10 +12,20 @@ public final class DaemonProcess: @unchecked Sendable {
     /// 起動後、ポート通知を待つ上限。uv の初回同期が走ると時間がかかるため長めに取る。
     public static let announcementTimeout: Duration = .seconds(60)
 
+    /// 手元に残す stderr の行数。起動に失敗した理由を出すのに足りればよい。
+    public static let stderrTailLines = 50
+
+    /// 終了を待つ上限。これを過ぎたら SIGKILL に切り替える。
+    public static let terminationTimeout: TimeInterval = 5
+
     private let process = Process()
     private let stdinPipe = Pipe()
     private let stdoutPipe = Pipe()
     private let stderrPipe = Pipe()
+
+    /// stderr は読み出しハンドラ(別スレッド)と `drainStandardError()` の両方から触る。
+    private let stderrLock = NSLock()
+    private var stderrLog = DaemonStderrLog(capacity: DaemonProcess.stderrTailLines)
 
     public let token: String
     public private(set) var announcement: DaemonAnnouncement?
@@ -53,6 +63,7 @@ public final class DaemonProcess: @unchecked Sendable {
         } catch {
             throw DaemonError.launchFailed(message: error.localizedDescription)
         }
+        startDrainingStandardError()
 
         let announcement = try await readAnnouncement()
         self.announcement = announcement
@@ -61,17 +72,88 @@ public final class DaemonProcess: @unchecked Sendable {
     }
 
     /// 終了させる。すでに落ちていれば何もしない。
+    ///
+    /// `applicationWillTerminate` から同期的に呼ばれるため、この関数は同期のまま
+    /// 終わるところまで見届ける。落ちきらないうちにアプリが消えると、ポートを掴んだ
+    /// デーモンだけが残る。
     public func terminate() {
         guard process.isRunning else { return }
+
+        let uvPID = process.processIdentifier
+        let pythonPID = announcement.map { Int32($0.pid) }
+
         // stdin を閉じると Python 側が自分から終わる。届かない場合に備えて SIGTERM も送る。
         try? stdinPipe.fileHandleForWriting.close()
         process.terminate()
+        // uv への SIGTERM は uv 止まりのことがある。ポート通知で受け取った Python の
+        // pid にも直接送らないと、子だけが生き残ってポートを掴んだままになる。
+        if let pythonPID, pythonPID > 0 {
+            kill(pythonPID, SIGTERM)
+        }
+
+        if waitForExit(within: Self.terminationTimeout) {
+            Self.logger.info("daemon を正常終了させた: status=\(self.process.terminationStatus, privacy: .public)")
+            return
+        }
+
+        Self.logger.error(
+            "daemon が \(Self.terminationTimeout, privacy: .public) 秒待っても終わらないので強制終了する"
+        )
+        kill(uvPID, SIGKILL)
+        if let pythonPID, pythonPID > 0 {
+            kill(pythonPID, SIGKILL)
+        }
     }
 
-    /// stderr に溜まった内容。起動に失敗した理由を出すために使う。
+    /// これまでに拾った stderr の直近ぶん。起動に失敗した理由を出すために使う。
     public func drainStandardError() -> String {
-        let data = stderrPipe.fileHandleForReading.availableData
-        return String(data: data, encoding: .utf8) ?? ""
+        withStderrLog { $0.recentText }
+    }
+
+    /// stderr を読み続け、行ごとに unified log へ流す。
+    ///
+    /// 誰も読まないとパイプのバッファ(64KB)が埋まった時点で子プロセスが書き込みで
+    /// 止まる。読み続けることが、記録を残すことと詰まりの予防を兼ねる。
+    private func startDrainingStandardError() {
+        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            guard let self else {
+                handle.readabilityHandler = nil
+                return
+            }
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else {
+                // EOF。子プロセスが stderr を閉じた。改行の付かないまま残った行を吐いて手を引く。
+                handle.readabilityHandler = nil
+                let leftover = self.withStderrLog { $0.flush() }
+                Self.emit(lines: leftover.map { [$0] } ?? [])
+                return
+            }
+            Self.emit(lines: self.withStderrLog { $0.consume(chunk: chunk) })
+        }
+    }
+
+    private static func emit(lines: [String]) {
+        for line in lines {
+            logger.info("daemon stderr: \(line, privacy: .public)")
+        }
+    }
+
+    private func withStderrLog<T>(_ body: (inout DaemonStderrLog) -> T) -> T {
+        stderrLock.lock()
+        defer { stderrLock.unlock() }
+        return body(&stderrLog)
+    }
+
+    /// 終了するまで待つ。時間内に終わらなければ `false`。
+    private func waitForExit(within timeout: TimeInterval) -> Bool {
+        let process = self.process
+        let done = DispatchSemaphore(value: 0)
+        // `waitUntilExit()` は終わるまで戻らないので、別スレッドに待たせて手元は期限付きで待つ。
+        DispatchQueue.global().async {
+            process.waitUntilExit()
+            done.signal()
+        }
+        return done.wait(timeout: .now() + timeout) == .success
     }
 
     private func readAnnouncement() async throws -> DaemonAnnouncement {

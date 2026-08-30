@@ -62,6 +62,11 @@ public struct PetEvent: Sendable {
     public let escalationStage: Int
     /// 吹き出しに表示するセリフ。空文字なら吹き出しは出さない。
     public let line: String
+    /// セリフの読み上げ用の音声(WAV)。付いていなければ `nil`。
+    ///
+    /// 取れた瞬間に鳴らすと、吹き出しを待たせているあいだに声だけ先に出てしまう。
+    /// 鳴らすのはペット側に任せ、ここでは吹き出しと一緒に運ぶだけにする。
+    public let audio: Data?
     /// 直近の撮影画像に付いた Vision のラベル。
     public let visionLabel: VisionLabel
     /// はい/いいえ の問いかけ。問いかけが無いイベントでは `nil`。
@@ -71,6 +76,7 @@ public struct PetEvent: Sendable {
         state: SaboriState,
         escalationStage: Int,
         line: String,
+        audio: Data? = nil,
         visionLabel: VisionLabel = .none,
         prompt: PetYesNoPrompt? = nil
     ) {
@@ -78,6 +84,7 @@ public struct PetEvent: Sendable {
         // 負の段階は意味を持たないため 0 に丸める。呼び出し側の計算ミスを黙って吸収する。
         self.escalationStage = max(escalationStage, Self.minimumEscalationStage)
         self.line = line
+        self.audio = audio
         self.visionLabel = visionLabel
         self.prompt = prompt
     }

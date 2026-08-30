@@ -48,6 +48,35 @@ struct SpeechRequestTests {
         #expect(request.iphone == .unreachable)
         #expect(request.vision == .unknown)
         #expect(request.frontmostApp == nil)
+        #expect(request.iphoneApp == nil)
+        #expect(request.screenshotPNG == nil)
+    }
+
+    @Test("iPhone で開いているアプリは iphone_app に乗せる")
+    func encodesIPhoneApp() throws {
+        let json = try encode(SpeechRequest(idleSeconds: 0, iphone: .active, iphoneApp: "YouTube"))
+        #expect(json["iphone_app"] as? String == "YouTube")
+    }
+
+    @Test("iPhone のアプリが分からなければキーごと出さない")
+    func omitsIPhoneAppKeyWhenNil() throws {
+        // 古いデーモンには無いキーなので、空文字を送って「不明」を上書きしない。
+        let json = try encode(SpeechRequest(idleSeconds: 0, iphone: .active))
+        #expect(json["iphone_app"] == nil)
+    }
+
+    @Test("スクショは screenshot_png に base64 で乗せる")
+    func encodesScreenshotAsBase64() throws {
+        let png = Data([0x89, 0x50, 0x4E, 0x47])
+        let json = try encode(SpeechRequest(idleSeconds: 0, screenshotPNG: png))
+        #expect(json["screenshot_png"] as? String == png.base64EncodedString())
+    }
+
+    @Test("スクショが無ければキーごと出さない")
+    func omitsScreenshotKeyWhenNil() throws {
+        // 空文字を送ると向こうが「読めない画像が来た」と扱ってしまう。キーごと落とす。
+        let json = try encode(SpeechRequest(idleSeconds: 0))
+        #expect(json["screenshot_png"] == nil)
     }
 }
 
@@ -86,6 +115,35 @@ struct SpokenLineTests {
             #"{"text":"やあ","from_llm":true,"fallback_reason":null,"audio":"@@@","audio_error":null}"#
         )
         #expect(line.audioData == nil)
+    }
+
+    @Test("読み取れた画面を読む")
+    func decodesScreenReading() throws {
+        let line = try decode(
+            #"{"text":"YouTube 見てるでしょ","from_llm":true,"audio":null,"screen":{"app":"YouTube","activity":"動画を見ている","category":"slacking"},"screen_error":null}"#
+        )
+        #expect(line.screen?.app == "YouTube")
+        #expect(line.screen?.activity == "動画を見ている")
+        #expect(line.screen?.category == "slacking")
+        #expect(line.screenError == nil)
+    }
+
+    @Test("読めなかった理由も読む")
+    func decodesScreenError() throws {
+        let line = try decode(
+            #"{"text":"やあ","from_llm":true,"audio":null,"screen":null,"screen_error":"キー未設定"}"#
+        )
+        #expect(line.screen == nil)
+        #expect(line.screenError == "キー未設定")
+    }
+
+    @Test("画面のフィールドが無い応答も読める")
+    func decodesWithoutScreenFields() throws {
+        // 古いデーモンに繋いだだけで喋れなくなるのは困る。
+        let line = try decode(#"{"text":"やあ","from_llm":true,"audio":null}"#)
+        #expect(line.text == "やあ")
+        #expect(line.screen == nil)
+        #expect(line.screenError == nil)
     }
 }
 

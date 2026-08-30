@@ -10,6 +10,7 @@ import anthropic
 
 from device_bridge.voice.context import SpeechContext
 from device_bridge.voice.fallback import fallback_line
+from device_bridge.voice.persona import PERSONA_RULES
 
 logger = logging.getLogger(__name__)
 
@@ -21,20 +22,16 @@ DEFAULT_MODEL = "claude-haiku-4-5"
 #: ペットの返しが遅いと会話として成立しないため、短く切る。
 DEFAULT_TIMEOUT_SECONDS = 4.0
 
-#: セリフは 1〜2 文なので出力は短くてよい。
-MAX_TOKENS = 200
+#: セリフは 1 文なので出力は短くてよい。
+MAX_TOKENS = 100
 
-#: キャラの口調。ここを変えるとペットの性格が変わる。
-SYSTEM_PROMPT = """\
+#: キャラの口調。守ることは `persona` と共有し、画面読み取り側と口調をそろえる。
+SYSTEM_PROMPT = f"""\
 あなたは macOS 常駐アプリ「Mihari」のマスコットです。
 ユーザーがサボっているのを見つけて話しかけます。
 
 守ること:
-- 出力はセリフ本文のみ。前置き・説明・鉤括弧・絵文字は付けない。
-- 1〜2 文、合計 60 文字以内。読み上げるので短くする。
-- 皮肉混じりだが、人格否定・侮辱・脅迫はしない。あくまで軽口。
-- 与えられた状況に具体的に触れる。毎回違う言い回しにする。
-- 日本語で書く。
+{PERSONA_RULES}
 """
 
 

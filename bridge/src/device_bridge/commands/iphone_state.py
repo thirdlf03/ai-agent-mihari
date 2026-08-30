@@ -9,7 +9,15 @@ IORegistry が読めない機種では従来どおり ``IDLE``(未操作)から�
 一度も発火せず、消灯時も点灯時も同じ ``hasBlankedScreen`` が来たため。通知だけでは
 遷移の向きが分からず ``ACTIVE`` になる経路が無い。
 
-実機との通信(notification_proxy の購読・diagnostics の IORegistry / バッテリー取得)は
+iPhone で前面にあるアプリは、SpringBoard が切り替えのたびに吐く
+``Foreground Processes And Scenes:`` のログ行(pid を SpringBoard に絞った syslog)から取る。
+os_trace_relay も lockdown サービスなので DeveloperDiskImage のマウントは要らない。ただし
+1 接続で 1 リクエストしか受け付けず、pid 一覧の取得と syslog の購読を同じ接続で続けると
+端末側から切られるため、接続を分ける必要がある(その扱いは ``iphone_state_source`` 側)。
+本モジュールが持つのは、ログ 1 行を解釈する ``parse_foreground_apps`` だけ。
+
+実機との通信(notification_proxy の購読・diagnostics の IORegistry / バッテリー取得、
+os_trace の syslog 購読、installation_proxy の表示名引き)は
 ``iphone_state_source.LiveDeviceStateSource`` に隔離してあり、このモジュールは
 それを差し替え可能にする ``DeviceStateSource`` プロトコルにしか依存しない。
 実機が無い環境でも本モジュールは import・実行でき、テストでは
@@ -20,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -54,6 +63,12 @@ BATTERY_POLL_INTERVAL = 30.0
 #: デバイスが見つからない・観測が切れたときの再接続間隔(秒)。
 RECONNECT_INTERVAL = 5.0
 
+#: SpringBoard が前面アプリの一覧を吐くログ行の目印。この文字列を含まない行は捨てる。
+FOREGROUND_LOG_MARKER = "Foreground Processes And Scenes:"
+
+# 目印の行に並ぶ ``app<com.example.app>`` から bundle ID だけを取り出す。
+_FOREGROUND_APP_PATTERN = re.compile(r"app<([A-Za-z0-9_.\-]+)>")
+
 
 class IphoneActivity(StrEnum):
     """Swift 側がサボり判定の分岐に使う 3 値の正規化状態。"""
@@ -71,6 +86,8 @@ class IphoneStateSnapshot:
     udid: str | None = None
     battery_level: float | None = None
     battery_charging: bool | None = None
+    foreground_bundle_id: str | None = None
+    foreground_app_name: str | None = None
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def to_payload(self) -> dict[str, Any]:
@@ -80,6 +97,8 @@ class IphoneStateSnapshot:
             "udid": self.udid,
             "battery_level": self.battery_level,
             "battery_charging": self.battery_charging,
+            "foreground_bundle_id": self.foreground_bundle_id,
+            "foreground_app_name": self.foreground_app_name,
             "updated_at": self.updated_at.isoformat(),
         }
 
@@ -148,12 +167,27 @@ def resolve_activity(
     return previous
 
 
+def parse_foreground_apps(message: str) -> tuple[str, ...] | None:
+    """SpringBoard のログ 1 行から、前面にあるアプリの bundle ID を取り出す。
+
+    :param message: syslog の 1 行(``SyslogEntry.message``)。
+    :returns: ``FOREGROUND_LOG_MARKER`` を含まない行なら ``None``(前面の情報を持たない行)。
+        含む行なら bundle ID を出現順・重複除去で並べたタプル。ホーム画面やロック中は
+        ``app<...>`` が 1 つも並ばないので空タプルになる。
+    """
+    if FOREGROUND_LOG_MARKER not in message:
+        return None
+    return tuple(dict.fromkeys(_FOREGROUND_APP_PATTERN.findall(message)))
+
+
 def build_snapshot(
     udid: str | None,
     activity: IphoneActivity,
     *,
     battery_level: float | None = None,
     battery_charging: bool | None = None,
+    foreground_bundle_id: str | None = None,
+    foreground_app_name: str | None = None,
 ) -> IphoneStateSnapshot:
     """現在時刻を刻んだスナップショットを作る。"""
     return IphoneStateSnapshot(
@@ -161,6 +195,8 @@ def build_snapshot(
         udid=udid,
         battery_level=battery_level,
         battery_charging=battery_charging,
+        foreground_bundle_id=foreground_bundle_id,
+        foreground_app_name=foreground_app_name,
     )
 
 
@@ -170,9 +206,10 @@ def unresponsive_snapshot(udid: str | None = None) -> IphoneStateSnapshot:
 
 
 class IphoneStateStore:
-    """現在のスナップショットを保持し、``activity`` が変わったときだけ通知する。
+    """現在のスナップショットを保持し、``activity`` か前面アプリが変わったときだけ通知する。
 
-    「状態が変化したときだけ SSE でイベントを流す」を成立させる核。
+    「状態が変化したときだけ SSE でイベントを流す」を成立させる核。iPhone を触ったまま
+    アプリだけを切り替えたときも Swift 側に届けたいので、前面アプリの変化も見ている。
     """
 
     def __init__(self, on_change: Callable[[IphoneStateSnapshot], None] | None = None) -> None:
@@ -188,10 +225,14 @@ class IphoneStateStore:
         """新しいスナップショットを反映する。
 
         :param snapshot: 新しく観測されたスナップショット。
-        :returns: ``activity`` が直前と変わっていれば ``True``。バッテリー値だけの
-            更新など、``activity`` が同じときは ``False`` で ``on_change`` も呼ばない。
+        :returns: ``activity`` か ``foreground_bundle_id`` が直前と変わっていれば ``True``。
+            バッテリー値だけの更新など、どちらも同じときは ``False`` で ``on_change`` も
+            呼ばない。
         """
-        changed = snapshot.activity != self._snapshot.activity
+        changed = (
+            snapshot.activity != self._snapshot.activity
+            or snapshot.foreground_bundle_id != self._snapshot.foreground_bundle_id
+        )
         self._snapshot = snapshot
         if changed and self._on_change is not None:
             self._on_change(snapshot)

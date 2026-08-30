@@ -43,6 +43,12 @@ public struct DaemonClient: Sendable {
     /// 1 本の接続を保つ上限。これを超えたら張り直す。
     static let streamResourceTimeout: TimeInterval = 60 * 60 * 24
 
+    /// セリフ要求を待つ上限。
+    ///
+    /// デーモン側は 20 秒で固定文言に落とすので、それより少し長い値で待つ。
+    /// 既定の 60 秒のままだと、返らないときにアプリがその間ずっと黙って固まる。
+    static let speechTimeout: TimeInterval = 30
+
     public func health() async throws -> DaemonHealth {
         try await get("health", authenticated: false)
     }
@@ -62,12 +68,12 @@ public struct DaemonClient: Sendable {
 
     /// セリフを作り、読み上げ用の音声まで用意させる。
     public func speak(_ request: SpeechRequest) async throws -> SpokenLine {
-        try await post("voice/speak", body: request)
+        try await post("voice/speak", body: request, timeout: Self.speechTimeout)
     }
 
     /// セリフだけを作る。読み上げはしない。
     public func line(for request: SpeechRequest) async throws -> SpokenLine {
-        try await post("voice/line", body: request)
+        try await post("voice/line", body: request, timeout: Self.speechTimeout)
     }
 
     /// セリフ生成と読み上げが使える状態かを問い合わせる。
@@ -163,11 +169,18 @@ public struct DaemonClient: Sendable {
         try await send(makeRequest(path: path, authenticated: authenticated))
     }
 
-    private func post<Body: Encodable, T: Decodable>(_ path: String, body: Body) async throws -> T {
+    private func post<Body: Encodable, T: Decodable>(
+        _ path: String,
+        body: Body,
+        timeout: TimeInterval? = nil
+    ) async throws -> T {
         var request = try makeRequest(path: path, authenticated: true)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
+        if let timeout {
+            request.timeoutInterval = timeout
+        }
         return try await send(request)
     }
 
@@ -301,6 +314,10 @@ public struct IPhoneStateResponse: Decodable, Sendable {
     public let udid: String?
     public let batteryLevel: Double?
     public let batteryCharging: Bool?
+    /// iPhone で前面にあるアプリの bundle ID。読めなければ `nil`。
+    public let foregroundBundleId: String?
+    /// 同じアプリの表示名(例: "YouTube")。読めなければ `nil`。
+    public let foregroundAppName: String?
     public let updatedAt: String
 
     enum CodingKeys: String, CodingKey {
@@ -308,6 +325,8 @@ public struct IPhoneStateResponse: Decodable, Sendable {
         case udid
         case batteryLevel = "battery_level"
         case batteryCharging = "battery_charging"
+        case foregroundBundleId = "foreground_bundle_id"
+        case foregroundAppName = "foreground_app_name"
         case updatedAt = "updated_at"
     }
 }

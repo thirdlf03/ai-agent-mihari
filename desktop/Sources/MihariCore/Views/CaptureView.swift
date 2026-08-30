@@ -19,6 +19,9 @@ public struct CaptureView: View {
                 if let message = model.errorMessage {
                     errorBox(message)
                 }
+                if model.canReadScreen {
+                    screenReadingSection
+                }
                 previewSection
             }
             .padding(20)
@@ -52,6 +55,12 @@ public struct CaptureView: View {
                     .disabled(isBusy)
             }
 
+            if model.canReadScreen {
+                Button("この画面を読ませて喋らせる") { Task { await model.readIPhoneScreenAloud() } }
+                    // まだ撮っていなければ送るものが無い。
+                    .disabled(isBusy || model.lastIPhonePNG == nil)
+            }
+
             if model.lastArtifact != nil {
                 Button("削除", role: .destructive) { model.deleteLastArtifact() }
             }
@@ -65,8 +74,34 @@ public struct CaptureView: View {
     }
 
     /// どれか 1 つでも撮影中なら、全部のボタンを止める(結果の置き場が 1 つしかないため)。
+    /// 読ませている最中も同じ扱いにして、その間に撮り直されないようにする。
     private var isBusy: Bool {
         model.isCapturingPhoto || model.isCapturingScreenshot || model.isCapturingIPhone
+            || model.isReadingScreen
+    }
+
+    /// 読ませた結果。セリフと、読めた画面 / 読めなかった理由を並べるだけ。
+    private var screenReadingSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let reading = model.screenReading {
+                Text(reading.text).font(.callout).textSelection(.enabled)
+                if let screen = reading.screen {
+                    Text("画面: \(screen.app ?? "不明") / \(screen.category) / \(screen.activity)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                if let error = reading.screenError {
+                    Text("画面を読めなかった: \(error)").font(.caption).foregroundStyle(.orange)
+                }
+            } else {
+                Text("まだ読ませていない。").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func errorBox(_ message: String) -> some View {

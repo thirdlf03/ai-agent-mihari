@@ -77,6 +77,17 @@ final class PetVoice {
         }
     }
 
+    /// すでに用意してある WAV を検知のセリフとして鳴らす。鳴らせたら音声の長さを返す。
+    ///
+    /// 合成は挟まないので、ペットが吹き出しを出した瞬間にそのまま鳴らせる。
+    /// 検知のセリフ(`.detection`)なので、ひとりごとが鳴っていれば割り込んで差し替える。
+    func playPrepared(_ wav: Data) -> TimeInterval? {
+        guard player.play(wav: wav, priority: .detection) else { return nil }
+        // `SpeechPlayer` は長さを返さないので、鳴らせたときだけ別に測る。
+        // 再生はしないので二重には鳴らない。
+        return (try? AVAudioPlayer(data: wav))?.duration
+    }
+
     /// 再生中のひとりごとを止める。合成中の結果も捨てる。検知のセリフは止めない。
     func stop() {
         generation += 1

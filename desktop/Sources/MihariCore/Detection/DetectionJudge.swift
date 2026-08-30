@@ -44,12 +44,16 @@ public struct DetectionJudge: Sendable {
             )
         }
 
-        // 確定。ただし直前に撮っていれば、声だけかけて撮り直さない。
+        // 確定。ただし直前に撮っていれば撮り直さない。
+        //
+        // iPhone を触っているときのセリフは、撮った画面を読んだものだけにする。
+        // クールダウン中に画面を見ずに喋ると、読んだセリフが固定文言に埋もれる。
+        // カメラ側(寝ている・不在)は撮り直さない間も声をかけ続ける。
         if let sinceEvidence = secondsSinceLastEvidence, sinceEvidence < thresholds.cooldownSeconds {
             return DetectionDecision(
                 state: .confirmed,
                 evidence: .none,
-                shouldSpeak: true,
+                shouldSpeak: signals.iphone != .active,
                 shouldInterrupt: false,
                 reason: "\(seconds: sinceEvidence) 前に証拠を取ったばかり"
             )

@@ -11,6 +11,8 @@ struct DaemonIPhoneStateTests {
         udid: String? = nil,
         batteryLevel: Double? = nil,
         batteryCharging: Bool? = nil,
+        foregroundBundleId: String? = nil,
+        foregroundAppName: String? = nil,
         updatedAt: String = "2026-08-29T12:00:00.000000+00:00"
     ) -> IPhoneStateResponse {
         IPhoneStateResponse(
@@ -18,6 +20,8 @@ struct DaemonIPhoneStateTests {
             udid: udid,
             batteryLevel: batteryLevel,
             batteryCharging: batteryCharging,
+            foregroundBundleId: foregroundBundleId,
+            foregroundAppName: foregroundAppName,
             updatedAt: updatedAt
         )
     }
@@ -42,12 +46,20 @@ struct DaemonIPhoneStateTests {
     @Test("nil でない項目だけを SSE と同じキーで入れる")
     func payloadCarriesOptionalFields() {
         let full = DaemonController.makeIPhoneStateEvent(
-            from: response(udid: "abc123", batteryLevel: 0.5, batteryCharging: true),
+            from: response(
+                udid: "abc123",
+                batteryLevel: 0.5,
+                batteryCharging: true,
+                foregroundBundleId: "com.google.ios.youtube",
+                foregroundAppName: "YouTube"
+            ),
             existing: []
         )
         #expect(full?.payload["udid"] == "abc123")
         #expect(full?.payload["battery_level"] == "0.5")
         #expect(full?.payload["battery_charging"] == "true")
+        #expect(full?.payload["foreground_bundle_id"] == "com.google.ios.youtube")
+        #expect(full?.payload["foreground_app_name"] == "YouTube")
 
         let bare = DaemonController.makeIPhoneStateEvent(from: response(), existing: [])
         #expect(bare?.payload.keys.sorted() == ["activity"])
@@ -106,6 +118,8 @@ struct DaemonIPhoneStateTests {
               "udid": "abc123",
               "battery_level": 0.42,
               "battery_charging": false,
+              "foreground_bundle_id": "com.google.ios.youtube",
+              "foreground_app_name": "YouTube",
               "updated_at": "2026-08-29T12:00:00.000000+00:00"
             }
             """
@@ -115,6 +129,27 @@ struct DaemonIPhoneStateTests {
         #expect(decoded.udid == "abc123")
         #expect(decoded.batteryLevel == 0.42)
         #expect(decoded.batteryCharging == false)
+        #expect(decoded.foregroundBundleId == "com.google.ios.youtube")
+        #expect(decoded.foregroundAppName == "YouTube")
         #expect(decoded.updatedAt == "2026-08-29T12:00:00.000000+00:00")
+    }
+
+    @Test("前面アプリのキーが無い古い応答も読める")
+    func decodesWithoutForegroundKeys() throws {
+        // 古いデーモンに繋いだだけで状態取得が丸ごと落ちるのは困る。
+        let json = """
+            {
+              "activity": "active",
+              "udid": null,
+              "battery_level": null,
+              "battery_charging": null,
+              "updated_at": "2026-08-29T12:00:00.000000+00:00"
+            }
+            """
+        let decoded = try JSONDecoder().decode(IPhoneStateResponse.self, from: Data(json.utf8))
+
+        #expect(decoded.activity == "active")
+        #expect(decoded.foregroundBundleId == nil)
+        #expect(decoded.foregroundAppName == nil)
     }
 }

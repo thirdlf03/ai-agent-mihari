@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import socket
 import stat
@@ -27,6 +28,24 @@ from dotenv import load_dotenv
 
 from device_bridge.daemon.app import create_app
 from device_bridge.daemon.config import DaemonConfig
+
+#: 出力が多くて肝心のログが埋もれるライブラリ。WARNING 以上だけ残す。
+_NOISY_LOGGERS = ("httpx", "httpcore", "google_genai", "discord")
+
+
+def _configure_logging() -> None:
+    """自分たちのログを stderr に出す。
+
+    アプリは子プロセスの stderr を拾って記録する。stdout はポート通知専用なので、
+    ログを 1 行でも混ぜてはいけない。
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def _bind_socket(config: DaemonConfig) -> socket.socket:
@@ -81,6 +100,7 @@ def _exit_when_stdin_closes(server: uvicorn.Server) -> None:
 
 def serve(config: DaemonConfig, *, watch_stdin: bool = True) -> None:
     """デーモンを起動し、終了するまでブロックする。"""
+    _configure_logging()
     # API キーなどは bridge/.env から読む。無くても起動する(セリフが固定文言になるだけ)。
     load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 
@@ -95,6 +115,9 @@ def serve(config: DaemonConfig, *, watch_stdin: bool = True) -> None:
             log_config=None,
             log_level="warning",
             access_log=False,
+            # SSE のような長い接続が残っていても 3 秒で切り上げる。
+            # 上限が無いと、アプリ終了時に接続が閉じるまでプロセスが残り続ける。
+            timeout_graceful_shutdown=3,
         )
     )
 

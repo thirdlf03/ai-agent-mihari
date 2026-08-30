@@ -40,7 +40,7 @@ final class ActionSpy: @unchecked Sendable {
             },
             speak: { [self] request in
                 lock.withLock { _spoken.append(request) }
-                return speechSucceeds ? "喋った" : nil
+                return speechSucceeds ? SpokenSpeech(text: "喋った") : nil
             },
             interrupt: { [self] request in
                 lock.withLock { _interrupted.append(request) }
@@ -138,6 +138,42 @@ struct DetectionEngineTests {
         #expect(spy.posts.first?.2 == "iphone.png")
     }
 
+    @Test("iPhone のスクショはセリフの要求に添えて読ませる")
+    func iphoneScreenshotIsAttachedToTheRequest() async {
+        // 音楽が鳴っていると割り込み経路に入って speak を通らないので、鳴っていない状況にする。
+        let spy = ActionSpy()
+        let engine = engine(idle: 600, spy: spy, music: .silent)
+        engine.iphoneState = .active
+
+        await engine.evaluate()
+
+        #expect(spy.spoken.first?.screenshotPNG == Data("iphone".utf8))
+    }
+
+    @Test("iPhone で開いているアプリはセリフの要求に載せる")
+    func iphoneForegroundAppReachesTheRequest() async {
+        let spy = ActionSpy()
+        let engine = engine(idle: 600, spy: spy, music: .silent)
+        engine.iphoneState = .active
+        engine.iphoneForegroundApp = "YouTube"
+
+        await engine.evaluate()
+
+        #expect(spy.spoken.first?.iphoneApp == "YouTube")
+    }
+
+    @Test("カメラ写真はセリフの要求に添えない")
+    func cameraPhotoIsNotAttachedToTheRequest() async {
+        // 顔しか写っていない写真を読ませても何も出てこない。
+        let spy = ActionSpy()
+        let engine = engine(idle: 600, spy: spy, music: .silent)
+        engine.iphoneState = .unreachable
+
+        await engine.evaluate()
+
+        #expect(spy.spoken.first?.screenshotPNG == nil)
+    }
+
     @Test("Vision のラベル付けはカメラ写真のときだけ走る")
     func visionRunsOnlyForCameraPhotos() async {
         // iPhone の画面に顔は写らない。無駄に走らせない。
@@ -186,6 +222,22 @@ struct DetectionEngineTests {
         #expect(spy.macPhotos == 1)
         #expect(spy.posts.isEmpty)
         #expect(engine.log.first?.outcome.contains("取れなかった") == true)
+    }
+
+    @Test("撮れなければクールダウンを始めず、次の評価で撮り直す")
+    func captureFailureDoesNotStartCooldown() async {
+        // 失敗でクールダウンを始めると、tunneld が不調なだけで 3 分間何も撮らなくなる。
+        let spy = ActionSpy()
+        spy.captureSucceeds = false
+        let engine = engine(idle: 600, spy: spy)
+        engine.iphoneState = .active
+
+        await engine.evaluate()
+        await engine.evaluate()
+
+        #expect(engine.lastEvidenceAt == nil)
+        #expect(spy.iphoneShots == 2)
+        #expect(engine.log.first?.outcome.contains("次の評価で撮り直す") == true)
     }
 
     @Test("送れなくても記録には残る")
