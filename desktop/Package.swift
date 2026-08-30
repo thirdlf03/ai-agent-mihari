@@ -13,6 +13,13 @@ let package = Package(
             dependencies: ["MihariCore"],
             path: "Sources/Mihari"
         ),
+        // 本体(Mihari)の生死を見張り、消えていたら起こす常駐監視。Mihari.app の
+        // Contents/MacOS に本体と並べて置き、ユーザー権限の LaunchAgent(KeepAlive)から起動する。
+        .executableTarget(
+            name: "MihariWatchdog",
+            dependencies: ["MihariCore"],
+            path: "Sources/MihariWatchdog"
+        ),
         .target(
             name: "MihariCore",
             path: "Sources/MihariCore",

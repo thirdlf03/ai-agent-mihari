@@ -158,6 +158,12 @@ public struct DaemonClient: Sendable {
         try await get("iphone/state")
     }
 
+    /// 起動してから何時間は終了できないか。Discord の `/watch lock` で決める。
+    public func lockHours() async throws -> Double {
+        let response: LockHoursResponse = try await get("discord/lock-hours")
+        return response.lockHours
+    }
+
     /// iPhone の画面を 1 枚撮る。PNG のバイト列がそのまま返る。
     public func iphoneScreenshot() async throws -> Data {
         var request = try makeRequest(path: "iphone/screenshot", authenticated: true)
@@ -339,6 +345,15 @@ public struct DeviceSummary: Decodable, Equatable, Sendable, Identifiable {
 
 public struct DeviceListResponse: Decodable, Equatable, Sendable {
     public let devices: [DeviceSummary]
+}
+
+/// `GET /discord/lock-hours` の応答。
+public struct LockHoursResponse: Decodable, Equatable, Sendable {
+    public let lockHours: Double
+
+    enum CodingKeys: String, CodingKey {
+        case lockHours = "lock_hours"
+    }
 }
 
 /// `GET /iphone/state` の応答。SSE の `iphone.state` と同じ中身を 1 回だけ取ってくる。

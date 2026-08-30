@@ -120,6 +120,12 @@ async def post_evidence(request: Request, body: dict[str, Any]) -> dict[str, Any
     return {"posted": True, "message_id": message_id}
 
 
+@router.get("/lock-hours")
+def get_lock_hours(request: Request) -> dict[str, Any]:
+    """起動してから何時間は終了できないか。Discord の `/watch lock` で決める。"""
+    return {"lock_hours": request.app.state.discord.lock_hours}
+
+
 @router.get("/schedule")
 async def schedule_status(request: Request) -> dict[str, Any]:
     return request.app.state.watch_scheduler.status()

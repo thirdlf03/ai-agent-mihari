@@ -38,6 +38,7 @@ class _StubService:
         self.selection = selection
         self.last_error = error
         self.mention_user_id: str | None = None
+        self.lock_hours: float = 4.0
         self.posted: list[tuple[str, bytes | None, str]] = []
         self.selected: list[ChannelSelection] = []
 
@@ -198,6 +199,17 @@ def test_status_reports_the_mention_target(
 
     body = client.get("/discord/status", headers=auth).json()
     assert body["mention_user_id"] == "123456789012345678"
+
+
+def test_lock_hours_are_reported(
+    client: TestClient, auth: dict[str, str], service: _StubService
+) -> None:
+    service.lock_hours = 6.5
+
+    response = client.get("/discord/lock-hours", headers=auth)
+
+    assert response.status_code == 200
+    assert response.json() == {"lock_hours": 6.5}
 
 
 def test_setting_a_mention_target(

@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from device_bridge.discord_bot.settings_store import ChannelSelection, SettingsStore
+from device_bridge.discord_bot.settings_store import (
+    DEFAULT_LOCK_HOURS,
+    ChannelSelection,
+    SettingsStore,
+)
 
 SELECTION = ChannelSelection(guild_id=1, channel_id=2, guild_name="サーバ", channel_name="general")
 
@@ -85,3 +89,34 @@ def test_broken_file_returns_no_mention(tmp_path: Path) -> None:
     store.path.parent.mkdir(parents=True, exist_ok=True)
     store.path.write_text("これは JSON ではない", encoding="utf-8")
     assert store.load_mention_user_id() is None
+
+
+def test_lock_hours_defaults_when_unset(tmp_path: Path) -> None:
+    assert SettingsStore(tmp_path).load_lock_hours() == DEFAULT_LOCK_HOURS
+
+
+def test_lock_hours_are_saved_and_loaded(tmp_path: Path) -> None:
+    store = SettingsStore(tmp_path)
+    store.save_lock_hours(6.5)
+    assert SettingsStore(tmp_path).load_lock_hours() == 6.5
+
+
+def test_lock_hours_falls_back_to_default_when_negative(tmp_path: Path) -> None:
+    store = SettingsStore(tmp_path)
+    store.save_lock_hours(-1)
+    assert store.load_lock_hours() == DEFAULT_LOCK_HOURS
+
+
+def test_lock_hours_falls_back_to_default_when_broken(tmp_path: Path) -> None:
+    store = SettingsStore(tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text("これは JSON ではない", encoding="utf-8")
+    assert store.load_lock_hours() == DEFAULT_LOCK_HOURS
+
+
+def test_lock_hours_do_not_overwrite_channel_selection(tmp_path: Path) -> None:
+    store = SettingsStore(tmp_path)
+    store.save(SELECTION)
+    store.save_lock_hours(6.5)
+    assert store.load() == SELECTION
+    assert store.load_lock_hours() == 6.5
