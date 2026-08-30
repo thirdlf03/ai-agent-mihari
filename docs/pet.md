@@ -103,6 +103,7 @@
 | アニメーションを固定(サブメニュー) | 「固定しない(自律行動)」と `PetAnimation` の 9 種。`setFixedAnimation(_:)`。チェック式 |
 | 1 回だけ再生(サブメニュー) | `PetAnimation` の 9 種。`playOnce(_:)` |
 | 音声(サブメニュー) | 「同封の音声を使う」/「VOICEVOX でその場で生成(live)」。チェック式。再起動なしで効く |
+| 検知の閾値(サブメニュー) | 「標準(疑い 60 秒 / 段ごと 30 秒)」/「短縮(疑い 15 秒 / 段ごと 10 秒・デモ用)」。チェック式。`DetectionThresholds` を `.standard` / `.fast` ごと差し替える |
 | 集中継続の間隔(サブメニュー) | 15 分 / 1 分。チェック式。`DetectionThresholds.focusStreakIntervalSeconds` を差し替える |
 | 集中継続のセリフを再現 | `LivePetPresenter.sayFocusStreak()`。褒めるセリフを 1 本喋らせる |
 | ひとりごとを喋る(声あり) | `say("デバッグのテストです。聞こえていますか?")`。読み上げも通る |
@@ -982,6 +983,7 @@ LLM が使えない・失敗した・遅すぎたときの保険。`fallback_lin
 | `breakDurationSeconds` | 900 秒 | 60 秒 | 休憩 1 回の長さ |
 | `focusStreakIntervalSeconds` | 900 秒 | 60 秒 | 正常が続いているときに褒める間隔 |
 
+- 短縮の側は起動時の `MIHARI_FAST_THRESHOLDS=1` だけでなく、ペットの右クリック →「デバッグ」→「検知の閾値」からも切り替えられる。切り替えは次の評価から効き(進行中の問いかけ・休憩は始めたときの秒数のまま)、「集中継続の間隔」で個別に変えていた値も preset の値に戻る。次回起動には引き継がない
 - `stampGraceSeconds` の既定 300 秒は `AttendanceGrace.defaultGracePeriod`(= 5 × 60)から来ている。**猶予が付くのはメニューの「在席スタンプを押す」だけ**で、疑い 1 の Touch ID に成功しても更新しない
 - 疑い 1 に入ってから晒しに届くまでは、既定で 60 + 30 × 3 = 150 秒(FAST なら 15 + 10 × 3 = 45 秒)
 

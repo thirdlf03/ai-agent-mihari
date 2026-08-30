@@ -78,23 +78,27 @@ public struct DetectionThresholds: Equatable, Sendable {
         min(suspectSeconds, stageIntervalSeconds)
     }
 
-    /// 既定値。
-    ///
-    /// `MIHARI_FAST_THRESHOLDS=1` を付けて起動すると、動作確認用に全部を秒単位まで縮める。
+    /// 標準の値。
+    public static let standard = DetectionThresholds()
+
+    /// 動作確認用に全部を秒単位まで縮めた値。
     /// 1 分待たずに一連の流れが通るかを見られる。デモの調整にも使う。
+    public static let fast = DetectionThresholds(
+        suspectSeconds: 15,
+        stageIntervalSeconds: 10,
+        promptTimeoutSeconds: 8,
+        clingyIntervalSeconds: 15,
+        clingyEvidenceIntervalSeconds: 60,
+        breakDurationSeconds: 60,
+        stampGraceSeconds: 15,
+        focusStreakIntervalSeconds: 60
+    )
+
+    /// 起動時の既定値。
+    ///
+    /// `MIHARI_FAST_THRESHOLDS=1` を付けて起動すると `fast` で始まる。
+    /// 起動したあとはペットの右クリック →「デバッグ」→「検知の閾値」からも切り替えられる。
     public static var `default`: DetectionThresholds {
-        guard ProcessInfo.processInfo.environment["MIHARI_FAST_THRESHOLDS"] == "1" else {
-            return DetectionThresholds()
-        }
-        return DetectionThresholds(
-            suspectSeconds: 15,
-            stageIntervalSeconds: 10,
-            promptTimeoutSeconds: 8,
-            clingyIntervalSeconds: 15,
-            clingyEvidenceIntervalSeconds: 60,
-            breakDurationSeconds: 60,
-            stampGraceSeconds: 15,
-            focusStreakIntervalSeconds: 60
-        )
+        ProcessInfo.processInfo.environment["MIHARI_FAST_THRESHOLDS"] == "1" ? .fast : .standard
     }
 }

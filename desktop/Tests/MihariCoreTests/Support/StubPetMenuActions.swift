@@ -10,6 +10,7 @@ final class StubPetMenuActions: ObservableObject, PetMenuActions {
     var isStatusPanelVisible = false
     var voiceMode: VoiceMode = .bundled
     var focusStreakIntervalSeconds: TimeInterval = 900
+    var isFastThresholds = false
     /// 「集中継続のセリフを再現」が押された回数。
     private(set) var focusStreakReplays = 0
     /// 「実際に進める」で投げられた操作。
@@ -25,6 +26,7 @@ final class StubPetMenuActions: ObservableObject, PetMenuActions {
     func toggleStatusPanel() {}
     func setVoiceMode(_ mode: VoiceMode) { voiceMode = mode }
     func setFocusStreakInterval(_ seconds: TimeInterval) { focusStreakIntervalSeconds = seconds }
+    func setFastThresholds(_ enabled: Bool) { isFastThresholds = enabled }
     func replayFocusStreak() { focusStreakReplays += 1 }
     func runDetectionStep(_ step: DetectionDebugStep) { detectionSteps.append(step) }
 }

@@ -418,6 +418,17 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         objectWillChange.send()
     }
 
+    public var isFastThresholds: Bool {
+        detection.thresholds == .fast
+    }
+
+    /// 検知の閾値を preset ごと差し替える。
+    /// 「集中継続の間隔」で個別に変えていた値も preset の値に戻る。
+    public func setFastThresholds(_ enabled: Bool) {
+        detection.thresholds = enabled ? .fast : .standard
+        objectWillChange.send()
+    }
+
     public func replayFocusStreak() {
         pet.sayFocusStreak()
     }

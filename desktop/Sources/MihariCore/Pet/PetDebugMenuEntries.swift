@@ -9,6 +9,12 @@ import Foundation
 /// **「実際に進める」だけは別物。** 検知エンジンに直接投げるので、本物の遷移・撮影・投稿が走る。
 public enum PetDebugMenuEntries {
 
+    /// 「検知の閾値」に並べる選択肢。`DetectionThresholds` の preset をまるごと差し替える。
+    public static let thresholdPresets: [(title: String, isFast: Bool)] = [
+        ("標準(疑い 60 秒 / 段ごと 30 秒)", false),
+        ("短縮(疑い 15 秒 / 段ごと 10 秒・デモ用)", true),
+    ]
+
     /// 「集中継続の間隔」に並べる選択肢。本来の 15 分と、動かして確かめるための 1 分。
     public static let focusStreakIntervals: [(title: String, seconds: TimeInterval)] = [
         ("15 分", 900),
@@ -54,6 +60,16 @@ public enum PetDebugMenuEntries {
                         title: mode.label,
                         isChecked: actions.voiceMode == mode,
                         action: { actions.setVoiceMode(mode) }
+                    )
+                }
+            ),
+            .submenu(
+                title: "検知の閾値",
+                entries: thresholdPresets.map { choice -> PetMenuEntry in
+                    .item(
+                        title: choice.title,
+                        isChecked: actions.isFastThresholds == choice.isFast,
+                        action: { actions.setFastThresholds(choice.isFast) }
                     )
                 }
             ),

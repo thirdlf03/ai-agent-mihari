@@ -59,6 +59,14 @@ struct PetDebugMenuEntriesTests {
         }
     }
 
+    /// チェックの付いている項目のタイトルだけを並び順に取り出す。
+    private func checkedTitles(_ entries: [PetMenuEntry]) -> [String] {
+        entries.compactMap { entry in
+            if case .item(let title, let isChecked, _) = entry, isChecked { return title }
+            return nil
+        }
+    }
+
     @Test("「アニメーションを固定」は固定を解く項目と 9 種を定義順に並べる")
     func fixedAnimationSubmenuListsEveryAnimation() throws {
         let presenter = makePresenter()
@@ -144,6 +152,29 @@ struct PetDebugMenuEntriesTests {
 
         tap(VoiceMode.live.label, in: PetDebugMenuEntries.make(actions: actions, presenter: presenter))
         #expect(actions.voiceMode == .live)
+    }
+
+    @Test("「検知の閾値」は標準 / 短縮を並べ、いまの preset にチェックを付ける")
+    func thresholdPresetEntriesSwitchThePreset() throws {
+        let presenter = makePresenter()
+        let actions = StubPetMenuActions()
+
+        let submenu = try #require(
+            findSubmenu("検知の閾値", in: PetDebugMenuEntries.make(actions: actions, presenter: presenter))
+        )
+        #expect(itemTitles(submenu) == PetDebugMenuEntries.thresholdPresets.map(\.title))
+        #expect(checkedTitles(submenu) == ["標準(疑い 60 秒 / 段ごと 30 秒)"])
+
+        tap(
+            "短縮(疑い 15 秒 / 段ごと 10 秒・デモ用)",
+            in: PetDebugMenuEntries.make(actions: actions, presenter: presenter)
+        )
+        #expect(actions.isFastThresholds)
+
+        let afterSwitch = try #require(
+            findSubmenu("検知の閾値", in: PetDebugMenuEntries.make(actions: actions, presenter: presenter))
+        )
+        #expect(checkedTitles(afterSwitch) == ["短縮(疑い 15 秒 / 段ごと 10 秒・デモ用)"])
     }
 
     @Test("「集中継続の間隔」は 15 分 / 1 分を切り替える")
