@@ -11,6 +11,11 @@ public enum BundledVoiceKind: String, Sendable, CaseIterable, Identifiable {
     case watchStart
     case breakEnd
     case focusStreak
+    // 在席スタンプの演出(これも `PetSpeechLines.Kind` と同じ名前)。
+    case stampReach
+    case stampTouched
+    case stampMissed
+    case stampTimeout
     // 検知のセリフ。区分の選び方は bridge の `fallback.py` と同じ。
     case nudge
     case warn
@@ -33,6 +38,10 @@ public enum BundledVoiceKind: String, Sendable, CaseIterable, Identifiable {
         case .watchStart: return "監視の開始"
         case .breakEnd: return "休憩明け"
         case .focusStreak: return "集中継続(褒め)"
+        case .stampReach: return "在席スタンプ・指を出す"
+        case .stampTouched: return "在席スタンプ・成功"
+        case .stampMissed: return "在席スタンプ・空振り"
+        case .stampTimeout: return "在席スタンプ・時間切れ"
         case .nudge: return "疑い"
         case .warn: return "確定・声だけ"
         case .expose: return "確定・晒す"

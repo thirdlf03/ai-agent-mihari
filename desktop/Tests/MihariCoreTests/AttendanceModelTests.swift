@@ -9,28 +9,64 @@ import Testing
 struct AttendanceModelTests {
 
     /// 実際の LocalAuthentication を呼ばないスタブ。呼ばれたポリシーを記録する。
+    ///
+    /// `waitsForCancellation` を立てると、指を置かないまま放置された状態を作れる。
+    /// `cancelAuthentication()` が来るまで認証を返さない。
     private final class StubAuthenticator: TouchIDAuthenticating, @unchecked Sendable {
         var biometrics: TouchIDAvailability
         var deviceOwner: TouchIDAvailability
         var authenticateResult: TouchIDAuthenticationResult
-        private(set) var authenticateCalls: [LAPolicy] = []
+        let waitsForCancellation: Bool
+
+        private let lock = NSLock()
+        private var calls: [LAPolicy] = []
+        private var cancels = 0
+        private var isCancelled = false
+        private var pending: CheckedContinuation<TouchIDAuthenticationResult, Never>?
 
         init(
             biometrics: TouchIDAvailability,
             deviceOwner: TouchIDAvailability,
-            authenticateResult: TouchIDAuthenticationResult = .success
+            authenticateResult: TouchIDAuthenticationResult = .success,
+            waitsForCancellation: Bool = false
         ) {
             self.biometrics = biometrics
             self.deviceOwner = deviceOwner
             self.authenticateResult = authenticateResult
+            self.waitsForCancellation = waitsForCancellation
         }
+
+        /// 認証を呼ばれたときのポリシー。
+        var authenticateCalls: [LAPolicy] { lock.withLock { calls } }
+        /// 打ち切られた回数。
+        var cancelCalls: Int { lock.withLock { cancels } }
 
         func biometricsAvailability() -> TouchIDAvailability { biometrics }
         func deviceOwnerAvailability() -> TouchIDAvailability { deviceOwner }
 
         func authenticate(policy: LAPolicy, reason: String) async -> TouchIDAuthenticationResult {
-            authenticateCalls.append(policy)
-            return authenticateResult
+            lock.withLock { calls.append(policy) }
+            guard waitsForCancellation else { return authenticateResult }
+            return await withCheckedContinuation { continuation in
+                // 先に打ち切られていたら、待たずにその場で返す。
+                let alreadyCancelled = lock.withLock { () -> Bool in
+                    if isCancelled { return true }
+                    pending = continuation
+                    return false
+                }
+                if alreadyCancelled { continuation.resume(returning: .failure(message: "打ち切られた")) }
+            }
+        }
+
+        func cancelAuthentication() {
+            let continuation = lock.withLock { () -> CheckedContinuation<TouchIDAuthenticationResult, Never>? in
+                cancels += 1
+                isCancelled = true
+                let waiting = pending
+                pending = nil
+                return waiting
+            }
+            continuation?.resume(returning: .failure(message: "打ち切られた"))
         }
     }
 
@@ -103,6 +139,46 @@ struct AttendanceModelTests {
 
         #expect(model.stamps.isEmpty)
         #expect(model.lastMessage?.contains("キャンセルされた") == true)
+    }
+
+    @Test("指を置かないまま時間切れになったら認証を打ち切り、履歴は増えない")
+    func stampTimesOutWhenAuthenticationNeverReturns() async {
+        let authenticator = StubAuthenticator(
+            biometrics: availability(canEvaluate: true, type: .touchID),
+            deviceOwner: availability(canEvaluate: true, type: .touchID),
+            waitsForCancellation: true
+        )
+        let model = AttendanceModel(
+            store: AttendanceStore(defaults: makeDefaults()),
+            authenticator: authenticator,
+            authenticationTimeout: 0.05
+        )
+
+        let outcome = await model.stamp()
+
+        #expect(outcome == .timedOut)
+        #expect(authenticator.cancelCalls == 1)
+        #expect(model.stamps.isEmpty)
+        #expect(model.lastMessage?.contains("時間切れ") == true)
+    }
+
+    @Test("認証がすぐ返るときは時間切れにならず、打ち切りもしない")
+    func stampDoesNotTimeOutWhenAuthenticationReturns() async {
+        let authenticator = StubAuthenticator(
+            biometrics: availability(canEvaluate: true, type: .touchID),
+            deviceOwner: availability(canEvaluate: true, type: .touchID)
+        )
+        let model = AttendanceModel(
+            store: AttendanceStore(defaults: makeDefaults()),
+            authenticator: authenticator,
+            authenticationTimeout: 0.05
+        )
+
+        let outcome = await model.stamp()
+
+        #expect(outcome == .stamped)
+        #expect(authenticator.cancelCalls == 0)
+        #expect(model.stamps.count == 1)
     }
 
     /// `@Sendable () -> Date` から書き換え可能にするための箱。テストでだけ時刻を進める。

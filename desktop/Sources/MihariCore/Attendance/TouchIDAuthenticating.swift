@@ -31,4 +31,9 @@ public protocol TouchIDAuthenticating: Sendable {
     func deviceOwnerAvailability() -> TouchIDAvailability
     /// 実際に認証ダイアログを出す。
     func authenticate(policy: LAPolicy, reason: String) async -> TouchIDAuthenticationResult
+    /// 出したままの認証ダイアログを閉じる。時間切れで打ち切るときに呼ぶ。
+    ///
+    /// 閉じられた `authenticate(policy:reason:)` は失敗として返ってくる。
+    /// 認証が動いていなければ何もしない。
+    func cancelAuthentication()
 }

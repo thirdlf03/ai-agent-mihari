@@ -80,7 +80,7 @@
 | 項目 | 内容 |
 | --- | --- |
 | 監視を止める / 監視を再開する | `stopWatching()` / `startWatching()`。「止める」は休憩に触れない |
-| 在席スタンプを押す | `stampAttendance()`。Touch ID で在席を証明する |
+| 在席スタンプを押す | `stampAttendance()`。Touch ID で在席を証明する。指を差し出すカットインとセリフの演出が付く(後述) |
 | 休憩する(15 分) / 休憩を終える | `startBreak()` / `endBreak()` |
 | Discord 設定… | `openDiscordSettings()` |
 | 権限の確認… | `openPermissions()` |
@@ -152,6 +152,47 @@ README にあった「しゃべる」「しまう / 起こす」「ペット」�
 デバッグメニューの「集中継続の間隔」で 15 分 / 1 分を切り替えられる。「集中継続のセリフを再現」は
 検知を待たずに 1 本喋らせるだけで、数えている時間には触れない。
 
+## 在席スタンプのカットイン
+
+右クリックメニューの「在席スタンプを押す」(`AppCoordinator.stampAttendance()`)は、スロット台の「女の子と指を合わせる」タッチ演出になっている。ペットが指を差し出し、ユーザーが Touch ID のセンサーに指を置くことで指が合う、という見立て。
+
+| 手順 | 中身 |
+| --- | --- |
+| 開幕 | `waiting` を 1 回 + `stampReach` のセリフ。カットインを `reach.png` でスライドインし、0.45 秒(`cutInLeadInSeconds`)待ってから認証ダイアログを出す |
+| 成功 | `touched.png` に差し替えて白フラッシュ。`jumping` を 1 回 + `stampTouched` |
+| 空振り(失敗・キャンセル) | `failed.png` に差し替え(フラッシュ無し)。`failed` を 1 回 + `stampMissed` |
+| 時間切れ | 空振りと同じ `failed.png` + `failed` の動きで、セリフだけ `stampTimeout` |
+| 退場 | 差し替えから 1.8 秒(`cutInHoldSeconds`)出したままにして、右へスライドアウトしてから閉じる |
+
+結末は 3 通りある。`AttendanceModel.stamp()` が返す `AttendanceStampOutcome` で決まり、`stamped` なら成功、`timedOut` なら時間切れ、`failed` / `unavailable`(生体認証もパスワードも使えない)は空振りとして同じ絵と動きになる。
+
+**認証は 10 秒(`AttendanceModel.defaultAuthenticationTimeout`)で打ち切る。** 指を置かないまま放置されると認証ダイアログもカットインも出たままになるため、`AttendanceModel` が認証と 10 秒のタイマーを競争させ、タイマーが先に来たら `TouchIDAuthenticating.cancelAuthentication()`(本番実装は進行中の `LAContext` を `invalidate()` する)でダイアログを閉じてから `timedOut` を返す。閉じたことで返ってくる認証の失敗(`LAError.appCancel`)は待つだけで、演出には使わない。カットインの点滅は時間切れが近づいても速くならない。
+
+| 区分 | セリフ |
+| --- | --- |
+| `stampReach` | …指、出して。ここ。 |
+| `stampTouched` | …ん。あったかい。ちゃんといるね。 |
+| `stampMissed` | …いない。どこ? ねえ、どこなの? |
+| `stampTimeout` | …来ないんだ。待ってたのに。 |
+
+4 区分ともひとりごとと同じ同封セリフ(`lines.json`)で、`PetController.say(_ kind:)` を通る。`voiceMode == .bundled`(既定)なら対応する `.m4a` をそのまま鳴らし、`live` ならその場で VOICEVOX に合成させる。`speech.json` に同じキーを書けば差し替えられる。
+
+セリフ・動き・絵の対応は画面に触れない `AttendanceCeremonyScript` に置いてあり、`AppCoordinator` はそれを読んで実行するだけ。演出中に押し直しても `isStampCeremonyRunning` で弾く。動きはどれも `playOnce` なので、1 周したら元の状態へ戻る。
+
+### カットイン画像の規約
+
+| 項目 | 値・規則 |
+| --- | --- |
+| 置き場所 | `pets/<id>/cutin/reach.png` / `touched.png` / `failed.png`。`pet.json` には書かず、置いてあるかどうかだけで決まる(`PetDefinition.cutInImageURL`) |
+| 出る条件 | 3 枚とも揃っていて、かつ Touch ID が使える(`isBiometricsAvailable`)とき。パスワードにフォールバックする環境では「指を合わせる」が成立しないので、動きとセリフだけになる |
+| ウィンドウ | `AttendanceCutInWindow`(`NSPanel`、`level = .floating`、`ignoresMouseEvents = true`)。認証ダイアログの操作は必ず下へ通す |
+| 配置 | ペットがいる画面の `visibleFrame` の右下に密着。正方形で、一辺は画面の高さの 50%(上限 900 pt) |
+| TOUCH の文字 | 絵の透明な左側(幅の 3〜33%、高さの 36〜52%)にピンク + 白いグローで出す。待っているあいだは 0.5 秒周期で 1.0 ↔ 0.35 の点滅、成功後は点滅を止めて「OK」、失敗後は消す |
+| アニメーション | 入りは画面の右外からばね(`response: 0.45` / `dampingFraction: 0.8`)、出は 0.3 秒の `easeIn`。成功の白フラッシュは 0.9 → 0 へ 0.35 秒 |
+| 視差効果を減らす | スライドせずフェードだけ(0.25 秒)。文字も点滅しない |
+
+同梱ペット(mauve)の 3 枚は 1536 × 1536 の透過 PNG で、3 枚とも構図を揃えてある(左 36% が透明)。
+
 ## 声
 
 話者は冥鳴ひまり(VOICEVOX の話者 14)で固定。**音声モードが 2 つある。**
@@ -179,7 +220,7 @@ README にあった「しゃべる」「しまう / 起こす」「ペット」�
 - `.detection` は常に `play`。鳴っているものを止めてでも鳴らす
 - `.chatter` は、`.detection` が鳴っていれば `drop`。溜めて後から鳴らすことはしない
 
-検知由来のセリフと在席スタンプの返事は `say(..., voiced: false)` で出すので、`PetVoice` は読み上げない(吹き出しだけ)。
+検知由来のセリフは `say(..., voiced: false)` で出すので、`PetVoice` は読み上げない(吹き出しだけ)。在席スタンプの演出はユーザーが押して始める儀式なので `voiced: true`(`.chatter`)で読み上げる。`.chatter` は検知の声に譲るので、検知のセリフとは取り合いにならない。
 
 ### 同封音声
 
@@ -575,8 +616,10 @@ LLM が使えない・失敗した・遅すぎたときの保険。`fallback_lin
 | 休憩中?…ちゃんと答えて。 | `DetectionEngine.breakQuestion` | 疑いに入った瞬間だけ出す問いかけ |
 | はい / いいえ | `PetSpeechBubbleView` | 問いかけのボタン |
 | {N} 分だけ、待ってる。 | `DetectionEngine.startBreak()` | `breakDurationSeconds / 60` を四捨五入(最小 1)。`state: .normal` で送るので、**吹き出しには出ない**(`LivePetPresenter` が正常時のセリフを捨てる) |
-| いるね。ちゃんと確認した。 | `AppCoordinator.stampAttendance()` | スタンプが増えたとき。`voiced: false` |
-| …いない。どこ? | 同上 | スタンプが増えなかったとき。`voiced: false` |
+| …指、出して。ここ。 | `AttendanceCeremonyScript.opening`(`stampReach`) | 在席スタンプの開幕。`waiting` を 1 回 |
+| …ん。あったかい。ちゃんといるね。 | `AttendanceCeremonyScript.closing(.stamped)`(`stampTouched`) | スタンプが増えたとき。`jumping` を 1 回 |
+| …いない。どこ? ねえ、どこなの? | `AttendanceCeremonyScript.closing(.failed)`(`stampMissed`) | 認証に失敗・キャンセルしたとき。`failed` を 1 回 |
+| …来ないんだ。待ってたのに。 | `AttendanceCeremonyScript.closing(.timedOut)`(`stampTimeout`) | 10 秒で打ち切ったとき。`failed` を 1 回 |
 | (`sermon` の 1 本目) | `OverlayModel.fallbackSermonLine` | 説教オーバーレイの本文を取れなかったときだけ |
 | 在席スタンプを押します | `AttendanceModel` | Touch ID のダイアログに出す理由文 |
 

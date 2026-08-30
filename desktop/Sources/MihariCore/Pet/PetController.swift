@@ -318,6 +318,11 @@ public final class PetController {
         window?.frame.origin ?? .zero
     }
 
+    /// ペットを出している画面。まだ出していない・どの画面にも乗っていないときは主画面。
+    var currentScreen: NSScreen? {
+        window?.screen ?? NSScreen.main
+    }
+
     // MARK: - セリフ
 
     /// 指定したセリフを吹き出しに出す。喋っている途中なら言い終わるまで待たせ、待っているあいだは最新の 1 つだけ残す。
