@@ -100,7 +100,7 @@ class MihariBot(discord.Client):
             lines.append(f"起動してから終了できない時間: {self._store.load_lock_hours()} 時間")
             await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
-        @group.command(name="lock", description="起動してから何時間は終了できないようにするかを決める")
+        @group.command(name="lock", description="監視開始から終了できない時間を決める")
         @app_commands.describe(hours="時間数(例: 4)。次に監視を始めたときから効く")
         async def lock(interaction: discord.Interaction, hours: float) -> None:
             if hours < 0:
