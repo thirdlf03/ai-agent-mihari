@@ -38,5 +38,21 @@ def test_describe_includes_every_signal() -> None:
     assert "最大" in described
 
 
+def test_describe_names_the_iphone_app_while_the_phone_is_in_use() -> None:
+    context = SpeechContext(idle_seconds=120, iphone=IPhoneState.ACTIVE, iphone_app="YouTube")
+
+    assert "iPhone は触っている(開いているのは YouTube)" in context.describe()
+
+
+def test_describe_omits_the_iphone_app_when_the_phone_is_not_in_use() -> None:
+    # 置かれたままのときのアプリ名は「さっき何を見ていたか」でしかなく、根拠にならない。
+    described = SpeechContext(
+        idle_seconds=120, iphone=IPhoneState.IDLE, iphone_app="YouTube"
+    ).describe()
+
+    assert "YouTube" not in described
+    assert "iPhone は置かれたまま" in described
+
+
 def test_describe_omits_the_app_when_unknown() -> None:
     assert "直前に開いていたのは" not in SpeechContext(idle_seconds=10).describe()

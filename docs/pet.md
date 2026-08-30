@@ -30,7 +30,7 @@
 | ---: | --- | --- |
 | 0 | 上記以外(正常・エピソード終了・休憩開始) | 何もしていない |
 | 1 | `.suspected` | 疑っているだけ |
-| 2 | `.confirmed` かつ evidence == `.none` | クールダウン中。撮り直さず声だけかける |
+| 2 | `.confirmed` かつ evidence == `.none` | クールダウン中。撮り直さない。iPhone 操作中は黙る(`line` が空)、それ以外は声だけかける |
 | 3 | `.confirmed` かつ evidence あり | 撮って Discord へ送る |
 
 ### アニメーションの優先順位
@@ -341,7 +341,7 @@ README にあった「しゃべる」「しまう / 起こす」「ペット」�
 
 守ること:
 - 出力はセリフ本文のみ。前置き・説明・鉤括弧・絵文字は付けない。
-- 1〜2 文、合計 60 文字以内。読み上げるので短くする。
+- 1 文、25 文字以内。読み上げるので、とにかく短く言い切る。
 - 皮肉混じりだが、人格否定・侮辱・脅迫はしない。あくまで軽口。
 - 与えられた状況に具体的に触れる。毎回違う言い回しにする。
 - 日本語で書く。
@@ -353,11 +353,11 @@ README にあった「しゃべる」「しまう / 起こす」「ペット」�
 | ---: | --- | --- |
 | 1 | `Mac が {N}秒 無操作` / `Mac が {N}分 無操作` | 60 秒未満は秒、以上は分(切り捨て) |
 | 2 | `直前に開いていたのは {アプリ名}` | `frontmost_app` があるときだけ挟む |
-| 3 | `iPhone は{触っている / 置かれたまま / 応答なし}` | |
+| 3 | `iPhone は{触っている / 置かれたまま / 応答なし}` | 触っているときだけ `(開いているのは {アプリ名})` が付く |
 | 4 | `様子は{寝ている / よそ見 / 席にいない / 不明}` | |
 | 5 | `当たりの強さは{軽め / 強め / 最大}` | |
 
-例: `Mac が 2分 無操作、直前に開いていたのは Slack、iPhone は触っている、様子は不明、当たりの強さは軽め`
+例: `Mac が 2分 無操作、直前に開いていたのは Slack、iPhone は触っている(開いているのは YouTube)、様子は不明、当たりの強さは軽め`
 
 `situation` の enum と Swift 側の対応:
 
@@ -369,12 +369,48 @@ README にあった「しゃべる」「しまう / 起こす」「ペット」�
 | `iphone` | `active` | 画面が点いていて触っている | 証拠は iPhone のスクリーンショット |
 | | `idle` | 画面が消えている | 証拠は Mac のカメラ |
 | | `unreachable` | 圏外・スリープ・未ペアリングなど | 証拠は Mac のカメラ |
+| `iphone_app` | 任意の文字列 | iPhone で開いているアプリ名 | `/iphone/state` の `foreground_app_name`、無ければ `foreground_bundle_id` |
 | `vision` | `sleeping` | | `VisionLabel.asleep` |
 | | `looking_away` | | `VisionLabel.lookingAway` |
 | | `absent` | | `VisionLabel.absent` |
 | | `unknown` | 判定していない、または判定できなかった | `VisionLabel.none` |
 
+`iphone_app` は bridge が SpringBoard の syslog(`Foreground Processes And Scenes:` の行)から
+拾った前面アプリで、`/iphone/state` と SSE の `iphone.state` に `foreground_bundle_id` /
+`foreground_app_name`(表示名。引けなければ `null`)として載る。アプリが切り替わった時点で
+SSE が流れる。SpringBoard はこの行を切り替えのときにしか出さないので、観測を始めた直後は
+次にアプリが切り替わるまで両方 `null` のまま。`iphone == active` のときだけセリフの文脈に入れる(置かれたままのときの
+アプリ名は「さっき何を見ていたか」でしかなく、サボりの根拠にならないため)。
+
 未知の値は既定(`nudge` / `unreachable` / `unknown`)に倒す。`vision` は Mac のカメラで撮ったときだけ付き、判定そのものには使わずセリフと Discord の文面に添えるだけ。
+
+### 画面を見てのセリフ(bridge が Gemini で生成)
+
+**iPhone 操作中(`iphone == active`)にサボりが確定し、証拠として iPhone のスクショを撮れたときだけ**、その PNG を `screenshot_png` に添えて送る。bridge は Gemini(既定 `gemini-3.1-flash-lite`)に画像と上の状況説明をまとめて渡し、`{app, activity, category, line}` を 1 回で受け取る(`bridge/src/device_bridge/voice/screen_reader.py`)。Mac のカメラで撮ったときは顔しか写らないので送らない。
+
+**iPhone 操作中のセリフは、この読んだ 1 文だけ。** クールダウン中(`cooldownSeconds` の間)は
+画面を見ずに喋っても固定文言にしかならず、読んだセリフがそれに埋もれるので黙る
+(`DetectionJudge.decide` が `shouldSpeak: false` を返す)。カメラ側(寝ている・不在)は
+撮り直さない間も声をかけ続ける。
+
+| `category` | 見立て | セリフの方向 |
+| --- | --- | --- |
+| `work` | 仕事・学習・作業。Slack・メール・カレンダーもここ | スマホで仕事しているのは分かるけど Mac に戻ってきて |
+| `slacking` | SNS・動画・ゲーム・漫画など明らかな息抜き | 軽くいじる |
+| `neutral` | 連絡・地図・設定など、どちらとも言えない。迷ったらこれ | 用事が済んだら戻ってきて |
+| `unknown` | ロック画面・真っ暗など、判断できない | 画面の内容には触れず、iPhone を触っていること自体をいじる |
+
+口調のルールは Claude 側と共通で、`bridge/src/device_bridge/voice/persona.py` の `PERSONA_RULES` 1 箇所に置いてある。画面を読むときはこれに加えて「映っているものに必ず触れる」「当たりの強さに合わせて強弱を変える」を指示する。
+
+落ち方は 3 段。キーが無い・6 秒で返らない・応答が壊れている・セリフが長すぎる、のどれでも次に落ちる。
+
+1. Gemini(画面を読んだセリフ)
+2. Claude(`LineGenerator`。画面には触れない従来のセリフ)
+3. 固定文言(下記)
+
+読めなかった理由は `screen_error` として返るだけで、喋ること自体は止めない。読めたときは `screen`(`app` / `activity` / `category`)も一緒に返り、「撮影」タブで手で試したときはその場に出る。
+
+**画面に写っている個人名・メッセージ本文・金額はセリフに引用しない**ようプロンプトで指示している。触れるのはアプリ名と大まかな内容まで。スクショは Gemini API に送られる(有料枠のデータは学習に使われず、無料枠は使われる — [料金ページ](https://ai.google.dev/gemini-api/docs/pricing))。
 
 ### 固定文言(`bridge/src/device_bridge/voice/fallback.py`)
 
@@ -434,7 +470,7 @@ bridge がセリフを返せなかったときの代わりの文であり、そ�
 | 正常(スタンプ直後) | `{秒} 前に在席スタンプが押されている` | `2分 前に在席スタンプが押されている` |
 | 正常(疑いの手前) | `Mac が {秒} 無操作` | `Mac が 8秒 無操作` |
 | 疑い | `Mac が {秒} 無操作` | `Mac が 30秒 無操作` |
-| 確定(クールダウン中) | `{秒} 前に証拠を取ったばかり` | `40秒 前に証拠を取ったばかり` |
+| 確定(クールダウン中) | `{秒} 前に証拠を取ったばかり` | `40秒 前に証拠を取ったばかり`(iPhone 操作中は喋らないので記録だけに残る) |
 | 確定 | 下記を ` / ` でつなぐ | `画面を 15秒 見ていない / Mac が 1分 無操作 / iPhone は応答なし` |
 
 確定時に並べる要素(この順):
@@ -475,7 +511,7 @@ bridge がセリフを返せなかったときの代わりの文であり、そ�
 | `notLookingDurationSeconds` | 15 秒 | 8 秒 | 「画面を見ていない」が続いたら確定にする長さ |
 | `gazeFreshnessSeconds` | 10 秒 | 10 秒 | 視線の観測をいつまで有効と見なすか |
 | `stampGraceSeconds` | 300 秒 | 15 秒 | 在席スタンプの直後、判定を見逃す時間 |
-| `cooldownSeconds` | 180 秒 | 30 秒 | 証拠を撮り直さない間隔 |
+| `cooldownSeconds` | 180 秒 | 30 秒 | 証拠を撮り直さない間隔。撮影に失敗したときは始まらず、次の評価で撮り直す |
 | `breakDurationSeconds` | 900 秒 | 60 秒 | 休憩 1 回の長さ |
 | `promptTimeoutSeconds` | 20 秒 | 8 秒 | 「休憩中?」の返事を待つ時間 |
 
@@ -519,6 +555,8 @@ bridge がセリフを返せなかったときの代わりの文であり、そ�
 | `desktop/Sources/MihariCore/Detection/DetectionEngine.swift` | 検知ループ・問いかけ・休憩・段階の決定 |
 | `desktop/Sources/MihariCore/Detection/DetectionJudge.swift` | サボり判定と `reason` の組み立て |
 | `desktop/Sources/MihariCore/Detection/DetectionThresholds.swift` | 閾値 |
+| `bridge/src/device_bridge/commands/iphone_state.py` | iPhone の状態モデルと前面アプリのログ行の解釈 |
+| `bridge/src/device_bridge/commands/iphone_state_source.py` | 実機の観測(画面状態・前面アプリ・表示名) |
 | `bridge/src/device_bridge/voice/generator.py` | 検知セリフの生成(`SYSTEM_PROMPT`) |
 | `bridge/src/device_bridge/voice/context.py` | 状況の enum と LLM へ渡す 1 行 |
 | `bridge/src/device_bridge/voice/fallback.py` | 固定文言 |

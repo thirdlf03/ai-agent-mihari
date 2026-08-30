@@ -47,6 +47,9 @@ public struct VoiceView: View {
                 Text("モデル: \(status.llmModel) / VOICEVOX: \(status.voicevoxURL) (話者 \(status.voicevoxSpeaker))")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.tertiary)
+                Text(screenLLMLine(status))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
             } else {
                 Label("状態を取得できていない", systemImage: "questionmark.circle")
                     .font(.callout)
@@ -162,6 +165,12 @@ public struct VoiceView: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// 画面読み取り LLM の 1 行。古いデーモンだとモデル名が空で返るので、そのときは伏せる。
+    private func screenLLMLine(_ status: VoiceStatus) -> String {
+        let model = status.screenLLMModel.isEmpty ? "-" : status.screenLLMModel
+        return "画面読み取り LLM: \(model)(\(status.screenLLMConfigured ? "設定済み" : "未設定"))"
     }
 
     private func statusIcon(_ status: VoiceStatus) -> String {

@@ -8,10 +8,13 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from device_bridge.commands.iphone_state import IphoneStateSnapshot
+from device_bridge.daemon.app import create_app
+from device_bridge.daemon.config import DaemonConfig
 from device_bridge.daemon.routers import iphone_state as iphone_state_router
 
 
@@ -67,3 +70,22 @@ def test_get_state_starts_monitor_at_most_once(client: TestClient, auth: dict[st
     assert app.state.iphone_state_task is task
 
     app.state.iphone_state_stop.set()
+
+
+async def test_lifespan_stops_the_monitor(auth: dict[str, str]) -> None:
+    """デーモンの終了で監視タスクが片付くこと。残ると再接続待ちでプロセスが終わりきらない。
+
+    ``TestClient`` はイベントループごと畳んでしまい、止め忘れても done になってしまうため、
+    lifespan だけを同じループの中で開け閉めして確かめる。
+    """
+    app = create_app(DaemonConfig(token=auth["X-Mihari-Token"]))
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://daemon"
+        ) as http:
+            await http.get("/iphone/state", headers=auth)
+        task = app.state.iphone_state_task
+        assert not task.done()
+
+    assert task.done()

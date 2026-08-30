@@ -10,18 +10,36 @@ from collections.abc import AsyncIterator
 import pytest
 
 from device_bridge.commands.iphone_state import (
+    FOREGROUND_LOG_MARKER,
     IphoneActivity,
     IphoneStateSnapshot,
     IphoneStateStore,
     build_snapshot,
     classify_display,
     classify_notification,
+    parse_foreground_apps,
     resolve_activity,
     run_monitor_cycle,
     unresponsive_snapshot,
 )
 
 UDID = "known-udid"
+
+# 実機(iOS 26.6 / iPhone 14)で SpringBoard が吐いた行。アプリを 2 つ含む形にしてある。
+FOREGROUND_LOG = """Foreground Processes And Scenes: (
+        {
+        process = "<FBApplicationProcess: 0x8cf475980; app<com.ovelin.guitartuna>:7657(v4C82)>";
+        scene = "<FBScene: 0x8cf898a00; FBSceneManager:sceneID:com.ovelin.guitartuna-default>";
+    },
+        {
+        process = "<FBApplicationProcess: 0x8cf476100; app<com.apple.Preferences>:812(v4C82)>";
+        scene = "<FBScene: 0x8cf899200; FBSceneManager:sceneID:com.apple.Preferences-default>";
+    }
+)"""
+
+# ホーム画面・ロック中。app<...> が 1 つも並ばない。
+FOREGROUND_LOG_EMPTY = """Foreground Processes And Scenes: (
+)"""
 
 
 class FakeSource:
@@ -141,9 +159,37 @@ def test_resolve_activity_keeps_previous_for_ambiguous_lockstate() -> None:
     )
 
 
+def test_parse_foreground_apps_takes_the_bundle_ids_in_order() -> None:
+    assert parse_foreground_apps(FOREGROUND_LOG) == (
+        "com.ovelin.guitartuna",
+        "com.apple.Preferences",
+    )
+
+
+def test_parse_foreground_apps_returns_empty_on_the_home_or_lock_screen() -> None:
+    # 「前面のアプリは無い」と「その行では分からない」を区別したいので空タプルを返す。
+    assert parse_foreground_apps(FOREGROUND_LOG_EMPTY) == ()
+
+
+def test_parse_foreground_apps_ignores_lines_without_the_marker() -> None:
+    # SpringBoard は毎秒 900 行ほど吐くので、目印を含まない行は None で捨てる。
+    assert parse_foreground_apps("BKHIDEvent: press down") is None
+    assert parse_foreground_apps("") is None
+
+
+def test_parse_foreground_apps_keeps_each_bundle_id_once() -> None:
+    message = f"{FOREGROUND_LOG_MARKER} app<com.example.a> app<com.example.a> app<com.example.b>"
+    assert parse_foreground_apps(message) == ("com.example.a", "com.example.b")
+
+
 def test_snapshot_to_payload_is_json_friendly() -> None:
     snapshot = build_snapshot(
-        UDID, IphoneActivity.ACTIVE, battery_level=87.0, battery_charging=True
+        UDID,
+        IphoneActivity.ACTIVE,
+        battery_level=87.0,
+        battery_charging=True,
+        foreground_bundle_id="com.apple.Preferences",
+        foreground_app_name="設定",
     )
     payload = snapshot.to_payload()
 
@@ -151,7 +197,17 @@ def test_snapshot_to_payload_is_json_friendly() -> None:
     assert payload["udid"] == UDID
     assert payload["battery_level"] == 87.0
     assert payload["battery_charging"] is True
+    assert payload["foreground_bundle_id"] == "com.apple.Preferences"
+    assert payload["foreground_app_name"] == "設定"
     assert payload["updated_at"]
+
+
+def test_snapshot_payload_sends_null_when_the_foreground_app_is_unknown() -> None:
+    # Swift 側との契約。キーは必ず載り、分からないときは null になる。
+    payload = build_snapshot(UDID, IphoneActivity.IDLE).to_payload()
+
+    assert payload["foreground_bundle_id"] is None
+    assert payload["foreground_app_name"] is None
 
 
 def test_store_starts_unresponsive() -> None:
@@ -171,6 +227,25 @@ def test_store_fires_on_change_only_when_activity_changes() -> None:
     # 同じ activity が続く間(バッテリー値だけの更新含む)はイベントを流さない。
     assert changes == [IphoneActivity.ACTIVE, IphoneActivity.IDLE]
     assert store.snapshot.activity == IphoneActivity.IDLE
+
+
+def test_store_fires_on_change_when_only_the_foreground_app_changes() -> None:
+    # iPhone を触ったままアプリだけ切り替えたときも Swift 側に届けたい。
+    seen: list[str | None] = []
+    store = IphoneStateStore(on_change=lambda snapshot: seen.append(snapshot.foreground_bundle_id))
+
+    settings = build_snapshot(
+        UDID, IphoneActivity.ACTIVE, foreground_bundle_id="com.apple.Preferences"
+    )
+    youtube = build_snapshot(
+        UDID, IphoneActivity.ACTIVE, foreground_bundle_id="com.google.ios.youtube"
+    )
+
+    assert store.update(settings) is True
+    assert store.update(youtube) is True
+    # activity も前面アプリも同じなら流さない。
+    assert store.update(youtube) is False
+    assert seen == ["com.apple.Preferences", "com.google.ios.youtube"]
 
 
 def test_store_update_returns_whether_it_changed() -> None:

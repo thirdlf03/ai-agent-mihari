@@ -20,15 +20,27 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     public let discord = DiscordController()
     public let attendance: AttendanceModel
     public let detection: DetectionEngine
-    public let overlay = OverlayModel(presenter: ScreenSaverOverlayPresenter())
     public let pet: LivePetPresenter
     public let questioner = HeadGestureQuestioner()
 
+    /// 音楽を止めて聞かせる全画面オーバーレイ。
+    ///
+    /// セリフの取得と読み上げを注入するため、`self` を参照できる `lazy var` にしてある。
+    /// 注入しないと、音楽が鳴っている場面(`interrupt` 経路)で一言も喋らないまま暗転する。
+    public lazy var overlay: OverlayModel = makeOverlay()
+
     // 以下は検証用の 10 タブ画面でしか使わないので、開かれるまで作らない。
-    public lazy var capture = CaptureViewModel(iphoneScreenshot: { [daemon] in
-        guard let client = await daemon.connectedClient else { throw DaemonError.notRunning }
-        return try await client.iphoneScreenshot()
-    })
+    public lazy var capture = CaptureViewModel(
+        iphoneScreenshot: { [daemon] in
+            guard let client = await daemon.connectedClient else { throw DaemonError.notRunning }
+            return try await client.iphoneScreenshot()
+        },
+        speak: { [voice, daemon] request in
+            // 喋れなかったときに前回の記録を返してしまわないよう、成否を先に見る。
+            guard await voice.speak(request, using: daemon.connectedClient) != nil else { return nil }
+            return voice.history.first
+        }
+    )
     public lazy var vision = FaceVisionViewModel()
     public lazy var headGesture = HeadGestureController()
 
@@ -208,6 +220,19 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         isStatusPanelVisible = statusPanel.isVisible
     }
 
+    /// 説教オーバーレイを組み立てる。セリフの取得と読み上げの停止はこのアプリのものを渡す。
+    private func makeOverlay() -> OverlayModel {
+        let voice = self.voice
+        let daemon = self.daemon
+        return OverlayModel(
+            presenter: ScreenSaverOverlayPresenter(),
+            speak: { [weak voice, weak daemon] request in
+                await voice?.speak(request, using: daemon?.connectedClient)
+            },
+            stopSpeaking: { [weak voice] in voice?.stopSpeaking() }
+        )
+    }
+
     /// 状態パネルの中身。エンジンとデーモンの `@Published` をそのまま映す。
     private var statusPanelView: StatusPanelView {
         StatusPanelView(engine: detection, daemon: daemon)
@@ -228,7 +253,11 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
                 try? await daemon.connectedClient?.iphoneScreenshot()
             },
             speak: { [voice, daemon] request in
-                await voice.speak(request, using: daemon.connectedClient)
+                // 音声はここでは鳴らさない。吹き出しが出る瞬間に鳴らせるよう、ペットまで運ぶ。
+                guard let line = await voice.fetchLine(request, using: daemon.connectedClient) else {
+                    return nil
+                }
+                return SpokenSpeech(text: line.text, audio: line.audioData)
             },
             interrupt: { [overlay] request in
                 await MainActor.run { overlay.show(request: request) }
@@ -316,6 +345,25 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         // どちらも「iPhone から返事が無い」で、Swift では同じ 1 つの値に寄せる。
         default: detection.iphoneState = .unreachable
         }
+        // 触っていないときの「前に開いていたアプリ」は古い情報でしかない。持ち越さない。
+        guard raw == "active" else {
+            detection.iphoneForegroundApp = nil
+            return
+        }
+        detection.iphoneForegroundApp =
+            Self.payloadText(event.payload["foreground_app_name"])
+            ?? Self.payloadText(event.payload["foreground_bundle_id"])
+    }
+
+    /// payload の文字列から「中身のある値」だけを取り出す。
+    ///
+    /// `DaemonEvent` は payload を表示用の文字列に潰すので、JSON の null は `"null"` という
+    /// 文字列で届く。空文字と併せて、無かったことにする。
+    private static func payloadText(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "null" else { return nil }
+        return trimmed
     }
 
     // Vision の解析は画面の都合と無関係なので、メインアクタから外して実行する。

@@ -42,8 +42,8 @@ public final class LivePetPresenter: ObservableObject, PetPresenting {
 
     /// このエピソード（正常に戻るまで）で見たサボり確定の最大段階。段階が上がったときだけ跳ねる。
     private var maxConfirmedStage: Int?
-    /// 問いかけを出しているあいだに届いたセリフ。問いかけが閉じてから出す。
-    private var heldLine: String?
+    /// 問いかけを出しているあいだに届いたセリフと、その読み上げ用の音声。問いかけが閉じてから出す。
+    private var heldLine: (text: String, audio: Data?)?
 
     public init(controller: PetController = PetController()) {
         self.controller = controller
@@ -98,10 +98,9 @@ public final class LivePetPresenter: ObservableObject, PetPresenting {
         }
         if let line = directive.line {
             if pendingPrompt != nil {
-                heldLine = line
+                heldLine = (line, event.audio)
             } else {
-                // 音声は検知側が別経路で鳴らすので、ここでは吹き出しだけ出す。
-                controller.say(line, voiced: false)
+                controller.say(line, voice: Self.speechVoice(for: event.audio))
             }
         }
     }
@@ -145,8 +144,17 @@ public final class LivePetPresenter: ObservableObject, PetPresenting {
 
     /// 問いかけのあいだ待たせていたセリフを出す。
     private func speakHeldLine() {
-        guard let line = heldLine else { return }
+        guard let held = heldLine else { return }
         heldLine = nil
-        controller.say(line, voiced: false)
+        controller.say(held.text, voice: Self.speechVoice(for: held.audio))
+    }
+
+    /// 検知側から届いた音声を、ペットの読み上げ方に写す。
+    ///
+    /// 音声が付いていれば吹き出しと同時に鳴らしてもらう。付いていなければ吹き出しだけ出す
+    /// (ここで合成させると、検知のセリフが二重に鳴る)。
+    private static func speechVoice(for audio: Data?) -> SpeechVoice {
+        guard let audio else { return .none }
+        return .prepared(audio)
     }
 }

@@ -210,6 +210,8 @@ public final class DaemonController: ObservableObject {
         if let udid = state.udid { payload["udid"] = udid }
         if let level = state.batteryLevel { payload["battery_level"] = String(level) }
         if let charging = state.batteryCharging { payload["battery_charging"] = String(charging) }
+        if let bundleId = state.foregroundBundleId { payload["foreground_bundle_id"] = bundleId }
+        if let appName = state.foregroundAppName { payload["foreground_app_name"] = appName }
         return DaemonEvent(name: "iphone.state", payload: payload, createdAt: updatedAt)
     }
 

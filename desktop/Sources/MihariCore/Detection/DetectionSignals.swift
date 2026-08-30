@@ -12,6 +12,9 @@ public struct DetectionSignals: Equatable, Sendable {
     /// iPhone の様子。取得できなければ `.unreachable`。
     public let iphone: SpeechRequest.IPhoneState
 
+    /// iPhone で開いているアプリ名。操作中でなければ nil。
+    public let iphoneForegroundApp: String?
+
     /// 画面を見ているか。カメラを開けていなければ `.none`。
     public let gaze: GazeObservation
 
@@ -30,6 +33,7 @@ public struct DetectionSignals: Equatable, Sendable {
     public init(
         macIdleSeconds: TimeInterval,
         iphone: SpeechRequest.IPhoneState = .unreachable,
+        iphoneForegroundApp: String? = nil,
         gaze: GazeObservation = .none,
         music: NowPlaying = .silent,
         secondsSinceStamp: TimeInterval? = nil,
@@ -37,6 +41,7 @@ public struct DetectionSignals: Equatable, Sendable {
     ) {
         self.macIdleSeconds = max(0, macIdleSeconds)
         self.iphone = iphone
+        self.iphoneForegroundApp = iphoneForegroundApp
         self.gaze = gaze
         self.music = music
         self.secondsSinceStamp = secondsSinceStamp

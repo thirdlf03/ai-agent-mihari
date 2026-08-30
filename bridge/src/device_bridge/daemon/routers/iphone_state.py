@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -54,6 +55,24 @@ def _ensure_monitor_started(request: Request) -> iphone_state.IphoneStateStore:
     setattr(app_state, _TASK_ATTR, task)
     setattr(app_state, _STOP_ATTR, stop_event)
     return store
+
+
+async def stop_monitor(app_state: Any) -> None:
+    """遅延起動した監視タスクを止める。まだ起動していなければ何もしない。
+
+    デーモン終了時に ``app.py`` の lifespan から呼ぶ。誰も止めないと、再接続待ちで
+    眠っているタスクが残ってプロセスが綺麗に終わらない。
+    """
+    task: asyncio.Task[None] | None = getattr(app_state, _TASK_ATTR, None)
+    if task is None:
+        return
+
+    stop_event: asyncio.Event | None = getattr(app_state, _STOP_ATTR, None)
+    if stop_event is not None:
+        stop_event.set()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
 
 def _publish(bus: EventBus, snapshot: iphone_state.IphoneStateSnapshot) -> None:

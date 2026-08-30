@@ -114,6 +114,25 @@ struct LivePetPresenterTests {
         #expect(recorder.answers.isEmpty)
     }
 
+    @Test("問いかけを出しているあいだは、届いたセリフの音声も鳴らさずに待たせる")
+    func heldLineKeepsItsAudioUntilThePromptCloses() {
+        // 音声だけ先に鳴ると、問いかけが閉じたあとに無音の吹き出しだけが出る。
+        let presenter = makePresenter()
+        let recorder = AnswerRecorder()
+        let audio = Data("wav".utf8)
+        let prompt = PetYesNoPrompt(question: "休憩中?") { recorder.record($0) }
+        presenter.present(PetEvent(state: .suspected, escalationStage: 1, line: "", prompt: prompt))
+
+        presenter.present(
+            PetEvent(state: .confirmed, escalationStage: 2, line: "サボってる?", audio: audio)
+        )
+        #expect(presenter.controller.lastPreparedAudio == nil)
+
+        presenter.dismissPrompt()
+
+        #expect(presenter.controller.lastPreparedAudio == audio)
+    }
+
     @Test("回答は一度しか伝わらない")
     func answersPromptOnlyOnce() {
         let presenter = makePresenter()

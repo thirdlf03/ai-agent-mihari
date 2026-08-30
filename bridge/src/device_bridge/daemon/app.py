@@ -21,6 +21,7 @@ from device_bridge.daemon.routers import (
 from device_bridge.discord_bot.bot import DiscordService
 from device_bridge.discord_bot.scheduler import WatchScheduler
 from device_bridge.voice.generator import LineGenerator
+from device_bridge.voice.screen_reader import ScreenReader
 from device_bridge.voice.voicevox import VoicevoxClient
 
 
@@ -29,11 +30,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Bot の起動と後片付け。
 
     トークンが無ければ何も起きない。Bot が使えなくてもデーモンは動き続ける。
+    終了時は、遅延起動した iPhone 監視タスクも合わせて止める。誰も止めないと
+    プロセスが終わりきらない。
     """
     await app.state.discord.start()
     try:
         yield
     finally:
+        await iphone_state.stop_monitor(app.state)
         await app.state.discord.close()
 
 
@@ -51,6 +55,7 @@ def create_app(config: DaemonConfig) -> FastAPI:
     app.state.config = config
     app.state.events = EventBus()
     app.state.line_generator = LineGenerator()
+    app.state.screen_reader = ScreenReader()
     app.state.voicevox = VoicevoxClient()
     app.state.watch_scheduler = WatchScheduler(app.state.events)
     app.state.discord = DiscordService(scheduler=app.state.watch_scheduler)

@@ -137,6 +137,32 @@ struct DetectionJudgeTests {
         #expect(decision.shouldInterrupt == false)
     }
 
+    @Test("クールダウン中に iPhone を触っていれば黙る")
+    func cooldownSilencesWhileTouchingPhone() {
+        // iPhone のセリフは、撮った画面を読んだものだけにする。
+        // 画面を見ずに喋ると、読んだセリフが固定文言に埋もれる。
+        let decision = judge.decide(
+            signals(idle: 600, iphone: .active),
+            secondsSinceLastEvidence: 30
+        )
+        #expect(decision.state == .confirmed)
+        #expect(decision.evidence == .none)
+        #expect(decision.shouldSpeak == false)
+        #expect(decision.shouldInterrupt == false)
+    }
+
+    @Test("クールダウン中でも iPhone が置かれたままなら声はかける")
+    func cooldownStillSpeaksWhilePhoneIsIdle() {
+        // 寝ている・席にいない側は、撮り直さない間も呼び続ける。
+        let decision = judge.decide(
+            signals(idle: 600, iphone: .idle),
+            secondsSinceLastEvidence: 30
+        )
+        #expect(decision.state == .confirmed)
+        #expect(decision.evidence == .none)
+        #expect(decision.shouldSpeak)
+    }
+
     @Test("クールダウンが明ければまた撮る")
     func cooldownExpires() {
         #expect(judge.decide(signals(idle: 600), secondsSinceLastEvidence: 181).evidence == .macCamera)
