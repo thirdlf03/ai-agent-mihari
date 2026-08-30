@@ -38,6 +38,10 @@ public struct DetectionThresholds: Equatable, Sendable {
     /// 「休憩中?」の返事を待つ時間。これを過ぎたら無反応として問いかけを閉じ、監視を続ける。
     public let promptTimeoutSeconds: TimeInterval
 
+    /// 正常が続いているとき、この間隔ごとにペットが褒める。
+    /// 疑い以上の判定・休憩の開始・監視の停止で数え直す。
+    public let focusStreakIntervalSeconds: TimeInterval
+
     public init(
         suspectSeconds: TimeInterval = 12,
         confirmSeconds: TimeInterval = 30,
@@ -47,7 +51,8 @@ public struct DetectionThresholds: Equatable, Sendable {
         stampGraceSeconds: TimeInterval = AttendanceGrace.defaultGracePeriod,
         cooldownSeconds: TimeInterval = 180,
         breakDurationSeconds: TimeInterval = 900,
-        promptTimeoutSeconds: TimeInterval = 20
+        promptTimeoutSeconds: TimeInterval = 20,
+        focusStreakIntervalSeconds: TimeInterval = 900
     ) {
         self.suspectSeconds = suspectSeconds
         self.confirmSeconds = max(suspectSeconds, confirmSeconds)
@@ -58,6 +63,23 @@ public struct DetectionThresholds: Equatable, Sendable {
         self.cooldownSeconds = cooldownSeconds
         self.breakDurationSeconds = breakDurationSeconds
         self.promptTimeoutSeconds = promptTimeoutSeconds
+        self.focusStreakIntervalSeconds = focusStreakIntervalSeconds
+    }
+
+    /// 集中継続の間隔だけを差し替えた閾値を返す。デバッグメニューから 15 分 / 1 分を切り替えるのに使う。
+    public func withFocusStreakInterval(_ seconds: TimeInterval) -> DetectionThresholds {
+        DetectionThresholds(
+            suspectSeconds: suspectSeconds,
+            confirmSeconds: confirmSeconds,
+            gazeWatchSeconds: gazeWatchSeconds,
+            notLookingDurationSeconds: notLookingDurationSeconds,
+            gazeFreshnessSeconds: gazeFreshnessSeconds,
+            stampGraceSeconds: stampGraceSeconds,
+            cooldownSeconds: cooldownSeconds,
+            breakDurationSeconds: breakDurationSeconds,
+            promptTimeoutSeconds: promptTimeoutSeconds,
+            focusStreakIntervalSeconds: seconds
+        )
     }
 
     /// 何か起こりうる最短の無操作秒数。これ未満なら判定を始めるまでもない。
@@ -85,7 +107,8 @@ public struct DetectionThresholds: Equatable, Sendable {
             stampGraceSeconds: 15,
             cooldownSeconds: 30,
             breakDurationSeconds: 60,
-            promptTimeoutSeconds: 8
+            promptTimeoutSeconds: 8,
+            focusStreakIntervalSeconds: 60
         )
     }
 }

@@ -22,7 +22,7 @@ struct PetControllerSpeechTests {
         let pet = makeController()
         let audio = Data("wav".utf8)
 
-        pet.say("サボってない?", voice: .prepared(audio))
+        pet.say("サボってない?", voice: .prepared(audio, priority: .detection))
 
         #expect(pet.lastPreparedAudio == audio)
     }
@@ -32,7 +32,7 @@ struct PetControllerSpeechTests {
         let pet = makeController()
         pet.setVoiceEnabled(false)
 
-        pet.say("サボってない?", voice: .prepared(Data("wav".utf8)))
+        pet.say("サボってない?", voice: .prepared(Data("wav".utf8), priority: .detection))
 
         #expect(pet.lastPreparedAudio == nil)
     }

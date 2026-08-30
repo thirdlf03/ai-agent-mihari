@@ -130,6 +130,14 @@ public final class LivePetPresenter: ObservableObject, PetPresenting {
         controller.say(previous == .onBreak ? .breakEnd : .watchStart)
     }
 
+    /// 集中が続いていることを褒める。
+    ///
+    /// 検知の状態は正常のままなので `present(_:)` に流すと吹き出しが捨てられる。
+    /// 監視開始・休憩明けの一言と同じく、ペットに直接言わせる。
+    public func sayFocusStreak() {
+        controller.say(.focusStreak)
+    }
+
     // MARK: - 問いかけ
 
     /// 問いかけに答える。吹き出しのボタンからも、AirPods の首振り判定（#18）からもここを通る。
@@ -155,6 +163,6 @@ public final class LivePetPresenter: ObservableObject, PetPresenting {
     /// (ここで合成させると、検知のセリフが二重に鳴る)。
     private static func speechVoice(for audio: Data?) -> SpeechVoice {
         guard let audio else { return .none }
-        return .prepared(audio)
+        return .prepared(audio, priority: .detection)
     }
 }

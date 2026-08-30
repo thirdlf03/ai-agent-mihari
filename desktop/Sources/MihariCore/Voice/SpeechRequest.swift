@@ -144,6 +144,27 @@ public struct SpokenLine: Decodable, Equatable, Sendable {
     }
 }
 
+/// `POST /voice/screen` の応答。セリフも音声も作らせず、画面を読ませるだけ。
+///
+/// 同封音声のモードでは bridge にセリフを作らせないが、Discord の文面には
+/// 「何のアプリで何をしていたか」を入れたい。そこだけをここで読ませる。
+public struct ScreenReadResult: Decodable, Equatable, Sendable {
+    /// 読み取れた画面。読ませていない・読めなかったなら `nil`。
+    public var screen: SpokenLine.ScreenReading?
+    /// 読めなかった理由(キー未設定・タイムアウトなど)。
+    public var screenError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case screen
+        case screenError = "screen_error"
+    }
+
+    public init(screen: SpokenLine.ScreenReading? = nil, screenError: String? = nil) {
+        self.screen = screen
+        self.screenError = screenError
+    }
+}
+
 /// セリフ生成と読み上げが使える状態か。
 public struct VoiceStatus: Decodable, Equatable, Sendable {
     public let llmConfigured: Bool

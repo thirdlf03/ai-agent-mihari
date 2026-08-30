@@ -32,6 +32,16 @@ SPEAK_DEADLINE_SECONDS = 20.0
 #: 上限を超えたときに返す理由。テキストは固定文言に落ちる。
 _TIMED_OUT_REASON = f"{SPEAK_DEADLINE_SECONDS:.0f} 秒以内に用意できなかった"
 
+#: 画面読み取りだけを行うときの上限(秒)。セリフ生成も音声合成も挟まないので短く切る。
+#: 同封済みの音声を鳴らすモードでは、これが Discord の文面を待たせる時間そのものになる。
+SCREEN_DEADLINE_SECONDS = 8.0
+
+#: 読み取りの上限を超えたときに返す理由。
+_SCREEN_TIMED_OUT_REASON = f"{SCREEN_DEADLINE_SECONDS:.0f} 秒以内に読めなかった"
+
+#: スクショが添えられていなかったときに返す理由。
+_NO_SCREENSHOT_REASON = "スクリーンショットが無い"
+
 
 @router.get("/status")
 async def voice_status(request: Request) -> dict[str, Any]:
@@ -73,6 +83,34 @@ async def make_line(request: Request, body: dict[str, Any]) -> dict[str, Any]:
         "screen": _screen_payload(reading),
         "screen_error": screen_error,
     }
+
+
+@router.post("/screen")
+async def read_screen(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """スクショから画面の読み取りだけを行う。セリフも音声も作らない。
+
+    同封済みの音声を鳴らすモード用。Discord の文面を組み立てる材料としてだけ使う。
+    読めなかったことは送るのをやめる理由にならないので、失敗も 200 で理由だけ返す。
+    """
+    context = _parse_context(body)
+    screenshot = _parse_screenshot(body)
+    if screenshot is None:
+        return _screen_only_payload(None, _NO_SCREENSHOT_REASON)
+
+    reader = request.app.state.screen_reader
+    if not reader.is_configured:
+        return _screen_only_payload(None, "GEMINI_API_KEY が未設定")
+
+    try:
+        async with asyncio.timeout(SCREEN_DEADLINE_SECONDS):
+            # セリフは使わないので、それが壊れていても見立てだけは受け取る。
+            reading = await reader.read(screenshot, context, require_line=False)
+    except ScreenReadError as error:
+        return _screen_only_payload(None, str(error))
+    except TimeoutError:
+        return _screen_only_payload(None, _SCREEN_TIMED_OUT_REASON)
+
+    return _screen_only_payload(reading, None)
 
 
 @router.post("/speak")
@@ -160,6 +198,11 @@ async def _generate(
         return await state.line_generator.generate(context), None, str(error)
 
     return GeneratedLine(text=reading.line, from_llm=True), reading, None
+
+
+def _screen_only_payload(reading: ScreenReading | None, error: str | None) -> dict[str, Any]:
+    """``/voice/screen`` の応答。セリフを含まないぶん ``/voice/line`` の一部と同じ形にする。"""
+    return {"screen": _screen_payload(reading), "screen_error": error}
 
 
 def _screen_payload(reading: ScreenReading | None) -> dict[str, Any] | None:

@@ -76,6 +76,14 @@ public struct DaemonClient: Sendable {
         try await post("voice/line", body: request, timeout: Self.speechTimeout)
     }
 
+    /// iPhone の画面だけを読ませる。セリフも音声も作らせない。
+    ///
+    /// 同封音声のモードでは bridge にセリフを作らせないので、Discord の文面に入れる
+    /// 「何のアプリで何をしていたか」だけをここで読ませる。
+    public func readScreen(_ request: SpeechRequest) async throws -> ScreenReadResult {
+        try await post("voice/screen", body: request, timeout: Self.speechTimeout)
+    }
+
     /// セリフ生成と読み上げが使える状態かを問い合わせる。
     public func voiceStatus() async throws -> VoiceStatus {
         try await get("voice/status")
@@ -120,6 +128,20 @@ public struct DaemonClient: Sendable {
                 filename: filename
             )
         )
+    }
+
+    /// 証拠を晒すときに呼びつける相手を決める。`nil` にするとメンションを付けない。
+    ///
+    /// 本文の先頭に `<@ID>` を足すのは bridge 側。アプリが組み立てる文面には入れない。
+    @discardableResult
+    public func setDiscordMention(_ userID: String?) async throws -> DiscordMentionSelection {
+        try await post("discord/mention", body: DiscordMentionRequest(userID: userID))
+    }
+
+    /// メンション付きのテスト投稿をさせる。
+    @discardableResult
+    public func postDiscordTest() async throws -> DiscordPostResult {
+        try await post("discord/test", body: DiscordTestRequest())
     }
 
     /// 監視の開始を予約する。`at` が `nil` ならすぐ始める。
@@ -266,6 +288,17 @@ public struct DaemonClient: Sendable {
         let image: String?
         let filename: String
     }
+
+    private struct DiscordMentionRequest: Encodable {
+        let userID: String?
+
+        enum CodingKeys: String, CodingKey {
+            case userID = "user_id"
+        }
+    }
+
+    /// `POST /discord/test` の本文。中身は無いが、JSON の `{}` は送る。
+    private struct DiscordTestRequest: Encodable {}
 
     private struct WatchScheduleRequest: Encodable {
         let at: String?

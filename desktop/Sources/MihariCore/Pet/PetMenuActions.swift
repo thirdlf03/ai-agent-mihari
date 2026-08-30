@@ -12,6 +12,10 @@ public protocol PetMenuActions: AnyObject, ObservableObject {
     var isOnBreak: Bool { get }
     /// 状態パネルを出しているか。メニューのチェックに使う。
     var isStatusPanelVisible: Bool { get }
+    /// いまの音声モード。デバッグメニューのチェックに使う。
+    var voiceMode: VoiceMode { get }
+    /// 集中継続を褒める間隔(秒)。デバッグメニューのチェックに使う。
+    var focusStreakIntervalSeconds: TimeInterval { get }
 
     /// 監視を始める。
     func startWatching()
@@ -29,4 +33,10 @@ public protocol PetMenuActions: AnyObject, ObservableObject {
     func openPermissions()
     /// 状態パネルの表示を切り替える。
     func toggleStatusPanel()
+    /// 音声モードを切り替える。再起動なしで効く。
+    func setVoiceMode(_ mode: VoiceMode)
+    /// 集中継続を褒める間隔を変える。
+    func setFocusStreakInterval(_ seconds: TimeInterval)
+    /// 集中継続のセリフをその場で喋らせる(デバッグ用)。
+    func replayFocusStreak()
 }

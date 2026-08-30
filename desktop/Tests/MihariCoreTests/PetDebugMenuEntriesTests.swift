@@ -62,7 +62,7 @@ struct PetDebugMenuEntriesTests {
     @Test("「アニメーションを固定」は固定を解く項目と 9 種を定義順に並べる")
     func fixedAnimationSubmenuListsEveryAnimation() throws {
         let presenter = makePresenter()
-        let entries = PetDebugMenuEntries.make(presenter: presenter)
+        let entries = PetDebugMenuEntries.make(actions: StubPetMenuActions(), presenter: presenter)
 
         let submenu = try #require(findSubmenu("アニメーションを固定", in: entries))
         let titles = itemTitles(submenu)
@@ -79,7 +79,7 @@ struct PetDebugMenuEntriesTests {
     func suspectedEntryFixesWaiting() {
         let presenter = makePresenter()
 
-        tap("疑い(段階 1)", in: PetDebugMenuEntries.make(presenter: presenter))
+        tap("疑い(段階 1)", in: PetDebugMenuEntries.make(actions: StubPetMenuActions(), presenter: presenter))
 
         #expect(presenter.state == .suspected)
         #expect(presenter.lastDirective.fixedAnimation == .waiting)
@@ -89,7 +89,7 @@ struct PetDebugMenuEntriesTests {
     func confirmedEntryFixesFailedAndJumps() {
         let presenter = makePresenter()
 
-        tap("サボり確定・撮影(段階 3)", in: PetDebugMenuEntries.make(presenter: presenter))
+        tap("サボり確定・撮影(段階 3)", in: PetDebugMenuEntries.make(actions: StubPetMenuActions(), presenter: presenter))
 
         #expect(presenter.lastDirective.fixedAnimation == .failed)
         #expect(presenter.lastDirective.playOnce == .jumping)
@@ -99,11 +99,49 @@ struct PetDebugMenuEntriesTests {
     func promptEntryShowsAndDismissesPrompt() {
         let presenter = makePresenter()
 
-        tap("問いかけ(はい / いいえ)", in: PetDebugMenuEntries.make(presenter: presenter))
+        tap("問いかけ(はい / いいえ)", in: PetDebugMenuEntries.make(actions: StubPetMenuActions(), presenter: presenter))
         #expect(presenter.pendingPrompt != nil)
 
-        tap("問いかけを閉じる", in: PetDebugMenuEntries.make(presenter: presenter))
+        tap("問いかけを閉じる", in: PetDebugMenuEntries.make(actions: StubPetMenuActions(), presenter: presenter))
         #expect(presenter.pendingPrompt == nil)
+    }
+
+    @Test("「音声」は 2 つのモードを並べ、押すと切り替わる")
+    func voiceModeEntriesSwitchTheMode() throws {
+        let presenter = makePresenter()
+        let actions = StubPetMenuActions()
+
+        let submenu = try #require(
+            findSubmenu("音声", in: PetDebugMenuEntries.make(actions: actions, presenter: presenter))
+        )
+        #expect(itemTitles(submenu) == VoiceMode.allCases.map(\.label))
+
+        tap(VoiceMode.live.label, in: PetDebugMenuEntries.make(actions: actions, presenter: presenter))
+        #expect(actions.voiceMode == .live)
+    }
+
+    @Test("「集中継続の間隔」は 15 分 / 1 分を切り替える")
+    func focusStreakIntervalEntriesSwitchTheInterval() throws {
+        let presenter = makePresenter()
+        let actions = StubPetMenuActions()
+
+        let submenu = try #require(
+            findSubmenu("集中継続の間隔", in: PetDebugMenuEntries.make(actions: actions, presenter: presenter))
+        )
+        #expect(itemTitles(submenu) == ["15 分", "1 分"])
+
+        tap("1 分", in: PetDebugMenuEntries.make(actions: actions, presenter: presenter))
+        #expect(actions.focusStreakIntervalSeconds == 60)
+    }
+
+    @Test("「集中継続のセリフを再現」で褒めるセリフを呼び出す")
+    func focusStreakReplayEntryCallsBack() {
+        let presenter = makePresenter()
+        let actions = StubPetMenuActions()
+
+        tap("集中継続のセリフを再現", in: PetDebugMenuEntries.make(actions: actions, presenter: presenter))
+
+        #expect(actions.focusStreakReplays == 1)
     }
 
     @Test("アニメーションの固定と解除がコントローラに伝わる")
@@ -112,7 +150,12 @@ struct PetDebugMenuEntriesTests {
 
         // 「1 回だけ再生」にも同じタイトルの項目があるので、固定する方のサブメニューに絞って押す。
         func fixedAnimationSubmenu() throws -> [PetMenuEntry] {
-            try #require(findSubmenu("アニメーションを固定", in: PetDebugMenuEntries.make(presenter: presenter)))
+            try #require(
+                findSubmenu(
+                    "アニメーションを固定",
+                    in: PetDebugMenuEntries.make(actions: StubPetMenuActions(), presenter: presenter)
+                )
+            )
         }
 
         tap("waiting(待つ)", in: try fixedAnimationSubmenu())

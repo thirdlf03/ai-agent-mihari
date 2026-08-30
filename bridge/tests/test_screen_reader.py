@@ -240,3 +240,30 @@ async def test_an_unknown_media_resolution_falls_back_to_medium(
 
     image, _ = client.calls[0]["contents"]
     assert image.media_resolution.level is types.PartMediaResolutionLevel.MEDIA_RESOLUTION_MEDIUM
+
+
+@pytest.mark.parametrize("line", ["", "   ", "あ" * 61])
+async def test_an_unusable_line_still_yields_the_reading_when_it_is_not_needed(
+    line: str,
+) -> None:
+    # /voice/screen はセリフを使わないので、セリフが壊れているだけで見立てまで捨てない。
+    payload = json.dumps(
+        {"app": "Safari", "activity": "調べ物", "category": "neutral", "line": line},
+        ensure_ascii=False,
+    )
+    reader, _ = _reader(_Response(payload))
+
+    reading = await reader.read(PNG, CONTEXT, require_line=False)
+
+    assert reading.app == "Safari"
+    assert reading.activity == "調べ物"
+    assert reading.category is ScreenCategory.NEUTRAL
+    assert reading.line == ""
+
+
+async def test_a_usable_line_is_kept_even_when_it_is_not_required() -> None:
+    reader, _ = _reader(_Response(READING_JSON))
+
+    reading = await reader.read(PNG, CONTEXT, require_line=False)
+
+    assert reading.line == "その料理動画、あとで作るんですか？"

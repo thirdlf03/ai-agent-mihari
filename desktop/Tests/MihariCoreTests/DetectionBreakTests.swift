@@ -133,7 +133,7 @@ struct DetectionBreakTests {
 
         #expect(pet.events.count == 1)
         #expect(pet.events.first?.state == .normal)
-        #expect(pet.events.first?.line == "15 分休むね")
+        #expect(pet.events.first?.line == "15 分だけ、待ってる。")
     }
 
     @Test("休憩が明けたら、次の tick で勝手に見張りへ戻る")
@@ -192,7 +192,7 @@ struct DetectionBreakTests {
         await engine.evaluate()
 
         #expect(pet.prompts.count == 1)
-        #expect(pet.prompts.first?.question == "休憩中?")
+        #expect(pet.prompts.first?.question == DetectionEngine.breakQuestion)
     }
 
     @Test("正常に戻ってから疑いになれば、もう一度だけ問いかける")

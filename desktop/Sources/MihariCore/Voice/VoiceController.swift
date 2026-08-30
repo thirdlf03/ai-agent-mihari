@@ -132,6 +132,18 @@ public final class VoiceController: ObservableObject {
         }
     }
 
+    /// 同封音声を 1 本選んでその場で鳴らす。音声タブの試聴から使う。
+    ///
+    /// - Returns: 選んだセリフ。区分にセリフが無ければ `nil`。
+    @discardableResult
+    public func previewBundled(_ kind: BundledVoiceKind) -> BundledVoiceLine? {
+        guard let picked = BundledVoiceLines.shared.pick(kind) else { return nil }
+        if let audio = picked.audio {
+            isSpeaking = player.play(audio: audio, priority: .detection)
+        }
+        return picked
+    }
+
     /// 喋っている途中で止める。オーバーレイの解除などから使う。
     public func stopSpeaking() {
         player.stop()
@@ -149,7 +161,7 @@ public final class VoiceController: ObservableObject {
     private func playIfPossible(_ line: SpokenLine) -> Bool {
         guard let wav = line.audioData else { return false }
         // 検知のセリフは最優先。ひとりごとが鳴っていても割り込んで鳴らす。
-        let played = player.play(wav: wav, priority: .detection)
+        let played = player.play(audio: wav, priority: .detection)
         isSpeaking = played
         return played
     }

@@ -2,7 +2,9 @@ import AVFoundation
 import Foundation
 import os
 
-/// WAV を鳴らす。**アプリで唯一の音の出口。**
+/// 音声を鳴らす。**アプリで唯一の音の出口。**
+///
+/// 中身は `AVAudioPlayer` に任せるので、同封の .m4a(AAC)も VOICEVOX の WAV も同じように鳴る。
 ///
 /// 検知のセリフとペットのひとりごとが同じこれを共有し、どちらを鳴らすかは
 /// `SpeechPlaybackArbiter` が決める。声ごとに `AVAudioPlayer` を持つと二重に鳴るため、
@@ -57,8 +59,8 @@ public final class SpeechPlayer: NSObject, AVAudioPlayerDelegate, @unchecked Sen
 
     /// 検知のセリフとして鳴らす。鳴らせたら `true`。
     @discardableResult
-    public func play(wav: Data) -> Bool {
-        play(wav: wav, priority: .detection)
+    public func play(audio: Data) -> Bool {
+        play(audio: audio, priority: .detection)
     }
 
     /// 鳴らす。鳴らせたら `true`。
@@ -66,7 +68,7 @@ public final class SpeechPlayer: NSObject, AVAudioPlayerDelegate, @unchecked Sen
     /// `SpeechPlaybackArbiter` が `.drop` と判定したら、何もせずに `false` を返す
     /// (鳴っているものは止めない)。`.play` なら鳴っているものを止めて差し替える。
     @discardableResult
-    public func play(wav: Data, priority: SpeechPriority) -> Bool {
+    public func play(audio: Data, priority: SpeechPriority) -> Bool {
         lock.lock()
         defer { lock.unlock() }
 
@@ -76,7 +78,7 @@ public final class SpeechPlayer: NSObject, AVAudioPlayerDelegate, @unchecked Sen
 
         clearPlayer()
         do {
-            let next = try AVAudioPlayer(data: wav)
+            let next = try AVAudioPlayer(data: audio)
             next.delegate = self
             next.prepareToPlay()
             guard next.play() else {

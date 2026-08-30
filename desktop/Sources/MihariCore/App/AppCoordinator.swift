@@ -17,6 +17,8 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     public let permissions: PermissionsModel
     public let daemon = DaemonController()
     public let voice: VoiceController
+    /// 同封音声か live か。ペット・検知・説教のすべてがここを見る。
+    public let voiceModeStore: VoiceModeStore
     public let discord = DiscordController()
     public let attendance: AttendanceModel
     public let detection: DetectionEngine
@@ -68,10 +70,29 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         self.attendance = attendance
         self.permissions = PermissionsModel()
         self.voice = VoiceController(player: player)
+        self.voiceModeStore = VoiceModeStore()
         // 在席スタンプ直後の猶予を効かせるため、検知エンジンに在席の記録を渡す。
         self.detection = DetectionEngine(attendance: attendance)
         self.pet = LivePetPresenter(controller: PetController(speechPlayer: player))
         self.isStatusPanelVisible = statusPanel.isVisible
+        observeVoiceMode()
+    }
+
+    /// 音声モードの切り替えを、喋る側すべてに配る。
+    ///
+    /// メニューから切り替えた瞬間に効かせたいので、`@Published` を購読して押し込む。
+    private func observeVoiceMode() {
+        voiceModeStore.$mode
+            .sink { [weak self] mode in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.detection.voiceMode = mode
+                    self.pet.controller.voiceMode = mode
+                    // メニューバー側のチェックを描き直させる。
+                    self.objectWillChange.send()
+                }
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - 起動
@@ -195,7 +216,7 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
             await attendance.stamp()
             let stamped = attendance.stamps.count > before
             // 音声は検知のセリフと取り合いになるので、吹き出しだけ出す。
-            pet.controller.say(stamped ? "在席、確認したよ" : "確認できなかった…", voiced: false)
+            pet.controller.say(stamped ? "いるね。ちゃんと確認した。" : "…いない。どこ?", voiced: false)
         }
     }
 
@@ -220,14 +241,41 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         isStatusPanelVisible = statusPanel.isVisible
     }
 
+    public var voiceMode: VoiceMode { voiceModeStore.mode }
+
+    public func setVoiceMode(_ mode: VoiceMode) {
+        voiceModeStore.set(mode)
+    }
+
+    public var focusStreakIntervalSeconds: TimeInterval {
+        detection.thresholds.focusStreakIntervalSeconds
+    }
+
+    public func setFocusStreakInterval(_ seconds: TimeInterval) {
+        detection.thresholds = detection.thresholds.withFocusStreakInterval(seconds)
+        objectWillChange.send()
+    }
+
+    public func replayFocusStreak() {
+        pet.sayFocusStreak()
+    }
+
     /// 説教オーバーレイを組み立てる。セリフの取得と読み上げの停止はこのアプリのものを渡す。
     private func makeOverlay() -> OverlayModel {
         let voice = self.voice
         let daemon = self.daemon
+        let modes = self.voiceModeStore
+        let player = self.speechPlayer
         return OverlayModel(
             presenter: ScreenSaverOverlayPresenter(),
-            speak: { [weak voice, weak daemon] request in
-                await voice?.speak(request, using: daemon?.connectedClient)
+            speak: { request in
+                // 同封音声のときは bridge に作らせず、同封の説教から 1 本選んでその場で鳴らす。
+                if modes.mode == .bundled {
+                    guard let sermon = BundledVoiceLines.shared.pick(.sermon) else { return nil }
+                    if let audio = sermon.audio { player.play(audio: audio, priority: .detection) }
+                    return sermon.text
+                }
+                return await voice.speak(request, using: daemon.connectedClient)
             },
             stopSpeaking: { [weak voice] in voice?.stopSpeaking() }
         )
@@ -257,7 +305,11 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
                 guard let line = await voice.fetchLine(request, using: daemon.connectedClient) else {
                     return nil
                 }
-                return SpokenSpeech(text: line.text, audio: line.audioData)
+                return SpokenSpeech(text: line.text, audio: line.audioData, screen: line.screen)
+            },
+            readScreen: { [daemon] request in
+                guard let client = await daemon.connectedClient else { return nil }
+                return try? await client.readScreen(request)
             },
             interrupt: { [overlay] request in
                 await MainActor.run { overlay.show(request: request) }
@@ -277,6 +329,9 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         }
         detection.onPromptDismissed = { [pet] in
             pet.dismissPrompt()
+        }
+        detection.onFocusStreak = { [pet] in
+            pet.sayFocusStreak()
         }
     }
 

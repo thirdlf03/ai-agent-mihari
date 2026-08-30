@@ -17,8 +17,12 @@ public struct RootView: View {
                 .tabItem { Label("検知", systemImage: "eye") }
             DiscordView(discord: coordinator.discord, daemon: coordinator.daemon)
                 .tabItem { Label("Discord", systemImage: "paperplane") }
-            VoiceView(voice: coordinator.voice, daemon: coordinator.daemon)
-                .tabItem { Label("セリフと声", systemImage: "waveform") }
+            VoiceView(
+                voice: coordinator.voice,
+                daemon: coordinator.daemon,
+                voiceMode: coordinator.voiceModeStore
+            )
+            .tabItem { Label("セリフと声", systemImage: "waveform") }
             AttendanceView(model: coordinator.attendance)
                 .tabItem { Label("在席", systemImage: "touchid") }
             HeadGestureView(controller: coordinator.headGesture)
