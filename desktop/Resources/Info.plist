@@ -34,5 +34,7 @@
 	<string>AirPods の向きを読み取り、うなずき/首振りを「はい/いいえ」の回答として受け取ります。</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>説教を聞かせるあいだ、再生中の音楽を一時停止するために他アプリを操作します。</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>保存されたスクリーンショットにペットを描き足すために、スクリーンショットの保存先(既定はデスクトップ)を読み書きします。</string>
 </dict>
 </plist>

@@ -1,9 +1,10 @@
-.PHONY: help setup fmt lint lint-swift lint-python build test test-swift test-python run clean
+.PHONY: help setup fmt lint lint-swift lint-python build test test-swift test-python run kill clean
 
 help:
 	@echo "make setup         - bridge/ の Python 依存を同期する(初回セットアップ)"
 	@echo "make build         - Mihari.app をビルドして署名する(証明書があれば使う。desktop/README.md 参照)"
 	@echo "make run           - Mihari.app をビルドして起動する"
+	@echo "make kill          - 起動中の Mihari と監視プロセス(watchdog)を止める"
 	@echo "make test          - Swift / Python のテストを実行する"
 	@echo "                     (test-swift / test-python で片側だけ実行できる)"
 	@echo "make fmt           - Swift / Python のコードを整形する"
@@ -19,6 +20,9 @@ build:
 
 run:
 	cd desktop && ./run.sh
+
+kill:
+	cd desktop && ./kill.sh
 
 test: test-swift test-python
 

@@ -8,6 +8,7 @@ final class StubPetMenuActions: ObservableObject, PetMenuActions {
     var isWatching = false
     var isOnBreak = false
     var isStatusPanelVisible = false
+    var isPhotobombEnabled = true
     var voiceMode: VoiceMode = .bundled
     var focusStreakIntervalSeconds: TimeInterval = 900
     var isFastThresholds = false
@@ -24,6 +25,7 @@ final class StubPetMenuActions: ObservableObject, PetMenuActions {
     func openDiscordSettings() {}
     func openPermissions() {}
     func toggleStatusPanel() {}
+    func setPhotobombEnabled(_ enabled: Bool) { isPhotobombEnabled = enabled }
     func setVoiceMode(_ mode: VoiceMode) { voiceMode = mode }
     func setFocusStreakInterval(_ seconds: TimeInterval) { focusStreakIntervalSeconds = seconds }
     func setFastThresholds(_ enabled: Bool) { isFastThresholds = enabled }

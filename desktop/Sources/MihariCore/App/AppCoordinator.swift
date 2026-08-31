@@ -13,6 +13,8 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
 
     /// 検証用の 10 タブ画面を出すかどうかを決める環境変数。
     static let debugUIEnvironmentKey = "MIHARI_DEBUG_UI"
+    /// スクショに写り込むかを覚えておくキー。未設定なら写り込む。
+    static let photobombEnabledKey = "photobombEnabled"
 
     public let permissions: PermissionsModel
     public let daemon = DaemonController()
@@ -52,6 +54,8 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     @Published public private(set) var isOnBreak = false
     /// 状態パネルを出しているか。メニューの表示に使う。
     @Published public private(set) var isStatusPanelVisible = false
+    /// スクショに写り込むか。メニューの表示に使う。
+    @Published public private(set) var isPhotobombEnabled: Bool
 
     /// 在席スタンプのカットインを出す層。
     private let cutIn: AttendanceCutInPresenting = AttendanceCutInPresenter()
@@ -69,6 +73,16 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     private let speechPlayer: SpeechPlayer
     /// アプリの外(Claude Code のフックなど)からの合図の受け口。
     private let externalTrigger = ExternalTriggerListener()
+    /// スクリーンショットが保存されたのを見張る。
+    private let photobombWatcher = ScreenshotPhotobombWatcher()
+    /// 保存されたスクショにペットのスプライトを描き足す層。
+    ///
+    /// セリフをペットの吹き出しに繋ぐため、`self` を参照できる `lazy var` にしてある。
+    private lazy var photobomb = ScreenshotPhotobombCompositor(
+        say: { [weak self] line in
+            self?.pet.controller.say(line)
+        }
+    )
     private let windows = AuxiliaryWindows()
     private let statusPanel = StatusPanelController()
     /// 監視中はディスプレイ/システムのアイドルスリープを止める。
@@ -116,6 +130,9 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         self.detection = DetectionEngine(attendance: attendance)
         self.pet = LivePetPresenter(controller: PetController(speechPlayer: player))
         self.isStatusPanelVisible = statusPanel.isVisible
+        // 一度も切っていなければ写り込む。余興なので、既定で入っている方が気付いてもらえる。
+        self.isPhotobombEnabled =
+            UserDefaults.standard.object(forKey: Self.photobombEnabledKey) as? Bool ?? true
         self.sleepPreventer = sleepPreventer
         self.loginItemRegistrar = loginItemRegistrar
         self.watchdogRegistrar = watchdogRegistrar
@@ -205,6 +222,11 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
             }
         }
 
+        // 保存されたスクショに、あとからペットのスプライトを描き足して写り込む。
+        if isPhotobombEnabled {
+            startPhotobombWatching()
+        }
+
         Task { [weak self] in
             guard let self else { return }
             await daemon.start()
@@ -227,6 +249,7 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     /// 終了時の後片付け。見張りを止めて、子プロセスのデーモンも落とす。
     public func shutdown() {
         detection.stop()
+        photobombWatcher.stop()
         daemon.stop()
         sleepPreventer.stop()
         watchdogReassertionTask?.cancel()
@@ -401,6 +424,29 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     public func toggleStatusPanel() {
         statusPanel.toggle { statusPanelView }
         isStatusPanelVisible = statusPanel.isVisible
+    }
+
+    /// スクショへの写り込みを入れる / 切る。切り替えた結果は次の起動にも引き継ぐ。
+    ///
+    /// 見張り始める前に入れられても、見張りを始めるときに `begin()` が起こす。
+    public func setPhotobombEnabled(_ enabled: Bool) {
+        isPhotobombEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.photobombEnabledKey)
+        if enabled {
+            guard hasBegun else { return }
+            startPhotobombWatching()
+        } else {
+            photobombWatcher.stop()
+        }
+    }
+
+    /// 保存されたスクショを見張り始める。すでに見張っていれば何も起きない。
+    private func startPhotobombWatching() {
+        photobombWatcher.start { [weak self] url in
+            Task { @MainActor [weak self] in
+                await self?.photobomb.photobomb(url)
+            }
+        }
     }
 
     public var voiceMode: VoiceMode { voiceModeStore.mode }

@@ -42,6 +42,12 @@ public final class DetectionEngine: ObservableObject {
     /// 画面に残す記録の件数。
     public static let logHistoryLimit = 50
 
+    /// デバッグメニューの「メンヘラを始める」で続けて投げる回数。
+    public static let debugClingyBurstCount = 5
+
+    /// デバッグの連投の間隔。同封音声が 3〜4 秒なので、声が重ならない長さにする。
+    public static let debugClingyBurstGapSeconds: TimeInterval = 5
+
     /// 同封セリフを読めなかったときに使う、疑い 2 の問いかけ。
     public static let fallbackQuestion = "ねぇ、まだそこにいる?"
 
@@ -98,6 +104,15 @@ public final class DetectionEngine: ObservableObject {
     private var lastClingyPostAt: Date?
     /// メンヘラモードで最後に証拠を撮り直した時刻。
     private var lastClingyEvidenceAt: Date?
+
+    /// デバッグの連投が走っているか。走っているあいだは評価を止める。
+    private var clingyBurstInProgress = false
+
+    /// デバッグから始めた確認が走っているか。
+    ///
+    /// メニューを押した操作そのものが Mac の入力なので、素通しだと次のティックで
+    /// 「戻ってきた」と見なして数秒で畳んでしまう。走っているあいだは Mac の入力で畳まない。
+    private var debugCheckInProgress = false
 
     /// 正常が続き始めた時刻。褒めるたびにここを now へ進める。続いていなければ `nil`。
     private var focusStreakSince: Date?
@@ -255,6 +270,13 @@ public final class DetectionEngine: ObservableObject {
             return resting
         }
 
+        // デバッグの連投中。ここで畳むと投稿が途中で止まるので、終わるまで触らない。
+        if clingyBurstInProgress { return .idle(reason: "メンヘラの連投中") }
+
+        // デバッグから始めた確認中。メニューを押した手の動きで畳むと、
+        // 出したばかりの問いかけやカットインが数秒で消える。決着するまで触らない。
+        if debugCheckInProgress { return .idle(reason: "デバッグの確認中") }
+
         let signals = await currentSignals(now: now)
         lastSignals = signals
 
@@ -396,6 +418,8 @@ public final class DetectionEngine: ObservableObject {
         guard generation == checkGeneration, runningCheck == .touchID else { return }
         guard case .suspect(let stage) = state, stage == DetectionState.firstSuspectStage else { return }
         runningCheck = nil
+        // 決着したので、ここから先は通常どおり Mac の入力で畳んでよい。
+        debugCheckInProgress = false
 
         let now = Date()
         guard outcome != .stamped else {
@@ -463,6 +487,8 @@ public final class DetectionEngine: ObservableObject {
         guard generation == checkGeneration, runningCheck == .headGesture else { return }
         guard case .suspect(let stage) = state, stage == 2 else { return }
         runningCheck = nil
+        // 決着したので、ここから先は通常どおり Mac の入力で畳んでよい。
+        debugCheckInProgress = false
 
         let now = Date()
         guard answer != true else {
@@ -545,7 +571,7 @@ public final class DetectionEngine: ObservableObject {
     // MARK: - メンヘラモード
 
     /// メンヘラモードに入る。証拠はいま撮ったばかりなので、次の投稿は間隔ぶん先。
-    private func enterClingy(now: Date) {
+    func enterClingy(now: Date) {
         state = .clingy(since: now, count: 0)
         lastClingyPostAt = now
         lastClingyEvidenceAt = now
@@ -571,6 +597,24 @@ public final class DetectionEngine: ObservableObject {
                 now.timeIntervalSince($0) >= thresholds.clingyEvidenceIntervalSeconds
             } ?? true
 
+        return await postClingy(
+            since: since,
+            count: count,
+            signals: signals,
+            now: now,
+            withEvidence: withEvidence
+        )
+    }
+
+    /// メンヘラの 1 件を実際に投げる。間隔を計るのは呼ぶ側の仕事。
+    @discardableResult
+    private func postClingy(
+        since: Date,
+        count: Int,
+        signals: DetectionSignals,
+        now: Date,
+        withEvidence: Bool
+    ) async -> DetectionDecision {
         // 送る前に数えておく。送信を待っているあいだの次のティックで二重に投げないため。
         state = .clingy(since: since, count: count + 1)
         lastClingyPostAt = now
@@ -728,6 +772,8 @@ public final class DetectionEngine: ObservableObject {
         checkGeneration += 1
         let wasTouchID = runningCheck == .touchID
         runningCheck = nil
+        // 打ち切るならデバッグの確認も終わり。停止・休憩・エピソード終了はすべてここを通る。
+        debugCheckInProgress = false
         dismissPrompt()
         guard wasTouchID else { return }
         // Touch ID のダイアログとカットインを閉じてもらう。
@@ -757,9 +803,12 @@ public final class DetectionEngine: ObservableObject {
 
         switch step {
         case .touchIDCheck:
+            // フラグは `enterSuspect` のあとに立てる。中の `cancelChecks()` が先に消してしまう。
             enterSuspect(stage: 1, signals: signals, now: now)
+            debugCheckInProgress = true
         case .headGestureCheck:
             enterSuspect(stage: 2, signals: signals, now: now)
+            debugCheckInProgress = true
         case .finalWarning:
             enterSuspect(stage: 3, signals: signals, now: now)
         case .expose:
@@ -775,9 +824,27 @@ public final class DetectionEngine: ObservableObject {
             enterClingy(now: now)
             record(
                 DetectionDecision(state: state, reason: "デバッグメニューからメンヘラモードに入った"),
-                outcome: "投稿は間隔ぶん先",
+                outcome: "\(Self.debugClingyBurstCount) 回ぶん続けて投げる",
                 at: now
             )
+            // 押したら確定で連投する。間隔待ちも「戻ってきた」判定も挟ませない。
+            clingyBurstInProgress = true
+            defer { clingyBurstInProgress = false }
+            for round in 0..<Self.debugClingyBurstCount {
+                // 途中で「メンヘラを終える」や停止で畳まれたら、そこで止める。
+                guard case .clingy(let since, let count) = state else { break }
+                await postClingy(
+                    since: since,
+                    count: count,
+                    signals: signals,
+                    now: Date(),
+                    withEvidence: false
+                )
+                // 声が重ならないように間を空ける。最後の 1 件のあとは待たない。
+                if round < Self.debugClingyBurstCount - 1 {
+                    await sleep(.seconds(Self.debugClingyBurstGapSeconds))
+                }
+            }
         case .endClingy:
             guard case .clingy(let since, _) = state else {
                 finishEpisode()
