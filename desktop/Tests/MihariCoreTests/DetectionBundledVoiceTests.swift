@@ -23,11 +23,8 @@ struct DetectionClingyTests {
             thresholds: thresholds,
             iphone: iphone
         )
-        engine.runDebugStep(.startClingy)
-        await settle(until: {
-            if case .clingy = engine.state { return true }
-            return false
-        })
+        // デバッグメニューの連投を挟まず、メンヘラモードに入った直後だけを作る。
+        engine.enterClingy(now: Date())
         return engine
     }
 

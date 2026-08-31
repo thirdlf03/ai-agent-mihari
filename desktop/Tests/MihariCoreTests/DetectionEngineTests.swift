@@ -420,3 +420,176 @@ struct DetectionExposureTests {
         #expect(engine.log.contains { $0.reason.isEmpty == false })
     }
 }
+
+/// デバッグメニューの「メンヘラを始める」。押したら確定で 5 回投げる。
+@Suite("メンヘラの連投(デバッグ)")
+@MainActor
+struct DetectionClingyBurstTests {
+
+    /// 連投の待ちを外から開ける門。閉じているあいだ、連投は次の 1 件へ進まない。
+    private final class BurstGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _closed = true
+
+        var isClosed: Bool { lock.withLock { _closed } }
+        func open() { lock.withLock { _closed = false } }
+    }
+
+    @Test("Mac を触っていても、テキストだけの投稿を 5 回続けて投げる")
+    func burstPostsFiveTimes() async {
+        let spy = ActionSpy()
+        let pet = PetSpy()
+        // 無操作 0 秒＝Mac を触っている。それでも連投は止まらない。
+        let engine = makeDetectionEngine(idle: IdleClock(0), spy: spy, pet: pet, sleep: { _ in })
+
+        engine.runDebugStep(.startClingy)
+        await settle(until: { spy.posts.count == DetectionEngine.debugClingyBurstCount })
+
+        #expect(spy.posts.count == 5)
+        #expect(spy.posts.allSatisfy { $0.mention })
+        #expect(spy.posts.allSatisfy { $0.filename == "evidence.png" })
+        #expect(spy.posts.allSatisfy { $0.image == nil })
+        #expect(spy.posts.allSatisfy { $0.text.contains("戻ってこないまま") })
+
+        guard case .clingy(_, let count) = engine.state else {
+            Issue.record("メンヘラモードのままになっていない")
+            return
+        }
+        #expect(count == DetectionEngine.debugClingyBurstCount)
+        #expect(engine.escalationStage == PetEvent.clingyStage)
+    }
+
+    @Test("連投の途中で評価が走っても、「戻ってきた」投稿は挟まらない")
+    func evaluatingDuringBurstDoesNotFinish() async {
+        let spy = ActionSpy()
+        let gate = BurstGate()
+        let engine = makeDetectionEngine(
+            idle: IdleClock(0),
+            spy: spy,
+            sleep: { _ in
+                // 門が開くまで連投を止めて、途中の状態を確かめられるようにする。
+                while gate.isClosed { try? await Task.sleep(for: .milliseconds(1)) }
+            }
+        )
+
+        engine.runDebugStep(.startClingy)
+        await settle(until: { spy.posts.count == 1 })
+
+        // Mac を触っているので、素通しなら「戻ってきた」投稿が挟まる。
+        let decision = await engine.evaluate()
+        #expect(decision.reason == "メンヘラの連投中")
+        #expect(spy.posts.count == 1)
+
+        gate.open()
+        await settle(until: { spy.posts.count == DetectionEngine.debugClingyBurstCount })
+
+        #expect(spy.posts.count == 5)
+        #expect(spy.posts.allSatisfy { $0.mention })
+        #expect(spy.posts.allSatisfy { $0.text != DetectionEngine.fallbackReturnedLine })
+    }
+}
+
+/// デバッグメニューの「今すぐ Touch ID 確認 / 首振り確認」。
+/// メニューをクリックした操作そのものが Mac の入力なので、素通しだと数秒で畳まれてしまう。
+@Suite("デバッグの確認は Mac を触っていても畳まない")
+@MainActor
+struct DetectionDebugCheckTests {
+
+    /// 確認の決着を外から起こす門。閉じているあいだ、Touch ID は決着しない。
+    private final class CheckGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _closed = true
+
+        var isClosed: Bool { lock.withLock { _closed } }
+        func open() { lock.withLock { _closed = false } }
+    }
+
+    /// 無操作 0 秒(＝Mac を触っている)のまま首振り確認を出す。
+    private func startHeadGestureCheck(pet: PetSpy, spy: ActionSpy = ActionSpy()) async -> DetectionEngine {
+        let engine = makeDetectionEngine(idle: IdleClock(0), spy: spy, pet: pet)
+        engine.runDebugStep(.headGestureCheck)
+        await settle(until: { pet.prompts.count == 1 })
+        return engine
+    }
+
+    @Test("首振り確認は、Mac を触っていても問いかけが残る")
+    func headGestureCheckSurvivesInput() async {
+        let pet = PetSpy()
+        let engine = await startHeadGestureCheck(pet: pet)
+
+        let decision = await engine.evaluate()
+
+        #expect(decision.reason == "デバッグの確認中")
+        #expect(engine.state == .suspect(stage: 2))
+        #expect(pet.prompts.count == 1)
+        #expect(pet.dismissals == 0)
+    }
+
+    @Test("うなずけば決着して正常に戻り、その先は通常のルールに戻る")
+    func nodSettlesTheDebugCheck() async throws {
+        let pet = PetSpy()
+        let engine = await startHeadGestureCheck(pet: pet)
+        let prompt = try #require(pet.prompts.first)
+
+        prompt.onAnswer(true)
+        await settle(until: { engine.state == .normal })
+
+        #expect(engine.state == .normal)
+        #expect(pet.dismissals == 1)
+
+        let decision = await engine.evaluate()
+        #expect(decision.reason != "デバッグの確認中")
+        #expect(decision.state == .normal)
+    }
+
+    @Test("首を横に振れば疑い 2 のまま。そのあとは Mac を触っていれば正常に戻る")
+    func shakeSettlesAndLetsTheNormalRuleBack() async throws {
+        let pet = PetSpy()
+        let engine = await startHeadGestureCheck(pet: pet)
+        let prompt = try #require(pet.prompts.first)
+
+        prompt.onAnswer(false)
+        await settle(until: { pet.dismissals == 1 })
+        #expect(engine.state == .suspect(stage: 2))
+
+        // 決着したので、ここからは通常どおり「戻ってきた」で畳まれる。
+        let decision = await engine.evaluate()
+        #expect(decision.reason == "疑い 2 回目の途中で戻ってきた")
+        #expect(engine.state == .normal)
+    }
+
+    @Test("Touch ID 確認も、決着するまで Mac の入力で畳まない")
+    func touchIDCheckSurvivesInput() async {
+        let spy = ActionSpy()
+        let gate = CheckGate()
+        let engine = makeDetectionEngine(idle: IdleClock(0), spy: spy)
+        engine.actions.confirmPresence = { _ in
+            // 門が開くまで決着させず、途中の状態を確かめられるようにする。
+            while gate.isClosed { try? await Task.sleep(for: .milliseconds(1)) }
+            return .stamped
+        }
+
+        engine.runDebugStep(.touchIDCheck)
+        await settle(until: { engine.isCheckRunning })
+
+        let decision = await engine.evaluate()
+        #expect(decision.reason == "デバッグの確認中")
+        #expect(engine.state == .suspect(stage: 1))
+        #expect(spy.presenceCancels == 0)
+
+        gate.open()
+        await settle(until: { engine.state == .normal })
+        #expect(engine.state == .normal)
+    }
+
+    @Test("監視を止めれば、デバッグの確認中でも問いかけは畳まれる")
+    func stopFoldsTheDebugCheck() async {
+        let pet = PetSpy()
+        let engine = await startHeadGestureCheck(pet: pet)
+
+        engine.stop()
+
+        #expect(engine.state == .normal)
+        #expect(pet.dismissals == 1)
+    }
+}

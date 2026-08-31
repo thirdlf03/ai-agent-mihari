@@ -117,14 +117,16 @@ public struct DetectionDecision: Equatable, Sendable {
 /// 見た目だけを再現する偽 `PetEvent` と違い、**本物の遷移・撮影・投稿が走る。**
 public enum DetectionDebugStep: String, CaseIterable, Sendable {
     /// 疑い 1 に入って、すぐ Touch ID を確かめる。
+    /// メニューを押した手の動きで畳まないよう、決着するまでは Mac を触っていても続く。
     case touchIDCheck
     /// 疑い 2 に入って、すぐ首振りを尋ねる。
+    /// こちらも同じく、決着するまでは Mac を触っていても畳まない。
     case headGestureCheck
     /// 疑い 3 に入って、最終警告だけ喋る。
     case finalWarning
     /// いま晒す。証拠を撮って Discord へ送り、メンヘラモードに入る。
     case expose
-    /// メンヘラモードを始める。
+    /// メンヘラモードに入って、5 回ぶん続けて投稿する。
     case startClingy
     /// メンヘラモードを終える(戻ってきた扱い)。
     case endClingy
@@ -136,7 +138,7 @@ public enum DetectionDebugStep: String, CaseIterable, Sendable {
         case .headGestureCheck: return "今すぐ首振り確認"
         case .finalWarning: return "今すぐ最終警告"
         case .expose: return "今すぐ晒す(撮影・投稿する)"
-        case .startClingy: return "メンヘラを始める(投稿する)"
+        case .startClingy: return "メンヘラを始める(5 回続けて投稿する)"
         case .endClingy: return "メンヘラを終える(戻ってきた扱い)"
         }
     }
