@@ -12,6 +12,8 @@ public protocol PetMenuActions: AnyObject, ObservableObject {
     var isOnBreak: Bool { get }
     /// 状態パネルを出しているか。メニューのチェックに使う。
     var isStatusPanelVisible: Bool { get }
+    /// スクショに写り込むか。メニューのチェックに使う。
+    var isPhotobombEnabled: Bool { get }
     /// いまの音声モード。デバッグメニューのチェックに使う。
     var voiceMode: VoiceMode { get }
     /// 集中継続を褒める間隔(秒)。デバッグメニューのチェックに使う。
@@ -35,6 +37,8 @@ public protocol PetMenuActions: AnyObject, ObservableObject {
     func openPermissions()
     /// 状態パネルの表示を切り替える。
     func toggleStatusPanel()
+    /// スクショへの写り込みを入れる / 切る。
+    func setPhotobombEnabled(_ enabled: Bool)
     /// 音声モードを切り替える。再起動なしで効く。
     func setVoiceMode(_ mode: VoiceMode)
     /// 集中継続を褒める間隔を変える。

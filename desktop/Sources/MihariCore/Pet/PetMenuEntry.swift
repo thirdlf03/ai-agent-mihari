@@ -78,6 +78,11 @@ public enum PetMenuEntries {
                 isChecked: actions.isStatusPanelVisible,
                 action: { actions.toggleStatusPanel() }
             ),
+            .item(
+                title: "スクショに写り込む",
+                isChecked: actions.isPhotobombEnabled,
+                action: { actions.setPhotobombEnabled(!actions.isPhotobombEnabled) }
+            ),
             .separator,
             .submenu(
                 title: "デバッグ",
