@@ -47,4 +47,25 @@ struct PetMenuEntriesTests {
         )
         #expect(disabled.isChecked == false)
     }
+
+    @Test("「仕事を頼む…」は Discord 設定のそばにあり、押すと依頼窓を開く")
+    func jobRequestEntryOpensTheWindow() throws {
+        let presenter = makePresenter()
+        let actions = StubPetMenuActions()
+
+        let entries = PetMenuEntries.make(actions: actions, presenter: presenter)
+        let titles = entries.compactMap { entry -> String? in
+            if case .item(let title, _, _) = entry { return title }
+            return nil
+        }
+        // Discord 設定のそば(直前)に置く。
+        #expect(titles.contains("仕事を頼む…"))
+        let jobIndex = try #require(titles.firstIndex(of: "仕事を頼む…"))
+        let discordIndex = try #require(titles.firstIndex(of: "Discord 設定…"))
+        #expect(jobIndex == discordIndex - 1)
+
+        let item = try #require(findItem("仕事を頼む…", in: entries))
+        item.action()
+        #expect(actions.jobRequestOpens == 1)
+    }
 }
