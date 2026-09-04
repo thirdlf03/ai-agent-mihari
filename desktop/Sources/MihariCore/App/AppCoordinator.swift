@@ -417,6 +417,11 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         windows.showDiscord { DiscordView(discord: discord, daemon: daemon) }
     }
 
+    /// 作業部屋への仕事の依頼窓を開く。行き先とトークンは環境変数で決まる。
+    public func openJobRequest() {
+        JobRequestWindowController.shared.show(client: JobRequestClient.makeFromEnvironment())
+    }
+
     public func openPermissions() {
         showPermissionWindow(canStart: !hasBegun)
     }

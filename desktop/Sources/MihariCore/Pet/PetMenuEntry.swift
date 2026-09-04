@@ -50,6 +50,10 @@ public enum PetMenuEntries {
             ),
             .separator,
             .item(
+                title: "仕事を頼む…",
+                action: { actions.openJobRequest() }
+            ),
+            .item(
                 title: "Discord 設定…",
                 action: { actions.openDiscordSettings() }
             ),
