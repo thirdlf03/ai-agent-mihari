@@ -35,3 +35,17 @@ def test_restore_moves_running_back_to_queued(tmp_path: Path) -> None:
     assert len(restored) == 1
     assert store.get(job.id).status is JobStatus.QUEUED
     assert store.list_queued()[0].id == job.id
+
+
+def test_in_memory_store_finds_by_thread_and_running(tmp_path: Path) -> None:
+    store = InMemoryJobStore(tmp_path)
+    job = store.create(
+        CreateJobRequest(title="スレ", body="", source=JobSource.FORUM, thread_id=42)
+    )
+    assert store.find_by_thread_id(42) is not None
+    assert store.find_by_thread_id(42).id == job.id
+    assert store.find_by_thread_id(99) is None
+    store.set_status(job.id, JobStatus.RUNNING)
+    running = store.list_running()
+    assert len(running) == 1
+    assert running[0].id == job.id

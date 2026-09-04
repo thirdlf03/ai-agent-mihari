@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -11,6 +12,10 @@ from mihari_room.discord.inbound import (
     parse_forum_post,
 )
 from mihari_room.orchestrator import RoomOrchestrator
+from mihari_room.queue.file_queue import CancelNotAllowed
+from mihari_room.store.file_store import JobNotFound
+
+logger = logging.getLogger("mihari_room")
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,8 +46,7 @@ async def handle_incoming(
         return
 
     thread_id = message.thread_id
-    finder = getattr(orchestrator.store, "find_by_thread_id", None)
-    existing = finder(thread_id) if callable(finder) else None
+    existing = orchestrator.store.find_by_thread_id(thread_id)
 
     if existing is not None:
         starter_id = existing.requested_by or ""
@@ -52,10 +56,7 @@ async def handle_incoming(
             thread_starter_id=starter_id,
             owner_id=owner_id,
         ):
-            try:
-                await orchestrator.cancel_thread(thread_id, by=message.author_id)
-            except Exception:
-                return
+            await _cancel_or_explain(orchestrator, thread_id, by=message.author_id)
             return
         await orchestrator.follow_up(thread_id, message.content, requested_by=message.author_id)
         return
@@ -72,3 +73,23 @@ async def handle_incoming(
         )
     )
     await orchestrator.submit(request, attachments=message.attachments)
+
+
+async def _cancel_or_explain(orchestrator: RoomOrchestrator, thread_id: int, *, by: str) -> None:
+    try:
+        await orchestrator.cancel_thread(thread_id, by=by)
+    except CancelNotAllowed:
+        logger.info("Forum のキャンセルを断った thread=%s by=%s", thread_id, by)
+        await _say_or_log(orchestrator, thread_id, "あなたには止められないよ")
+    except JobNotFound:
+        logger.info("止める仕事がない thread=%s", thread_id)
+    except Exception:
+        logger.exception("Forum のキャンセルに失敗した thread=%s", thread_id)
+        await _say_or_log(orchestrator, thread_id, "止められなかった。あとで見て。")
+
+
+async def _say_or_log(orchestrator: RoomOrchestrator, thread_id: int, text: str) -> None:
+    try:
+        await orchestrator.say(thread_id, text)
+    except Exception:
+        logger.exception("Forum に返事を書けなかった thread=%s", thread_id)

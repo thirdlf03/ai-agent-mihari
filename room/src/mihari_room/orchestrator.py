@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -19,8 +20,15 @@ from mihari_room.contracts import (
 )
 from mihari_room.store.file_store import JobNotFound
 
+logger = logging.getLogger("mihari_room")
+
 #: 実行中に続きが来たとき、終わったらもう一回回す印。
 REQUEUE_FILENAME = "requeue"
+
+#: Forum が起きるのを待つ間隔。短すぎると空回り、長すぎると起動がもたつく。
+_BOARD_READY_POLL_SEC = 0.05
+#: ポンプが転んだあとの一息。同じ例外で忙しく死なないように。
+_PUMP_BACKOFF_SEC = 0.5
 
 
 class RoomOrchestrator:
@@ -114,12 +122,39 @@ class RoomOrchestrator:
         job = self._require_by_thread(thread_id)
         return await self.cancel(job.id, by=by)
 
+    async def say(self, thread_id: int, text: str) -> None:
+        """Forum に短い返事を書く。キャンセルを断ったときなど。"""
+        await self._board.post_speech(thread_id, text)
+
+    def _board_is_ready(self) -> bool:
+        """BoundForumBoard は bind 前だけ待つ。RecordingBoard には印がないので起きている扱い。"""
+        if not hasattr(self._board, "is_ready"):
+            return True
+        value = self._board.is_ready
+        if callable(value):
+            return bool(value())
+        return bool(value)
+
+    async def _wait_until_board_ready(self) -> None:
+        while not self._board_is_ready():
+            await asyncio.sleep(_BOARD_READY_POLL_SEC)
+
     async def _pump(self) -> None:
         try:
             while True:
+                await self._wait_until_board_ready()
                 await self._wake.wait()
                 self._wake.clear()
-                await self._run_available()
+                try:
+                    await self._run_available()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("ポンプが転んだ。机を待ちに戻して続ける")
+                    restored = self._store.restore_running_to_queued()
+                    if restored:
+                        self.wake()
+                    await asyncio.sleep(_PUMP_BACKOFF_SEC)
         except asyncio.CancelledError:
             raise
 
@@ -150,12 +185,14 @@ class RoomOrchestrator:
 
         status = await self._worker.run(job, on_progress)
         latest = self._store.get(job.id)
+        # 続きの印は成否に関わらず消す。FAILED のまま残すと、次に成功した瞬間に余分に回る。
+        wants_again = self._consume_requeue(job.id)
         if latest.status is JobStatus.CANCELLED:
             self.wake()
             return
         latest = self._store.set_status(job.id, status)
         await self._board.set_tag(thread_id, status)
-        if status is JobStatus.DONE and self._consume_requeue(job.id):
+        if wants_again:
             latest = self._store.set_status(job.id, JobStatus.QUEUED)
             await self._board.set_tag(thread_id, JobStatus.QUEUED)
             self._queue.enqueue(latest)
@@ -186,9 +223,7 @@ class RoomOrchestrator:
         return job.thread_id
 
     def _require_by_thread(self, thread_id: int) -> Job:
-        finder = getattr(self._store, "find_by_thread_id", None)
-        if callable(finder):
-            job = finder(thread_id)
-            if job is not None:
-                return job
-        raise JobNotFound(f"thread {thread_id}")
+        job = self._store.find_by_thread_id(thread_id)
+        if job is None:
+            raise JobNotFound(f"thread {thread_id}")
+        return job

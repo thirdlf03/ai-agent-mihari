@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from mihari_room.app import create_app
@@ -21,9 +22,10 @@ def _client(tmp_path: Path) -> TestClient:
     store = FileJobStore(tmp_path)
     board = RecordingBoard()
     worker = ScriptedWorker([ProgressEvent(kind=ProgressKind.SUMMARY, text="やった")])
-    orch = RoomOrchestrator(store, FileJobQueue(store), board, worker)
+    orch = RoomOrchestrator(store, FileJobQueue(store, owner_id="owner"), board, worker)
     config = RoomConfig(token=TOKEN, root=tmp_path, owner_id="owner")
-    app = create_app(config, orch)
+    # ポンプを動かさない。速い Worker だと応答前に DONE へ進んでフレークする。
+    app = create_app(config, orch, start_pump=False)
     return TestClient(app)
 
 
@@ -63,3 +65,21 @@ def test_empty_title_uses_first_line(tmp_path: Path) -> None:
     job_id = response.json()["job_id"]
     store = FileJobStore(tmp_path)
     assert store.get(job_id).title == "先頭が題"
+
+
+def test_owner_can_cancel_without_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MIHARI_OWNER_ID", raising=False)
+    client = _client(tmp_path)
+    created = client.post(
+        "/jobs",
+        json={"title": "掃除", "body": "頼む", "source": "pet"},
+        headers={TOKEN_HEADER: TOKEN},
+    )
+    job_id = created.json()["job_id"]
+    response = client.post(
+        f"/jobs/{job_id}/cancel",
+        json={},
+        headers={TOKEN_HEADER: TOKEN},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == JobStatus.CANCELLED.value

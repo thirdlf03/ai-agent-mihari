@@ -45,11 +45,13 @@ class ScriptedWorker:
         events: list[ProgressEvent],
         result: JobStatus = JobStatus.DONE,
         on_start: Callable[[Job], Awaitable[None]] | None = None,
+        results: list[JobStatus] | None = None,
     ) -> None:
         self.events = events
         self.result = result
         self.jobs: list[Job] = []
         self._on_start = on_start
+        self._results = list(results) if results is not None else None
 
     async def run(
         self,
@@ -61,4 +63,6 @@ class ScriptedWorker:
             await self._on_start(job)
         for event in self.events:
             await on_progress(event)
+        if self._results:
+            return self._results.pop(0)
         return self.result

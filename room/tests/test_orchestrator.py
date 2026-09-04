@@ -13,8 +13,9 @@ from mihari_room.contracts import (
     ProgressEvent,
     ProgressKind,
 )
+from mihari_room.discord.board import BoundForumBoard
 from mihari_room.listener import IncomingMessage, handle_incoming
-from mihari_room.orchestrator import RoomOrchestrator
+from mihari_room.orchestrator import REQUEUE_FILENAME, RoomOrchestrator
 from mihari_room.queue.file_queue import FileJobQueue
 from mihari_room.store.file_store import FileJobStore
 from tests.recording import RecordingBoard, ScriptedWorker
@@ -138,6 +139,101 @@ async def test_restore_puts_running_back_on_the_desk(tmp_path: Path) -> None:
     assert store.get(job.id).status is JobStatus.QUEUED
 
 
+async def test_pump_waits_until_forum_is_bound(tmp_path: Path) -> None:
+    store = FileJobStore(tmp_path)
+    bound = BoundForumBoard()
+    worker = ScriptedWorker([ProgressEvent(kind=ProgressKind.SUMMARY, text="起きた")])
+    orch = RoomOrchestrator(store, FileJobQueue(store), bound, worker)
+    job = store.create(CreateJobRequest(title="待ち", body="x", source=JobSource.PET, thread_id=7))
+    store.set_status(job.id, JobStatus.RUNNING)
+    orch.restore()
+    orch.start_pump()
+    await asyncio.sleep(0.15)
+    assert store.get(job.id).status is JobStatus.QUEUED
+    assert worker.jobs == []
+    assert orch._pump_task is not None
+    assert not orch._pump_task.done()
+
+    bound.bind(RecordingBoard())
+    await asyncio_settle()
+    await orch.aclose()
+    assert store.get(job.id).status is JobStatus.DONE
+    assert worker.jobs[0].id == job.id
+
+
+async def test_pump_survives_board_error_and_retries(tmp_path: Path) -> None:
+    store = FileJobStore(tmp_path)
+    board = BoomOnceBoard()
+    worker = ScriptedWorker([ProgressEvent(kind=ProgressKind.SUMMARY, text="やり直し")])
+    orch = RoomOrchestrator(store, FileJobQueue(store), board, worker)
+    orch.start_pump()
+    job = await orch.submit(CreateJobRequest(title="転ぶ", body="x", source=JobSource.PET))
+    # ポンプの一息 (0.5s) を待つ
+    await asyncio.sleep(0.8)
+    await asyncio_settle()
+    task = orch._pump_task
+    assert task is not None
+    assert not task.done()
+    await orch.aclose()
+    assert store.get(job.id).status is JobStatus.DONE
+
+
+async def test_follow_up_requeues_even_when_run_failed(tmp_path: Path) -> None:
+    released = asyncio.Event()
+
+    async def block(_job: Job) -> None:
+        await released.wait()
+
+    worker = ScriptedWorker(
+        [ProgressEvent(kind=ProgressKind.SUMMARY, text="途中")],
+        on_start=block,
+        results=[JobStatus.FAILED, JobStatus.DONE],
+    )
+    orch, store, _board, _ = _make_room(tmp_path, worker)
+    orch.start_pump()
+    job = await orch.submit(
+        CreateJobRequest(title="続き", body="一度", source=JobSource.PET, requested_by="hana")
+    )
+    await asyncio_settle()
+    assert store.get(job.id).status is JobStatus.RUNNING
+
+    await orch.follow_up(job.thread_id or 0, "もう一度", requested_by="hana")
+    assert (store.job_dir(job.id) / REQUEUE_FILENAME).is_file()
+    released.set()
+    await asyncio_settle()
+    await orch.aclose()
+
+    latest = store.get(job.id)
+    assert latest.status is JobStatus.DONE
+    assert len(worker.jobs) == 2
+    assert not (store.job_dir(job.id) / REQUEUE_FILENAME).is_file()
+
+
+async def test_forum_cancel_denied_speaks(tmp_path: Path) -> None:
+    orch, store, board, _ = _make_room(tmp_path)
+    job = await orch.submit(
+        CreateJobRequest(title="他人", body="x", source=JobSource.PET, requested_by="hana")
+    )
+    thread_id = job.thread_id or 0
+    await handle_incoming(
+        orch,
+        IncomingMessage(
+            author_id="owner",
+            content="やめて",
+            is_bot=False,
+            thread_id=thread_id,
+            thread_name="他人",
+            parent_channel_id=42,
+            is_thread_starter=False,
+        ),
+        forum_channel_id=42,
+        owner_id="owner",
+    )
+    await orch.aclose()
+    assert store.get(job.id).status is JobStatus.QUEUED
+    assert board.speech[-1][1] == "あなたには止められないよ"
+
+
 async def test_cancel_by_requester(tmp_path: Path) -> None:
     orch, store, board, _ = _make_room(tmp_path)
     job = await orch.submit(
@@ -147,6 +243,18 @@ async def test_cancel_by_requester(tmp_path: Path) -> None:
     assert cancelled.status is JobStatus.CANCELLED
     assert board.tags[-1][1] == "中断"
     assert store.get(job.id).status is JobStatus.CANCELLED
+
+
+class BoomOnceBoard(RecordingBoard):
+    def __init__(self) -> None:
+        super().__init__()
+        self._booms = 1
+
+    async def set_tag(self, thread_id: int, status: JobStatus) -> None:
+        if status is JobStatus.RUNNING and self._booms > 0:
+            self._booms -= 1
+            raise RuntimeError("Discord がまだ起きていない")
+        await super().set_tag(thread_id, status)
 
 
 async def asyncio_settle() -> None:

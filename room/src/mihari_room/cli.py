@@ -22,7 +22,8 @@ logger = logging.getLogger("mihari_room")
 
 def build_orchestrator(config: RoomConfig, board: BoundForumBoard) -> RoomOrchestrator:
     store = FileJobStore(config.root)
-    return RoomOrchestrator(store, FileJobQueue(store), board, HermesWorker())
+    owner_id = config.owner_id or None
+    return RoomOrchestrator(store, FileJobQueue(store, owner_id=owner_id), board, HermesWorker())
 
 
 async def _run_with_discord(config: RoomConfig) -> None:

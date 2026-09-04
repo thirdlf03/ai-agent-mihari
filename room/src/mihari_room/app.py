@@ -51,7 +51,8 @@ def derive_title(title: str, body: str) -> str:
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     orchestrator: RoomOrchestrator = app.state.orchestrator
     orchestrator.restore()
-    orchestrator.start_pump()
+    if app.state.start_pump:
+        orchestrator.start_pump()
     starter = getattr(app.state, "discord_starter", None)
     stop = getattr(app.state, "discord_stopper", None)
     if callable(starter):
@@ -70,6 +71,7 @@ def create_app(
     *,
     discord_starter: Any = None,
     discord_stopper: Any = None,
+    start_pump: bool = True,
 ) -> FastAPI:
     app = FastAPI(
         title="Mihari room",
@@ -83,6 +85,7 @@ def create_app(
     app.state.orchestrator = orchestrator
     app.state.discord_starter = discord_starter
     app.state.discord_stopper = discord_stopper
+    app.state.start_pump = start_pump
 
     @app.get("/health")
     def health() -> dict[str, str]:
