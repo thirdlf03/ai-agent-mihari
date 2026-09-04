@@ -1,4 +1,4 @@
-"""HermesWorker のテスト。偽 CLI で subprocess だけを検証する。"""
+"""HermesWorker のテスト。command= を渡した subprocess 経路。"""
 
 from __future__ import annotations
 

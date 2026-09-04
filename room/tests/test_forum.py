@@ -159,3 +159,74 @@ def test_cancel_allowed_for_starter_and_owner_denied_for_stranger() -> None:
     assert is_cancel_request("やめ", 555, thread_starter_id=100, owner_id="999") is False
     # 合言葉じゃないと権限があってもダメ。
     assert is_cancel_request("続けて", 100, thread_starter_id=100, owner_id="999") is False
+
+
+async def test_typing_loop_triggers_and_stops(monkeypatch) -> None:
+    import asyncio
+
+    from mihari_room.discord import board as board_mod
+
+    monkeypatch.setattr(board_mod, "TYPING_INTERVAL_SEC", 0.01)
+    board, _, thread = _make_board()
+    thread.trigger_typing = AsyncMock()
+    await board.start_typing(42)
+    await asyncio.sleep(0.05)
+    await board.stop_typing(42)
+    assert thread.trigger_typing.await_count >= 1
+    assert 42 not in board._typing_tasks
+
+
+async def test_progress_edits_one_message() -> None:
+    board, _, thread = _make_board()
+    msg = SimpleNamespace()
+    msg.edit = AsyncMock()
+    thread.send = AsyncMock(return_value=msg)
+    await board.post_log(1, "📖 Reading memo.txt")
+    await board.post_log(1, "✏️ Writing output/hello.txt")
+    thread.send.assert_awaited_once()
+    msg.edit.assert_awaited_once()
+    content = msg.edit.await_args.kwargs["content"]
+    assert "Reading memo.txt" in content
+    assert "Writing output/hello.txt" in content
+    assert content.startswith("-# ")
+
+
+async def test_progress_dedups_repeated_line() -> None:
+    board, _, thread = _make_board()
+    msg = SimpleNamespace()
+    msg.edit = AsyncMock()
+    thread.send = AsyncMock(return_value=msg)
+    await board.post_log(1, "⚙️ terminal: ls")
+    await board.post_log(1, "⚙️ terminal: ls")
+    content = msg.edit.await_args.kwargs["content"]
+    assert "×2" in content
+    thread.send.assert_awaited_once()
+
+
+async def test_speech_seals_progress_so_next_log_is_new() -> None:
+    board, _, thread = _make_board()
+    first = SimpleNamespace(edit=AsyncMock())
+    second = SimpleNamespace(edit=AsyncMock())
+    thread.send = AsyncMock(side_effect=[first, SimpleNamespace(), second])
+    await board.post_log(1, "📖 Reading")
+    await board.post_speech(1, "できたよ")
+    await board.post_log(1, "📖 Reading more")
+    assert thread.send.await_count == 3
+    assert first.edit.await_count == 0
+
+
+async def test_progress_starts_new_bubble_when_full(monkeypatch) -> None:
+    from mihari_room.discord import board as board_mod
+
+    monkeypatch.setattr(board_mod, "MESSAGE_LIMIT", 80)
+    monkeypatch.setattr(board_mod, "MESSAGE_HEADROOM", 10)
+    board, _, thread = _make_board()
+    first = SimpleNamespace(edit=AsyncMock())
+    second = SimpleNamespace(edit=AsyncMock())
+    thread.send = AsyncMock(side_effect=[first, second])
+    await board.post_log(1, "a" * 40)
+    await board.post_log(1, "b" * 40)
+    assert thread.send.await_count == 2
+    first.edit.assert_not_called()
+
+
