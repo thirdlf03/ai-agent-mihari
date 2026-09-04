@@ -1,4 +1,8 @@
-"""Hermes 互換 CLI を subprocess で叩く JobWorker。"""
+"""Hermes をジョブフォルダで動かす JobWorker。
+
+既定は本家 ``AIAgent`` をプロセス内で回す（Gateway は起動しない）。
+``command=`` を渡したときだけ従来の subprocess（テスト用の偽 CLI 含む）。
+"""
 
 from __future__ import annotations
 
@@ -15,11 +19,12 @@ from mihari_room.contracts import (
     ProgressEvent,
     ProgressKind,
 )
+from mihari_room.worker.agent import AgentFactory
 
 # タイムアウトの既定値（15 分）。
 DEFAULT_TIMEOUT = 15 * 60
 
-# 既定コマンド。末尾にプロンプトを 1 引数として足す。
+# subprocess 経路の雛形。末尾にプロンプトを 1 引数として足す。
 DEFAULT_COMMAND: tuple[str, ...] = ("hermes", "-z")
 
 # ツール/デバッグ出力とみなす行頭（小文字で比較するもの）。
@@ -80,20 +85,23 @@ def _new_files(output_dir: Path, before: set[Path]) -> list[Path]:
 
 
 class HermesWorker:
-    """Hermes 互換 CLI を `job.directory` で実行する Worker。"""
+    """ジョブフォルダで Hermes を回す。Discord には出ない。"""
 
     def __init__(
         self,
         command: Sequence[str] | None = None,
         timeout: float = DEFAULT_TIMEOUT,
+        *,
+        agent_factory: AgentFactory | None = None,
     ) -> None:
-        # 注入可能にするためのコマンド雛形（末尾にプロンプトを足す）。
-        self._command = tuple(command) if command is not None else DEFAULT_COMMAND
+        # command を渡すと subprocess。渡さなければ本家 AIAgent。
+        self._command = tuple(command) if command is not None else None
         self._timeout = timeout
+        self._agent_factory = agent_factory
 
     @property
-    def command(self) -> tuple[str, ...]:
-        """コマンド雛形（プロンプトなし）。"""
+    def command(self) -> tuple[str, ...] | None:
+        """subprocess 経路のコマンド雛形。in-process のときは None。"""
         return self._command
 
     @property
@@ -107,6 +115,35 @@ class HermesWorker:
         on_progress: Callable[[ProgressEvent], Awaitable[None]],
     ) -> JobStatus:
         """ジョブフォルダを cwd に Hermes を実行し、進捗を流す。"""
+        if self._command is not None:
+            return await self._run_subprocess(job, on_progress)
+        return await self._run_inprocess(job, on_progress)
+
+    async def _run_inprocess(
+        self,
+        job: Job,
+        on_progress: Callable[[ProgressEvent], Awaitable[None]],
+    ) -> JobStatus:
+        from mihari_room.worker.agent import InProcessHermes, build_turn_prompt
+
+        output_dir = job.directory / OUTPUT_DIRNAME
+        before = _snapshot_files(output_dir)
+        runner = InProcessHermes(timeout=self._timeout, agent_factory=self._agent_factory)
+        status = await runner.run(job, build_turn_prompt(job), on_progress)
+        if status is not JobStatus.DONE:
+            return status
+        for path in _new_files(output_dir, before):
+            await on_progress(
+                ProgressEvent(kind=ProgressKind.FILE, text=path.name, path=path)
+            )
+        return JobStatus.DONE
+
+    async def _run_subprocess(
+        self,
+        job: Job,
+        on_progress: Callable[[ProgressEvent], Awaitable[None]],
+    ) -> JobStatus:
+        assert self._command is not None
         prompt = build_prompt(job)
         cmd = [*self._command, prompt]
         output_dir = job.directory / OUTPUT_DIRNAME
@@ -124,14 +161,12 @@ class HermesWorker:
                 env=env,
             )
         except (FileNotFoundError, OSError):
-            # コマンドが存在しない・起動できない場合は失敗扱い。
             return JobStatus.FAILED
 
         assert proc.stdout is not None
         speech_candidate: str | None = None
 
         async def _drain() -> int:
-            """標準出力を 1 行ずつ読み、LOG を流しつつ最終発話候補を保持する。"""
             nonlocal speech_candidate
             while True:
                 raw = await proc.stdout.readline()
@@ -145,17 +180,14 @@ class HermesWorker:
                 if not text:
                     continue
                 if is_log_line(text):
-                    # ツール/デバッグ系の行はそのまま LOG として流す。
                     await on_progress(ProgressEvent(kind=ProgressKind.LOG, text=text))
                 else:
-                    # 通常の行は最終返答の候補として保持する（SPEECH は最後に 1 回）。
                     speech_candidate = text
             return await proc.wait()
 
         try:
             returncode = await asyncio.wait_for(_drain(), timeout=self._timeout)
         except TimeoutError:
-            # タイムアウト時はプロセスを止めて失敗扱いにする。
             try:
                 proc.kill()
             except ProcessLookupError:
@@ -169,18 +201,12 @@ class HermesWorker:
         if returncode != 0:
             return JobStatus.FAILED
 
-        # 成功時のみ最終返答を SPEECH + SUMMARY として流す。
         if speech_candidate:
             await on_progress(ProgressEvent(kind=ProgressKind.SPEECH, text=speech_candidate))
             await on_progress(ProgressEvent(kind=ProgressKind.SUMMARY, text=speech_candidate))
 
-        # 成功時に output/ へ増えたファイルを FILE として流す。
         for path in _new_files(output_dir, before):
             await on_progress(
-                ProgressEvent(
-                    kind=ProgressKind.FILE,
-                    text=path.name,
-                    path=path,
-                )
+                ProgressEvent(kind=ProgressKind.FILE, text=path.name, path=path)
             )
         return JobStatus.DONE

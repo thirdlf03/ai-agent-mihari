@@ -10,3 +10,4 @@
 | feat/room-pet | `desktop/Sources/MihariCore/Pet/JobRequest*` 新規、`PetMenuActions.swift` にメソッド追加だけ、対応する Tests | room/ の中身、bridge/ |
 
 Hermes の Discord Gateway は起動しない。設定もしない。
+作業エンジンは本家 `AIAgent` をプロセス内で回す（`worker/`）。

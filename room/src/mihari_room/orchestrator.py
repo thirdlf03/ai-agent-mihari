@@ -168,6 +168,10 @@ class RoomOrchestrator:
     async def _run_job(self, job: Job) -> None:
         thread_id = self._require_thread(job)
         await self._board.set_tag(thread_id, JobStatus.RUNNING)
+        start_typing = getattr(self._board, "start_typing", None)
+        stop_typing = getattr(self._board, "stop_typing", None)
+        if callable(start_typing):
+            await start_typing(thread_id)
 
         async def on_progress(event: ProgressEvent) -> None:
             latest = self._store.get(job.id)
@@ -183,7 +187,11 @@ class RoomOrchestrator:
             elif event.kind is ProgressKind.SUMMARY:
                 await self._board.post_summary(thread_id, event.text)
 
-        status = await self._worker.run(job, on_progress)
+        try:
+            status = await self._worker.run(job, on_progress)
+        finally:
+            if callable(stop_typing):
+                await stop_typing(thread_id)
         latest = self._store.get(job.id)
         # 続きの印は成否に関わらず消す。FAILED のまま残すと、次に成功した瞬間に余分に回る。
         wants_again = self._consume_requeue(job.id)
