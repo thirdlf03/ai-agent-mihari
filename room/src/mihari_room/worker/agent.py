@@ -172,6 +172,9 @@ def _close_agent(agent: Any, session_db: Any) -> None:
 
 def _resolve_runtime() -> tuple[str, dict[str, Any]]:
     """oneshot と同じ model / provider / toolsets。"""
+    from mihari_room.worker.bootstrap import bootstrap_hermes
+
+    bootstrap_hermes()
     from hermes_cli.config import load_config
     from hermes_cli.fallback_config import get_fallback_chain
     from hermes_cli.oneshot import _resolve_model_and_provider
@@ -196,9 +199,10 @@ def _resolve_runtime() -> tuple[str, dict[str, Any]]:
 
 
 def default_agent_factory(**kwargs: Any) -> Any:
-    from hermes_cli.mcp_startup import ensure_mcp_discovery_before_agent_build
+    from mihari_room.worker.bootstrap import bootstrap_hermes, import_ai_agent
 
-    from mihari_room.worker.bootstrap import import_ai_agent
+    bootstrap_hermes()
+    from hermes_cli.mcp_startup import ensure_mcp_discovery_before_agent_build
 
     ensure_mcp_discovery_before_agent_build(logger=logger, single_query=False)
     agent_cls = import_ai_agent()
@@ -257,6 +261,10 @@ class InProcessHermes:
 
         def run_sync() -> tuple[Mapping[str, Any], str | None]:
             with _job_cwd(job.directory), _unattended_env():
+                if not self._injected:
+                    from mihari_room.worker.bootstrap import bootstrap_hermes
+
+                    bootstrap_hermes()
                 session_id = read_session_id(job)
                 session_db = None if self._injected else _create_session_db()
                 history = _load_history(session_db, session_id)
