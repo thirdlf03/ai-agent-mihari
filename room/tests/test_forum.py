@@ -176,6 +176,30 @@ async def test_typing_loop_triggers_and_stops(monkeypatch) -> None:
     assert 42 not in board._typing_tasks
 
 
+async def test_typing_uses_context_manager_when_trigger_missing(monkeypatch) -> None:
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    from mihari_room.discord import board as board_mod
+
+    monkeypatch.setattr(board_mod, "TYPING_INTERVAL_SEC", 0.01)
+    board, _, thread = _make_board()
+    entered = {"n": 0}
+
+    @asynccontextmanager
+    async def typing():
+        entered["n"] += 1
+        yield
+
+    thread.trigger_typing = None
+    thread.typing = typing
+    await board.start_typing(42)
+    await asyncio.sleep(0.05)
+    await board.stop_typing(42)
+    assert entered["n"] >= 1
+    assert 42 not in board._typing_tasks
+
+
 async def test_progress_edits_one_message() -> None:
     board, _, thread = _make_board()
     msg = SimpleNamespace()

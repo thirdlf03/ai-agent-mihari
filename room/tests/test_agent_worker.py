@@ -86,7 +86,7 @@ async def test_inprocess_emits_tool_log_speech_and_file(tmp_path: Path) -> None:
     kinds = [e.kind for e in events]
     assert ProgressKind.LOG in kinds
     assert ProgressKind.SPEECH in kinds
-    assert ProgressKind.SUMMARY in kinds
+    assert ProgressKind.SUMMARY not in kinds
     file_events = [e for e in events if e.kind is ProgressKind.FILE]
     assert any(e.path is not None and e.path.name == "hello.txt" for e in file_events)
     assert (job.directory / "output" / "hello.txt").is_file()
@@ -112,6 +112,20 @@ async def test_followup_reuses_session_and_sends_latest_note(tmp_path: Path) -> 
     assert FakeAgent.last.prompts[-1].startswith("続きの依頼:")
     assert "もっと短くして" in FakeAgent.last.prompts[-1]
     assert FakeAgent.last.history.get("session_id") == "sess-test"
+
+
+async def test_queued_followup_is_appended_before_first_run(tmp_path: Path) -> None:
+    job = _make_job(tmp_path)
+    (job.directory / "input" / "followup-01.txt").write_text("窓もお願い", encoding="utf-8")
+    worker = HermesWorker(agent_factory=_factory, timeout=30)
+
+    async def on_progress(_ev: ProgressEvent) -> None:
+        return None
+
+    await worker.run(job, on_progress)
+    assert FakeAgent.last is not None
+    assert "窓もお願い" in FakeAgent.last.prompts[0]
+    assert "追記:" in FakeAgent.last.prompts[0]
 
 
 async def test_inprocess_failure_returns_failed(tmp_path: Path) -> None:

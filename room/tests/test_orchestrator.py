@@ -52,8 +52,25 @@ async def test_pet_submit_creates_thread_and_runs(tmp_path: Path) -> None:
     assert latest.thread_id == 1001
     assert [tag for _, tag in board.tags] == ["待ち", "作業中", "完了"]
     assert board.speech[-1][1] == "片付けたよ"
+    assert board.summaries == []
     assert board.logs[0][1] == "[tool] 読む"
     assert worker.jobs[0].id == job.id
+
+
+async def test_distinct_summary_is_still_posted(tmp_path: Path) -> None:
+    worker = ScriptedWorker(
+        [
+            ProgressEvent(kind=ProgressKind.SPEECH, text="できたよ"),
+            ProgressEvent(kind=ProgressKind.SUMMARY, text="要点: 掃除した"),
+        ]
+    )
+    orch, _store, board, _ = _make_room(tmp_path, worker)
+    orch.start_pump()
+    await orch.submit(CreateJobRequest(title="掃除", body="頼む", source=JobSource.PET))
+    await asyncio_settle()
+    await orch.aclose()
+    assert board.speech[-1][1] == "できたよ"
+    assert board.summaries[-1][1] == "要点: 掃除した"
 
 
 async def test_second_job_waits_until_desk_is_free(tmp_path: Path) -> None:
@@ -137,6 +154,21 @@ async def test_restore_puts_running_back_on_the_desk(tmp_path: Path) -> None:
     restored = orch.restore()
     assert len(restored) == 1
     assert store.get(job.id).status is JobStatus.QUEUED
+
+
+async def test_restore_wakes_already_queued_jobs(tmp_path: Path) -> None:
+    store = FileJobStore(tmp_path)
+    bound = BoundForumBoard()
+    worker = ScriptedWorker([ProgressEvent(kind=ProgressKind.SUMMARY, text="起きた")])
+    orch = RoomOrchestrator(store, FileJobQueue(store), bound, worker)
+    job = store.create(CreateJobRequest(title="待ち", body="x", source=JobSource.PET, thread_id=7))
+    orch.restore()
+    orch.start_pump()
+    bound.bind(RecordingBoard())
+    await asyncio_settle()
+    await orch.aclose()
+    assert store.get(job.id).status is JobStatus.DONE
+    assert worker.jobs[0].id == job.id
 
 
 async def test_pump_waits_until_forum_is_bound(tmp_path: Path) -> None:

@@ -203,7 +203,6 @@ class HermesWorker:
 
         if speech_candidate:
             await on_progress(ProgressEvent(kind=ProgressKind.SPEECH, text=speech_candidate))
-            await on_progress(ProgressEvent(kind=ProgressKind.SUMMARY, text=speech_candidate))
 
         for path in _new_files(output_dir, before):
             await on_progress(
