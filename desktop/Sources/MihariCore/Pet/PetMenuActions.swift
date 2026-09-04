@@ -33,6 +33,8 @@ public protocol PetMenuActions: AnyObject, ObservableObject {
     func endBreak()
     /// Discord 設定の画面を開く。
     func openDiscordSettings()
+    /// 仕事の依頼窓を開く。
+    func openJobRequest()
     /// 権限の確認画面を開く。
     func openPermissions()
     /// 状態パネルの表示を切り替える。

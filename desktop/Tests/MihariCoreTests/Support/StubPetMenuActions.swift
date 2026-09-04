@@ -14,6 +14,8 @@ final class StubPetMenuActions: ObservableObject, PetMenuActions {
     var isFastThresholds = false
     /// 「集中継続のセリフを再現」が押された回数。
     private(set) var focusStreakReplays = 0
+    /// 「仕事を頼む…」が押された回数。
+    private(set) var jobRequestOpens = 0
     /// 「実際に進める」で投げられた操作。
     private(set) var detectionSteps: [DetectionDebugStep] = []
 
@@ -23,6 +25,7 @@ final class StubPetMenuActions: ObservableObject, PetMenuActions {
     func startBreak() {}
     func endBreak() {}
     func openDiscordSettings() {}
+    func openJobRequest() { jobRequestOpens += 1 }
     func openPermissions() {}
     func toggleStatusPanel() {}
     func setPhotobombEnabled(_ enabled: Bool) { isPhotobombEnabled = enabled }

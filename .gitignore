@@ -20,3 +20,4 @@ desktop/Mihari.app/
 
 # 秘密情報
 bridge/.env
+room/.env
