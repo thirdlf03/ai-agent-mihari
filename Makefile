@@ -14,6 +14,7 @@ help:
 
 setup:
 	cd bridge && uv sync
+	cd room && uv sync
 
 build:
 	cd desktop && ./build.sh
@@ -31,10 +32,12 @@ test-swift:
 
 test-python:
 	cd bridge && uv run pytest -q
+	cd room && uv run pytest -q
 
 fmt:
 	cd desktop && swift format --in-place --recursive Sources Tests
 	cd bridge && uv run ruff format . && uv run ruff check --fix .
+	cd room && uv run ruff format . && uv run ruff check --fix .
 
 lint: lint-swift lint-python
 
@@ -43,6 +46,7 @@ lint-swift:
 
 lint-python:
 	cd bridge && uv run ruff check . && uv run ruff format --check .
+	cd room && uv run ruff check . && uv run ruff format --check .
 
 clean:
 	rm -rf desktop/.build desktop/Mihari.app
