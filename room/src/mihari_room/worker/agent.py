@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import queue
+import threading
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -37,6 +38,9 @@ SESSION_FILENAME = "hermes_session_id"
 
 #: 注入用。本家 ``AIAgent`` と同じキーワードを受けてインスタンスを返す。
 AgentFactory = Callable[..., Any]
+
+#: ``os.chdir`` はプロセス全体。タイムアウト後の残りスレッドと次ジョブがぶつからないようにする。
+_CWD_LOCK = threading.Lock()
 
 
 def session_path(job: Job) -> Path:
@@ -68,7 +72,11 @@ def build_turn_prompt(job: Job) -> str:
             f"結果は `{OUTPUT_DIRNAME}/` に書き出してください。"
             "必要な説明は標準出力の最後に 1〜数行で書いてください。"
         )
-    return build_prompt(job)
+    base = build_prompt(job)
+    if followups:
+        notes = "\n\n".join(path.read_text(encoding="utf-8") for path in followups)
+        return f"{base}\n\n追記:\n{notes}"
+    return base
 
 
 @contextmanager
@@ -177,21 +185,32 @@ def _resolve_runtime() -> tuple[str, dict[str, Any]]:
     bootstrap_hermes()
     from hermes_cli.config import load_config
     from hermes_cli.fallback_config import get_fallback_chain
-    from hermes_cli.oneshot import _resolve_model_and_provider
     from hermes_cli.runtime_provider import resolve_runtime_provider
     from hermes_cli.tools_config import _get_platform_tools
 
     cfg = load_config()
-    choice = _resolve_model_and_provider(cfg, None, None)
+    model_cfg = cfg.get("model") or {}
+    if isinstance(model_cfg, str):
+        cfg_model = model_cfg
+    elif isinstance(model_cfg, dict):
+        raw = model_cfg.get("default") or model_cfg.get("model") or ""
+        if isinstance(raw, dict):
+            from hermes_cli.config import split_model_config_default
+
+            cfg_model, _ = split_model_config_default(raw)
+        else:
+            cfg_model = str(raw or "")
+    else:
+        cfg_model = ""
+    env_model = os.getenv("HERMES_INFERENCE_MODEL", "").strip()
+    effective_model = env_model or str(cfg_model or "")
     runtime = resolve_runtime_provider(
-        requested=choice.provider,
-        target_model=choice.model or None,
-        explicit_base_url=choice.base_url,
-        explicit_api_key=choice.api_key,
+        requested=None,
+        target_model=effective_model or None,
     )
     toolsets = sorted(_get_platform_tools(cfg, "cli"))
     fallback = get_fallback_chain(cfg) or None
-    return choice.model, {
+    return effective_model, {
         "runtime": runtime,
         "toolsets": toolsets,
         "fallback": fallback,
@@ -204,7 +223,7 @@ def default_agent_factory(**kwargs: Any) -> Any:
     bootstrap_hermes()
     from hermes_cli.mcp_startup import ensure_mcp_discovery_before_agent_build
 
-    ensure_mcp_discovery_before_agent_build(logger=logger, single_query=False)
+    ensure_mcp_discovery_before_agent_build(logger=logger, single_query=True)
     agent_cls = import_ai_agent()
     return agent_cls(**kwargs)
 
@@ -260,7 +279,7 @@ class InProcessHermes:
             return "[unattended room: make the most reasonable assumption and continue.]"
 
         def run_sync() -> tuple[Mapping[str, Any], str | None]:
-            with _job_cwd(job.directory), _unattended_env():
+            with _CWD_LOCK, _job_cwd(job.directory), _unattended_env():
                 if not self._injected:
                     from mihari_room.worker.bootstrap import bootstrap_hermes
 
@@ -329,7 +348,6 @@ class InProcessHermes:
         if (result or {}).get("failed") or not response:
             return JobStatus.FAILED
         await on_progress(ProgressEvent(kind=ProgressKind.SPEECH, text=response))
-        await on_progress(ProgressEvent(kind=ProgressKind.SUMMARY, text=response))
         return JobStatus.DONE
 
 

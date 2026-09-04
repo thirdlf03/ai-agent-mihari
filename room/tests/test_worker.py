@@ -52,10 +52,10 @@ async def test_success_emits_speech_summary_and_file(tmp_path: Path) -> None:
 
     assert status is JobStatus.DONE
     kinds = [e.kind for e in events]
-    # ツール風ログは LOG、最終返答は SPEECH と SUMMARY で流れる。
+    # ツール風ログは LOG、最終返答は SPEECH 1 通。同じ文面の SUMMARY は出さない。
     assert ProgressKind.LOG in kinds
     assert ProgressKind.SPEECH in kinds
-    assert ProgressKind.SUMMARY in kinds
+    assert ProgressKind.SUMMARY not in kinds
     # output/hello.txt の FILE イベントがある。
     file_events = [e for e in events if e.kind is ProgressKind.FILE]
     assert any(e.path is not None and e.path.name == "hello.txt" for e in file_events)
