@@ -9,7 +9,7 @@
     Forum のスレッド名・本文を読むのに Message Content Intent が要るよ。
 """
 
-from mihari_room.discord.board import DiscordForumBoard, format_log_message
+from mihari_room.discord.board import BoundForumBoard, DiscordForumBoard, format_log_message
 from mihari_room.discord.inbound import (
     CANCEL_COMMANDS,
     ForumPostEvent,
@@ -23,6 +23,7 @@ from mihari_room.discord.inbound import (
 )
 
 __all__ = [
+    "BoundForumBoard",
     "CANCEL_COMMANDS",
     "DiscordForumBoard",
     "ForumPostEvent",

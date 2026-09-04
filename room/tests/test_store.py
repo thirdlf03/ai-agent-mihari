@@ -115,3 +115,11 @@ def test_empty_root_lists_nothing(tmp_path: Path) -> None:
     store = FileJobStore(tmp_path)
     assert store.list_queued() == ()
     assert store.restore_running_to_queued() == ()
+
+
+def test_find_by_thread_id(tmp_path: Path) -> None:
+    store = FileJobStore(tmp_path)
+    job = store.create(_request())
+    assert store.find_by_thread_id(123) is not None
+    assert store.find_by_thread_id(123).id == job.id
+    assert store.find_by_thread_id(999) is None
