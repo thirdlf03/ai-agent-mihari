@@ -3,7 +3,7 @@
 `device-bridge` CLI と、macOS アプリが子プロセスとして常駐させる HTTP デーモン(FastAPI + uv 管理)。
 
 ルートの `README.md` と `Makefile` からの使い方は [ルート README](../README.md) を参照。ここでは
-`bridge/` 単体の詳細と、iPhone のスクリーンショット機能([Issue #13](https://github.com/thirdlf03/progate-online-hackathon0829/issues/13))
+`bridge/` 単体の詳細と、iPhone のスクリーンショット機能([Issue #13](https://github.com/thirdlf03/ai-agent-mihari/issues/13))
 のセットアップ手順を書く。
 
 ## iPhone のスクリーンショットを撮る
