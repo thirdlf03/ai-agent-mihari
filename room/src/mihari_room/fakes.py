@@ -50,6 +50,15 @@ class InMemoryJobStore:
     def list_queued(self) -> Sequence[Job]:
         return tuple(job for job in self._jobs.values() if job.status is JobStatus.QUEUED)
 
+    def list_running(self) -> Sequence[Job]:
+        return tuple(job for job in self._jobs.values() if job.status is JobStatus.RUNNING)
+
+    def find_by_thread_id(self, thread_id: int) -> Job | None:
+        for job in self._jobs.values():
+            if job.thread_id == thread_id:
+                return job
+        return None
+
     def set_status(self, job_id: str, status: JobStatus) -> Job:
         updated = replace(self._jobs[job_id], status=status)
         self._jobs[job_id] = updated

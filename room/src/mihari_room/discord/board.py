@@ -108,3 +108,40 @@ class DiscordForumBoard:
         """最後に 1 通だけまとめて投げる。"""
         thread = await self._thread(thread_id)
         await thread.send(content=text)
+
+
+class BoundForumBoard:
+    """Discord が起きるまで Forum 口を待たせる。"""
+
+    def __init__(self) -> None:
+        self._inner: DiscordForumBoard | None = None
+
+    def bind(self, board: DiscordForumBoard) -> None:
+        self._inner = board
+
+    @property
+    def is_ready(self) -> bool:
+        return self._inner is not None
+
+    def _get(self) -> DiscordForumBoard:
+        if self._inner is None:
+            raise RuntimeError("Discord がまだ起きていない")
+        return self._inner
+
+    async def create_thread(self, job: Job) -> int:
+        return await self._get().create_thread(job)
+
+    async def set_tag(self, thread_id: int, status: JobStatus) -> None:
+        await self._get().set_tag(thread_id, status)
+
+    async def post_speech(self, thread_id: int, text: str) -> None:
+        await self._get().post_speech(thread_id, text)
+
+    async def post_log(self, thread_id: int, text: str) -> None:
+        await self._get().post_log(thread_id, text)
+
+    async def post_file(self, thread_id: int, path: Path) -> None:
+        await self._get().post_file(thread_id, path)
+
+    async def post_summary(self, thread_id: int, text: str) -> None:
+        await self._get().post_summary(thread_id, text)

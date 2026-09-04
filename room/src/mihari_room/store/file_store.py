@@ -75,6 +75,13 @@ class FileJobStore:
         """作業中の机。ふつうは 0 か 1 件。古い順。"""
         return tuple(job for _, job in self._iter_jobs_sorted() if job.status is JobStatus.RUNNING)
 
+    def find_by_thread_id(self, thread_id: int) -> Job | None:
+        """Forum スレッドから仕事を探す。無ければ None。"""
+        for _, job in self._iter_jobs_sorted():
+            if job.thread_id == thread_id:
+                return job
+        return None
+
     def set_status(self, job_id: str, status: JobStatus) -> Job:
         meta = self._read_meta(job_id)
         meta["status"] = status.value

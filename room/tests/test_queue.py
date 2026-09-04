@@ -16,9 +16,11 @@ def _request(title: str, by: str = "hana") -> CreateJobRequest:
     return CreateJobRequest(title=title, body="本文", source=JobSource.FORUM, requested_by=by)
 
 
-def _store_and_queue(root: Path) -> tuple[FileJobStore, FileJobQueue]:
+def _store_and_queue(
+    root: Path, *, owner_id: str | None = None
+) -> tuple[FileJobStore, FileJobQueue]:
     store = FileJobStore(root)
-    return store, FileJobQueue(store)
+    return store, FileJobQueue(store, owner_id=owner_id)
 
 
 def test_fifo_dequeue(tmp_path: Path) -> None:
@@ -102,23 +104,31 @@ def test_cancel_by_requester(tmp_path: Path) -> None:
     assert store.list_queued() == ()
 
 
-def test_cancel_by_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    store, queue = _store_and_queue(tmp_path)
+def test_cancel_by_owner(tmp_path: Path) -> None:
+    store, queue = _store_and_queue(tmp_path, owner_id="owner-sama")
     job = store.create(_request("持ち主が止める", by="hana"))
 
-    monkeypatch.setenv("MIHARI_OWNER_ID", "owner-sama")
     cancelled = queue.cancel(job.id, by="owner-sama")
     assert cancelled.status is JobStatus.CANCELLED
 
 
-def test_cancel_by_stranger_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    store, queue = _store_and_queue(tmp_path)
+def test_cancel_by_stranger_rejected(tmp_path: Path) -> None:
+    store, queue = _store_and_queue(tmp_path, owner_id="owner-sama")
     job = store.create(_request("他人の仕事", by="hana"))
 
-    monkeypatch.setenv("MIHARI_OWNER_ID", "owner-sama")
     with pytest.raises(CancelNotAllowed):
         queue.cancel(job.id, by="taro")
     # 列に残ったまま
+    assert store.get(job.id).status is JobStatus.QUEUED
+
+
+def test_cancel_owner_does_not_read_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIHARI_OWNER_ID", "env-owner")
+    store, queue = _store_and_queue(tmp_path)
+    job = store.create(_request("env では止められない", by="hana"))
+
+    with pytest.raises(CancelNotAllowed):
+        queue.cancel(job.id, by="env-owner")
     assert store.get(job.id).status is JobStatus.QUEUED
 
 

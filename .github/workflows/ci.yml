@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   python:
-    name: Python (ruff)
+    name: Python (ruff + pytest)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -24,14 +24,23 @@ jobs:
         uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-          cache-dependency-glob: bridge/uv.lock
+          cache-dependency-glob: |
+            bridge/uv.lock
+            room/uv.lock
 
-      - name: Install dependencies
+      - name: Install bridge
         run: uv sync --locked
         working-directory: bridge
 
+      - name: Install room
+        run: uv sync --locked
+        working-directory: room
+
       - name: Lint
         run: make lint-python
+
+      - name: Test
+        run: make test-python
 
   swift:
     name: Swift (format + build)
