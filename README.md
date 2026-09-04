@@ -1,7 +1,7 @@
-# progate-online-hackathon0829
+# Mihari
 
 **Mihari** — サボりを検知して声で絡み、証拠を Discord に晒す macOS 常駐アプリ。
-全体像と設計の決定事項は [Issue #2 (Epic)](https://github.com/thirdlf03/progate-online-hackathon0829/issues/2) にまとめてある。
+全体像と設計の決定事項は [Issue #2 (Epic)](https://github.com/thirdlf03/ai-agent-mihari/issues/2) にまとめてある。
 
 ## 構成
 
