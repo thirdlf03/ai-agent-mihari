@@ -9,6 +9,8 @@ from pathlib import Path
 from mihari_room.worker import bootstrap as bootstrap_mod
 from mihari_room.worker.bootstrap import (
     _can_import,
+    _cli_python,
+    _is_usable_import_path,
     _prepend_interpreter_path,
     _shebang_python,
     bootstrap_hermes,
@@ -19,6 +21,39 @@ def test_shebang_python_reads_absolute_interpreter(tmp_path: Path) -> None:
     script = tmp_path / "hermes"
     script.write_text(f"#!{sys.executable}\nprint('ok')\n", encoding="utf-8")
     assert _shebang_python(script) == sys.executable
+
+
+def test_shebang_python_ignores_shell_wrapper(tmp_path: Path) -> None:
+    script = tmp_path / "hermes"
+    script.write_text("#!/bin/sh\n'''exec' python3 \"$0\" \"$@\"\n", encoding="utf-8")
+    assert _shebang_python(script) is None
+
+
+def test_cli_python_prefers_python3_sibling(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    script = bindir / "hermes"
+    neighbor = bindir / "python3"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    neighbor.write_text("#!/bin/sh\n", encoding="utf-8")
+    script.chmod(0o755)
+    neighbor.chmod(0o755)
+    assert _cli_python(script) == str(neighbor.resolve())
+
+
+def test_stdlib_is_not_a_usable_import_path(tmp_path: Path) -> None:
+    stdlib = tmp_path / "lib" / "python3.11"
+    stdlib.mkdir(parents=True)
+    (stdlib / "sqlite3").mkdir()
+    site = tmp_path / "lib" / "python3.11" / "site-packages"
+    site.mkdir()
+    root = tmp_path / "hermes-agent"
+    root.mkdir()
+    (root / "run_agent.py").write_text("", encoding="utf-8")
+    assert _is_usable_import_path(str(stdlib)) is False
+    assert _is_usable_import_path(str(site)) is True
+    assert _is_usable_import_path(str(root)) is True
+    assert _is_usable_import_path("") is False
 
 
 def test_bootstrap_from_agent_root(tmp_path: Path, monkeypatch) -> None:
@@ -50,11 +85,12 @@ def test_bootstrap_from_agent_root(tmp_path: Path, monkeypatch) -> None:
                 sys.modules[name] = module
 
 
-def test_prepend_interpreter_path_adds_entries(tmp_path: Path, monkeypatch) -> None:
-    extra = tmp_path / "site"
-    extra.mkdir()
+def test_prepend_interpreter_path_adds_site_packages_only(tmp_path: Path) -> None:
+    extra = tmp_path / "lib" / "python3.11" / "site-packages"
+    extra.mkdir(parents=True)
+    stdlib = tmp_path / "lib" / "python3.11"
     wrapper = tmp_path / "fake-python"
-    payload = json.dumps([str(extra), ""])
+    payload = json.dumps([str(extra), str(stdlib), ""])
     wrapper.write_text(
         f"#!{sys.executable}\n"
         "import sys\n"
@@ -70,5 +106,6 @@ def test_prepend_interpreter_path_adds_entries(tmp_path: Path, monkeypatch) -> N
         _prepend_interpreter_path(str(wrapper))
         assert str(extra) in sys.path
         assert sys.path.index(str(extra)) == 0
+        assert str(stdlib) not in sys.path
     finally:
         sys.path[:] = saved

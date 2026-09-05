@@ -26,6 +26,23 @@ MESSAGE_HEADROOM = 100
 TYPING_INTERVAL_SEC = 8.0
 
 
+async def _pulse_typing(thread: Any) -> None:
+    """discord.py 2 は ``typing()``。古いモックは ``trigger_typing`` のまま。"""
+    trigger = getattr(thread, "trigger_typing", None)
+    if callable(trigger):
+        maybe = trigger()
+        if inspect.isawaitable(maybe):
+            await maybe
+        await asyncio.sleep(TYPING_INTERVAL_SEC)
+        return
+    typing = getattr(thread, "typing", None)
+    if callable(typing):
+        async with typing():
+            await asyncio.sleep(TYPING_INTERVAL_SEC)
+        return
+    await asyncio.sleep(TYPING_INTERVAL_SEC)
+
+
 def cap_title(title: str, limit: int = MAX_TITLE_LEN) -> str:
     """スレッド名を指定文字数で丸める。前後空白は落とす。"""
     return title.strip()[:limit]
@@ -79,7 +96,7 @@ class DiscordForumBoard:
 
     @classmethod
     def from_client(cls, client: Any, forum_channel_id: int) -> DiscordForumBoard:
-        """discord.Client から作る素朴な組み立て。本番用。"""
+        """discord.Client から作る素朴な組み立て。キャッシュに無いときは呼び出し側で fetch して。"""
         forum = client.get_channel(forum_channel_id)
         return cls(forum, client.get_channel)
 
@@ -188,12 +205,7 @@ class DiscordForumBoard:
             try:
                 while True:
                     thread = await self._thread(thread_id)
-                    trigger = getattr(thread, "trigger_typing", None)
-                    if callable(trigger):
-                        maybe = trigger()
-                        if inspect.isawaitable(maybe):
-                            await maybe
-                    await asyncio.sleep(TYPING_INTERVAL_SEC)
+                    await _pulse_typing(thread)
             except asyncio.CancelledError:
                 raise
             except Exception:

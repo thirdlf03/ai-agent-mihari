@@ -53,9 +53,9 @@ class RoomOrchestrator:
         return self._store
 
     def restore(self) -> Sequence[Job]:
-        """起動直後。作業中だった机を待ちに戻す。"""
+        """起動直後。作業中だった机を待ちに戻す。すでに待ちの仕事も起こす。"""
         restored = self._store.restore_running_to_queued()
-        if restored:
+        if restored or self._store.list_queued():
             self.wake()
         return restored
 
@@ -173,11 +173,15 @@ class RoomOrchestrator:
         if callable(start_typing):
             await start_typing(thread_id)
 
+        last_speech = ""
+
         async def on_progress(event: ProgressEvent) -> None:
+            nonlocal last_speech
             latest = self._store.get(job.id)
             if latest.status is JobStatus.CANCELLED:
                 return
             if event.kind is ProgressKind.SPEECH:
+                last_speech = event.text.strip()
                 await self._board.post_speech(thread_id, event.text)
             elif event.kind is ProgressKind.LOG:
                 await self._board.post_log(thread_id, event.text)
@@ -185,6 +189,9 @@ class RoomOrchestrator:
                 if event.path is not None:
                     await self._board.post_file(thread_id, event.path)
             elif event.kind is ProgressKind.SUMMARY:
+                # 最終返答を SPEECH と SUMMARY の両方で流す Worker がある。同じ文面は 1 通。
+                if event.text.strip() == last_speech:
+                    return
                 await self._board.post_summary(thread_id, event.text)
 
         try:
