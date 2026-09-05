@@ -16,6 +16,14 @@ final class StubPetMenuActions: ObservableObject, PetMenuActions {
     private(set) var focusStreakReplays = 0
     /// 「仕事を頼む…」が押された回数。
     private(set) var jobRequestOpens = 0
+    /// いま追っている仕事。テストからの差し込み口。
+    var roomJob: RoomJobSummary?
+    /// 「追記する…」が押された回数。
+    private(set) var roomFollowUps = 0
+    /// 「中断する」が押された回数。
+    private(set) var roomCancels = 0
+    /// 「成果物を開く」で渡された URL。
+    private(set) var roomArtifactURLs: [URL] = []
     /// 「実際に進める」で投げられた操作。
     private(set) var detectionSteps: [DetectionDebugStep] = []
 
@@ -26,6 +34,9 @@ final class StubPetMenuActions: ObservableObject, PetMenuActions {
     func endBreak() {}
     func openDiscordSettings() {}
     func openJobRequest() { jobRequestOpens += 1 }
+    func followUpRoomJob() { roomFollowUps += 1 }
+    func cancelRoomJob() { roomCancels += 1 }
+    func openRoomArtifact(_ url: URL) { roomArtifactURLs.append(url) }
     func openPermissions() {}
     func toggleStatusPanel() {}
     func setPhotobombEnabled(_ enabled: Bool) { isPhotobombEnabled = enabled }

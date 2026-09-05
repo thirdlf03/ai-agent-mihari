@@ -35,6 +35,14 @@ public protocol PetMenuActions: AnyObject, ObservableObject {
     func openDiscordSettings()
     /// 仕事の依頼窓を開く。
     func openJobRequest()
+    /// 作業部屋でいま追っている仕事。無ければ `nil`。
+    var roomJob: RoomJobSummary? { get }
+    /// 走っている仕事へ追記する窓を開く。
+    func followUpRoomJob()
+    /// 走っている仕事を中断する。
+    func cancelRoomJob()
+    /// 成果物の URL を開く。http/https だけを開く。
+    func openRoomArtifact(_ url: URL)
     /// 権限の確認画面を開く。
     func openPermissions()
     /// 状態パネルの表示を切り替える。

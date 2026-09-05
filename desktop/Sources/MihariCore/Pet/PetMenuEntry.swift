@@ -53,6 +53,7 @@ public enum PetMenuEntries {
                 title: "仕事を頼む…",
                 action: { actions.openJobRequest() }
             ),
+            roomEntries(actions: actions),
             .item(
                 title: "Discord 設定…",
                 action: { actions.openDiscordSettings() }
@@ -93,5 +94,64 @@ public enum PetMenuEntries {
                 entries: PetDebugMenuEntries.make(actions: actions, presenter: presenter)
             ),
         ]
+    }
+
+    /// 「作業部屋」サブメニュー。いま追っている仕事の状態と、追記・中断・成果物を開く操作を並べる。
+    @MainActor
+    private static func roomEntries<Actions: PetMenuActions>(actions: Actions) -> PetMenuEntry {
+        guard let job = actions.roomJob else {
+            return .item(
+                title: "作業部屋(仕事なし)",
+                action: { actions.openJobRequest() }
+            )
+        }
+        var entries: [PetMenuEntry] = [
+            .item(
+                title: "状態: \(job.title) — \(job.status.label)",
+                action: {}
+            ),
+            .item(
+                title: "追記する…",
+                action: { actions.followUpRoomJob() }
+            ),
+            .item(
+                title: "中断する",
+                action: { actions.cancelRoomJob() }
+            ),
+        ]
+        if let latestText = job.latestText, !latestText.isEmpty {
+            entries.append(
+                .item(title: "進捗: \(latestText)", action: {})
+            )
+        }
+        if let error = job.lastError {
+            entries.append(
+                .item(title: "配信エラー: \(error)", action: {})
+            )
+        }
+        let openable = job.artifacts.filter {
+            guard let scheme = $0.previewURL?.scheme?.lowercased() else { return false }
+            return scheme == "http" || scheme == "https"
+        }
+        if openable.isEmpty {
+            entries.append(.item(title: "成果物なし", action: {}))
+        } else {
+            entries.append(.separator)
+            for artifact in openable {
+                let url = artifact.previewURL!
+                entries.append(
+                    .item(title: artifactTitle(artifact), action: { actions.openRoomArtifact(url) })
+                )
+            }
+        }
+        return .submenu(title: "作業部屋", entries: entries)
+    }
+
+    /// 成果物 1 件のメニュー名。種類が読めれば添える。
+    private static func artifactTitle(_ artifact: RoomArtifact) -> String {
+        if let kind = artifact.kind, !kind.isEmpty {
+            return "成果物を開く: \(kind)"
+        }
+        return "成果物を開く"
     }
 }

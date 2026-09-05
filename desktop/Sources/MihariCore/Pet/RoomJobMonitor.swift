@@ -1,0 +1,474 @@
+import Foundation
+import os
+
+/// ペットメニューに出す仕事の状態。
+public enum RoomJobStatus: String, Sendable, Equatable, CaseIterable {
+    case queued
+    case running
+    case done
+    case failed
+    case cancelled
+
+    /// 画面表示用の日本語ラベル。
+    public var label: String {
+        switch self {
+        case .queued: return "待ち"
+        case .running: return "作業中"
+        case .done: return "完了"
+        case .failed: return "失敗"
+        case .cancelled: return "中断"
+        }
+    }
+}
+
+/// 監視している仕事 1 件分の見た目。
+public struct RoomJobTrackedJob: Equatable, Sendable, Identifiable {
+    public let jobID: String
+    public let title: String
+    public let status: RoomJobStatus
+    /// 最後に見た位相。未知のままだと `nil`。
+    public let phase: RoomJobPhase?
+    /// 最後のイベント本文。無ければ `nil`。
+    public let latestText: String?
+    /// 直近で取れた成果物。
+    public let artifacts: [RoomArtifact]
+    /// 配信が止まっている理由。正常なら `nil`。
+    public let lastError: String?
+    /// 直近の位相変化でペットへ与える指示。テストからの観測点にもなる。
+    public let directive: RoomPhaseDirective?
+
+    public var id: String { jobID }
+
+    /// メニューに出す要約。
+    public var summary: RoomJobSummary {
+        RoomJobSummary(
+            jobID: jobID,
+            title: title,
+            status: status,
+            phase: phase,
+            latestText: latestText,
+            artifacts: artifacts,
+            lastError: lastError
+        )
+    }
+}
+
+/// 部屋の仕事の進捗を購読し、ペットへの指示に落とす。
+///
+/// - 依頼が通ったら `attach(jobID:title:)`、起動時や繋ぎ直しでは `resume()` が
+///   `/jobs/running` を引いて走っている仕事を拾う。
+/// - SSE はデーモン(bridge)とは別のセッションで開くので、そちらの流れを奪わない。
+/// - 切れたら指数バックオフ(上限 30 秒)で張り直し、`Last-Event-ID` で再開点を伝える。
+/// - 再送されたイベントは ID で重複排除し、位相をまたぐ speech だけを喋らせる。
+///
+/// 喋るのはペット側の仕事なので、この型は「喋ってほしい文」を `directive.line` に載せて
+/// `onDirective` で渡すだけに留める。
+@MainActor
+public final class RoomJobMonitor: ObservableObject {
+
+    private static let logger = Logger(subsystem: "com.thirdlf03.mihari", category: "room")
+
+    /// 再送の重複排除に覚えておくイベント ID の上限。
+    static let seenIDLimit = 512
+    /// 重複排除の集合が上限を超えたとき、残しておく件数。
+    static let seenIDTrim = 256
+    /// バックオフの上限(秒)。これ以上は長くしない。
+    nonisolated static let backoffCapSeconds: TimeInterval = 30
+    /// バックオフの起点(秒)。
+    nonisolated static let backoffBaseSeconds: TimeInterval = 1
+
+    /// いま監視している仕事。直近に動いた順。
+    @Published public private(set) var jobs: [RoomJobTrackedJob] = []
+    /// 仕事の一覧を取りに行くときの失敗。配信自体のエラーは各仕事の `lastError` に出る。
+    @Published public private(set) var lastError: String?
+
+    /// 位相の変化をペットへ伝える口。`AppCoordinator` が `begin()` で差し込む。
+    public var onDirective: (@MainActor (RoomJobTrackedJob) -> Void)?
+
+    private let access: any RoomAccess
+    private var cursorStore: RoomJobCursorStoring
+    private var states: [String: JobState] = [:]
+
+    /// 1 件の仕事について監視が持つ状態。
+    private struct JobState {
+        var title: String?
+        var task: Task<Void, Never>?
+        var seenIDs: Set<String> = []
+        var latestEventID: String?
+        var lastPhase: RoomJobPhase?
+        var handledCount = 0
+        var seeded = false
+        var status: RoomJobStatus = .queued
+        var latestText: String?
+        var artifacts: [RoomArtifact] = []
+        var lastError: String?
+        var lastActivityAt = Date.distantPast
+        var lastDirective: RoomPhaseDirective?
+    }
+
+    public init(access: any RoomAccess, cursorStore: RoomJobCursorStoring) {
+        self.access = access
+        self.cursorStore = cursorStore
+    }
+
+    // MARK: - 購読の開始
+
+    /// 依頼が通った仕事を監視し始める。最初のイベントから読むので、開始の一言も喋る。
+    public func attach(jobID: String, title: String?) {
+        guard !jobID.isEmpty else { return }
+        var state = states[jobID] ?? JobState()
+        state.title = state.title ?? title ?? jobID
+        state.lastError = nil
+        states[jobID] = state
+        cursorStore.lastJobID = jobID
+        startStream(jobID: jobID)
+        // タイトルと成果物を取り直す。取れなくても購読は続く。
+        Task { [weak self] in
+            await self?.refreshArtifacts(jobID: jobID)
+        }
+        publish()
+    }
+
+    /// 起動時・繋ぎ直しに `/jobs/running` を引き、走っている仕事を拾う。
+    ///
+    /// すでに走っている仕事に付け直すときは、最新イベントの位相と ID を「すでに見た」状態に
+    /// してから購読する。過去の配信を全部喋り直さないため。
+    public func resume() async {
+        do {
+            let running = try await access.listRunning()
+            lastError = nil
+            // 見えなくなった仕事は監視をやめる。
+            let liveIDs = Set(running.map(\.jobID))
+            for jobID in states.keys where !liveIDs.contains(jobID) {
+                stop(jobID: jobID)
+            }
+            // 新しい / 見失っていた仕事から付け直す。
+            for detail in running {
+                attach(detail: detail)
+            }
+            // 最後に追っていた仕事が走っていなくても、詳細を引いて状態と成果物を
+            // 見せられるようにする(完了した仕事の成果物を開くため)。
+            if let lastID = cursorStore.lastJobID,
+                !liveIDs.contains(lastID),
+                !states.keys.contains(lastID),
+                let detail = try? await access.detail(jobID: lastID)
+            {
+                attach(detail: detail)
+            }
+        } catch {
+            lastError = describe(error)
+        }
+    }
+
+    /// 発見した仕事の詳細から監視し始める。
+    public func attach(detail: RoomJobDetail) {
+        guard !detail.jobID.isEmpty else { return }
+        var state = states[detail.jobID] ?? JobState()
+        state.title = detail.title ?? detail.jobID
+        state.artifacts = detail.artifacts
+        state.status = Self.status(fromRaw: detail.status) ?? state.status
+        if let latest = detail.latestEvent {
+            state.seeded = true
+            state.handledCount = 1
+            state.lastPhase = latest.phase
+            state.latestText = latest.text
+            state.latestEventID = latest.id
+            state.lastActivityAt = latest.createdAt ?? .now
+            state.seenIDs.insert(latest.id)
+            state.status = Self.status(after: latest)
+            cursorStore.setCursor(latest.id, for: detail.jobID)
+        }
+        states[detail.jobID] = state
+        cursorStore.lastJobID = detail.jobID
+        startStream(jobID: detail.jobID)
+        publish()
+    }
+
+    /// 監視をやめる。アプリ終了時にもここを通る。
+    public func stop(jobID: String) {
+        states[jobID]?.task?.cancel()
+        states[jobID]?.task = nil
+        states[jobID] = nil
+        publish()
+    }
+
+    /// 全部やめる。
+    public func stopAll() {
+        for state in states.values {
+            state.task?.cancel()
+        }
+        states = [:]
+        publish()
+    }
+
+    // MARK: - 操作
+
+    /// 仕事へ追記する。戻り値は依頼と同じ `Create` 契約の応答。
+    @discardableResult
+    public func followup(jobID: String, body: String, requestedBy: String? = nil) async throws -> JobRequestResponse {
+        let response = try await access.followup(jobID: jobID, body: body, requestedBy: requestedBy)
+        if var state = states[jobID] {
+            state.latestText = "追記: \(body)"
+            state.lastActivityAt = .now
+            state.lastError = nil
+            states[jobID] = state
+            publish()
+        }
+        return response
+    }
+
+    /// 仕事を中断する。戻り値は依頼と同じ `Create` 契約の応答。
+    @discardableResult
+    public func cancel(jobID: String) async throws -> JobRequestResponse {
+        let response = try await access.cancel(jobID: jobID)
+        if var state = states[jobID] {
+            state.status = .cancelled
+            state.lastPhase = .waiting
+            state.latestText = "中断した"
+            state.latestEventID = nil
+            state.lastActivityAt = .now
+            state.lastError = nil
+            state.lastDirective = RoomPhaseDirective(fixedAnimation: .waiting)
+            states[jobID] = state
+            publish()
+            if let tracked = trackedJob(jobID) {
+                onDirective?(tracked)
+            }
+        }
+        return response
+    }
+
+    /// 成果物を最新に引き直す。完了・失敗で配信が止まったあとに呼ぶ。
+    public func refreshArtifacts(jobID: String) async {
+        do {
+            let detail = try await access.detail(jobID: jobID)
+            if var state = states[jobID] {
+                state.artifacts = detail.artifacts
+                state.title = state.title ?? detail.title ?? jobID
+                if state.lastPhase == nil, let latest = detail.latestEvent {
+                    state.lastPhase = latest.phase
+                    state.latestText = latest.text
+                }
+                states[jobID] = state
+                publish()
+            }
+        } catch {
+            // 取れなくても配信は続けられる。エラーだけ残す。
+            setStreamError(jobID, message: describe(error))
+        }
+    }
+
+    // MARK: - 監視の中身
+
+    private func startStream(jobID: String) {
+        guard states[jobID]?.task == nil else { return }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.runStream(jobID: jobID)
+        }
+        states[jobID]?.task = task
+    }
+
+    private func runStream(jobID: String) async {
+        var attempt = 0
+        while !Task.isCancelled {
+            let cursor = cursorStore.cursor(for: jobID)
+            do {
+                let (bytes, status) = try await access.openEventStream(jobID: jobID, lastEventID: cursor)
+                // 4xx は張り直しても直らないことが多いので、その仕事の配信を諦めて理由を残す。
+                // 408 / 429 は時間を置けば直るので張り直す。
+                if (400..<500).contains(status), status != 408, status != 429 {
+                    setStreamError(jobID, message: "部屋が配信を拒否した (\(status))")
+                    return
+                }
+                guard (200..<300).contains(status) else {
+                    try? await Task.sleep(for: Self.backoffDelay(attempt: attempt))
+                    attempt += 1
+                    continue
+                }
+                // つながった。バックオフを忘れて、以後は張り直すたびに最初から数える。
+                attempt = 0
+                var parser = ServerSentEventParser()
+                var lines = LineAccumulator()
+                for try await byte in bytes {
+                    guard let line = lines.consume(byte: byte) else { continue }
+                    guard let frame = parser.consume(line: line) else { continue }
+                    handle(frame, jobID: jobID)
+                }
+                // サーバー側が切った。少し待って張り直す。
+                try? await Task.sleep(for: Self.backoffDelay(attempt: attempt))
+            } catch {
+                guard !Task.isCancelled else { return }
+                attempt += 1
+                try? await Task.sleep(for: Self.backoffDelay(attempt: attempt))
+            }
+        }
+    }
+
+    private func handle(_ frame: ServerSentEventParser.Frame, jobID: String) {
+        guard let data = frame.data.data(using: .utf8) else { return }
+        guard let event = try? JSONDecoder().decode(RoomEvent.self, from: data) else {
+            Self.logger.error("部屋のイベントを解釈できない: \(frame.data, privacy: .public)")
+            return
+        }
+        // 同じ部屋でも別の仕事のイベントが混ざって流れてきたら無視する。
+        guard event.jobID.isEmpty || event.jobID == jobID else { return }
+        apply(event, jobID: jobID)
+    }
+
+    private func apply(_ event: RoomEvent, jobID: String) {
+        guard var state = states[jobID] else { return }
+        // Last-Event-ID の再送などで同じイベントがもう一度来ても、二度は扱わない。
+        guard state.seenIDs.insert(event.id).inserted else { return }
+        if state.seenIDs.count > Self.seenIDLimit {
+            state.seenIDs = Set(state.seenIDs.suffix(Self.seenIDTrim))
+        }
+        state.latestEventID = event.id
+        state.lastActivityAt = .now
+        state.latestText = event.text
+        cursorStore.setCursor(event.id, for: jobID)
+
+        let isFirst = state.handledCount == 0
+        let directive = Self.makeDirective(
+            event: event,
+            previousPhase: state.lastPhase,
+            isFirstEvent: isFirst,
+            wasSeeded: state.seeded
+        )
+        // 未知の位相は前のまま保つ。
+        state.lastPhase = event.phase ?? state.lastPhase
+        state.status = Self.status(after: event)
+        state.handledCount += 1
+        state.lastDirective = directive
+        states[jobID] = state
+
+        publish()
+        if let tracked = trackedJob(jobID) {
+            onDirective?(tracked)
+        }
+
+        // 終わったあとで成果物を取り直す。配信はフォローアップのために開いたままにする。
+        if event.phase?.isTerminal == true {
+            Task { [weak self] in
+                await self?.refreshArtifacts(jobID: jobID)
+            }
+        }
+    }
+
+    private func setStreamError(_ jobID: String, message: String) {
+        if var state = states[jobID] {
+            state.lastError = message
+            states[jobID] = state
+            publish()
+        }
+    }
+
+    /// バックオフの待ち時間。`attempt` が大きくなるほど長く、上限で頭打ちになる。
+    nonisolated static func backoffDelay(attempt: Int) -> Duration {
+        let exponent = Double(min(max(attempt, 0), 5))
+        let raw = backoffBaseSeconds * pow(2.0, exponent)
+        let jitter = Double.random(in: 0..<0.3) * raw
+        return .seconds(min(raw + jitter, backoffCapSeconds))
+    }
+
+    private func publish() {
+        jobs =
+            states
+            .sorted { $0.value.lastActivityAt > $1.value.lastActivityAt }
+            .map { jobID, state in
+                RoomJobTrackedJob(
+                    jobID: jobID,
+                    title: state.title ?? jobID,
+                    status: state.status,
+                    phase: state.lastPhase,
+                    latestText: state.latestText,
+                    artifacts: state.artifacts,
+                    lastError: state.lastError,
+                    directive: state.lastDirective
+                )
+            }
+    }
+
+    private func trackedJob(_ jobID: String) -> RoomJobTrackedJob? {
+        states[jobID].map { state in
+            RoomJobTrackedJob(
+                jobID: jobID,
+                title: state.title ?? jobID,
+                status: state.status,
+                phase: state.lastPhase,
+                latestText: state.latestText,
+                artifacts: state.artifacts,
+                lastError: state.lastError,
+                directive: state.lastDirective
+            )
+        }
+    }
+
+    private func describe(_ error: Error) -> String {
+        (error as? RoomError)?.errorDescription ?? error.localizedDescription
+    }
+
+    // MARK: - 指示の決定(テストから直接見る)
+
+    /// イベント 1 件をペットへの指示に落とす。
+    ///
+    /// - 位相 → 固着アニメーション: queued/waiting は待つ、researching/downloading/deploying
+    ///   は集中、building/verifying は確認、done は 1 回だけのお祝い(waving / jumping)、
+    ///   failed は落ち込む。
+    /// - 喋るのは `kind == speech` だけ。位相の変わり目・始まり・終わり(done/failed/cancelled)
+    ///   に限る。summary は一切喋らない。
+    nonisolated static func makeDirective(
+        event: RoomEvent,
+        previousPhase: RoomJobPhase?,
+        isFirstEvent: Bool,
+        wasSeeded: Bool
+    ) -> RoomPhaseDirective {
+        let phase = event.phase
+        let phaseChanged = phase != nil && phase != previousPhase
+        let isEnd = phase?.isTerminal == true || event.kind == .cancelled
+
+        var fixedAnimation: PetAnimation?
+        var playOnce: PetAnimation?
+        switch phase {
+        case .done:
+            // 完了は固定を解いて、1 回だけお祝いする。
+            playOnce = Bool.random() ? .waving : .jumping
+        case .failed:
+            fixedAnimation = .failed
+        default:
+            fixedAnimation = phase?.fixedAnimation
+        }
+        if event.kind == .cancelled {
+            // 中断は「待ち」の姿で止める。
+            fixedAnimation = .waiting
+        }
+
+        let shouldSpeak =
+            event.kind == .speech
+            && (isEnd || phaseChanged || (isFirstEvent && !wasSeeded))
+
+        return RoomPhaseDirective(
+            fixedAnimation: fixedAnimation,
+            playOnce: playOnce,
+            line: shouldSpeak ? event.text : nil
+        )
+    }
+
+    /// イベントから仕事の状態を決める。
+    nonisolated static func status(after event: RoomEvent) -> RoomJobStatus {
+        if event.kind == .cancelled { return .cancelled }
+        switch event.phase {
+        case .queued: return .queued
+        case .done: return .done
+        case .failed: return .failed
+        case nil, .waiting, .researching, .downloading, .building, .deploying, .verifying:
+            return .running
+        }
+    }
+
+    /// 詳細の `status` 文字列から状態を決める。読めなければ `nil`。
+    nonisolated static func status(fromRaw raw: String?) -> RoomJobStatus? {
+        guard let raw else { return nil }
+        return RoomJobStatus(rawValue: raw)
+    }
+}
