@@ -131,6 +131,7 @@ def make_log_event(
     except TypeError:
         return ProgressEvent(kind=ProgressKind.LOG, text=text)
 
+
 #: ``os.chdir`` はプロセス全体。タイムアウト後の残りスレッドと次ジョブがぶつからないようにする。
 _CWD_LOCK = threading.Lock()
 
@@ -208,7 +209,10 @@ def advance_followup_cursor(job: Job, executed: list[Path] | None = None) -> Non
 
 
 def build_turn_prompt(job: Job) -> str:
-    """初回は題と本文。続きは未実行の followup 全部を同じセッションの次ターンとして渡す。"""
+    """初回は題と本文＋待機中 followup があれば末尾に追記。
+
+    続きは未実行の followup 全部を同じセッションの次ターンとして渡す。
+    """
     from mihari_room.worker.hermes import build_prompt
 
     pending = pending_followups(job)
@@ -220,7 +224,11 @@ def build_turn_prompt(job: Job) -> str:
             f"結果は `{OUTPUT_DIRNAME}/` に書き出してください。"
             "必要な説明は標準出力の最後に 1〜数行で書いてください。"
         )
-    return build_prompt(job)
+    base = build_prompt(job)
+    if pending:
+        notes = "\n---\n".join(path.read_text(encoding="utf-8") for path in pending)
+        return f"{base}\n\n追記:\n{notes}"
+    return base
 
 
 @contextmanager

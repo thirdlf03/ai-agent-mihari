@@ -175,9 +175,9 @@ def test_room_e2e_fake_agent(tmp_path: Path, monkeypatch) -> None:
     posted = sorted(p.name for _, p in board.files)
     assert "index.html" in posted
     assert "secret-notes.txt" not in posted and "claim_url.txt" not in posted
-    # Research sources exist (export writes sources.json/summary.md under downloads/).
-    assert (job.directory / "research" / "downloads" / "sources.json").is_file()
-    assert (job.directory / "research" / "downloads" / "summary.md").is_file()
+    # Research sources exist (export writes sources.json/summary.md under research/).
+    assert (job.directory / "research" / "sources.json").is_file()
+    assert (job.directory / "research" / "summary.md").is_file()
     # SSE replay: unknown cursor loses nothing; far cursor is empty.
     journal = EventJournal.for_job(job.directory)
     assert len(journal.after(0)) > 0

@@ -84,6 +84,7 @@ async def _run_with_discord(config: RoomConfig) -> None:
         if forum is None:
             logger.error("Forum チャンネル %s が見つからない", config.forum_channel_id)
             return
+
         async def lookup(channel_id: int) -> Any | None:
             return await resolve_discord_channel(client, channel_id)
 
@@ -98,9 +99,7 @@ async def _run_with_discord(config: RoomConfig) -> None:
         except Exception:
             logger.exception("アーカイブ受付に失敗 message=%s", getattr(message, "id", "?"))
         try:
-            incoming = await incoming_from_discord(
-                message, client.user.id if client.user else None
-            )
+            incoming = await incoming_from_discord(message, client.user.id if client.user else None)
             if incoming is None or config.forum_channel_id is None:
                 return
             await handle_incoming(

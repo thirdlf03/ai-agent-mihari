@@ -101,10 +101,10 @@ def test_export_copies_pdf_into_job_research(tmp_path: Path) -> None:
     job = store.create(CreateJobRequest(title="t", body="b", source=JobSource.PET))
     payload = json.loads(discord_export_impl(job, 2, no_fetch=True))
     assert payload["success"] is True, payload
-    downloads = job.directory / "research" / "downloads"
-    assert (downloads / "sources.json").is_file()
-    assert (downloads / "summary.md").is_file()
-    assert downloads.is_dir()
+    research = job.directory / "research"
+    assert (research / "sources.json").is_file()
+    assert (research / "summary.md").is_file()
+    assert (research / "downloads").is_dir()
     assert json.loads(discord_export_impl(job, 999999, no_fetch=True))["success"] is False
 
 
