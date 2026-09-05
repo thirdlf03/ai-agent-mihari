@@ -26,6 +26,8 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     public let detection: DetectionEngine
     public let pet: LivePetPresenter
     public let questioner = HeadGestureQuestioner()
+    /// 作業部屋の仕事の進捗。ペットの右クリック / メニューバーから操作する。
+    public let room: RoomJobMonitor
 
     /// 音楽を止めて聞かせる全画面オーバーレイ。
     ///
@@ -129,6 +131,11 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         // 在席スタンプ直後の猶予を効かせるため、検知エンジンに在席の記録を渡す。
         self.detection = DetectionEngine(attendance: attendance)
         self.pet = LivePetPresenter(controller: PetController(speechPlayer: player))
+        // 部屋の購読は自分専用のセッションで開く。デーモン(bridge)の SSE とは別なので奪わない。
+        self.room = RoomJobMonitor(
+            access: RoomEventClient.makeFromEnvironment(),
+            cursorStore: UserDefaultsRoomJobCursorStore(defaults: .standard)
+        )
         self.isStatusPanelVisible = statusPanel.isVisible
         // 一度も切っていなければ写り込む。余興なので、既定で入っている方が気付いてもらえる。
         self.isPhotobombEnabled =
@@ -214,6 +221,14 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         statusPanel.restore { statusPanelView }
         observeDetection()
         observeDaemonEvents()
+        // 部屋の位相変化をペットへ写す。検知のセリフと同じ口(共有の SpeechPlayer)を通すので、
+        // 二重に鳴らない。
+        room.onDirective = { [weak self] tracked in
+            guard let self else { return }
+            if let directive = tracked.directive {
+                self.applyRoomDirective(directive)
+            }
+        }
 
         // Claude Code の Stop フック(notifyutil -p)からの「応答を終えた」合図。
         externalTrigger.listen(name: ExternalTriggerListener.claudeDoneName) { [weak self] in
@@ -233,6 +248,8 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
             wireDetection()
             // 常駐して見張るアプリなので、始めたら見張り続ける。
             detection.start()
+            // 起動時に走っている仕事を拾って監視する(依頼窓から頼んだ仕事はその場で監視する)。
+            await room.resume()
 
             // ロック時間は Discord の `/watch lock` で決まる。デーモンに繋がる前に
             // 決め打ちすると設定より短く/長くロックしてしまうので、繋がってから引く。
@@ -251,6 +268,7 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         detection.stop()
         photobombWatcher.stop()
         daemon.stop()
+        room.stopAll()
         sleepPreventer.stop()
         watchdogReassertionTask?.cancel()
         watchdogReassertionTask = nil
@@ -418,8 +436,73 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     }
 
     /// 作業部屋への仕事の依頼窓を開く。行き先とトークンは環境変数で決まる。
+    ///
+    /// 依頼が通ったら、その仕事の進捗を監視し始める。
     public func openJobRequest() {
-        JobRequestWindowController.shared.show(client: JobRequestClient.makeFromEnvironment())
+        JobRequestWindowController.shared.show(
+            client: JobRequestClient.makeFromEnvironment(),
+            onSubmitted: { [weak self] jobID, title in
+                Task { @MainActor in
+                    self?.room.attach(jobID: jobID, title: title)
+                }
+            }
+        )
+    }
+
+    // MARK: - 作業部屋の操作
+
+    /// いま追っている仕事(直近に動いたもの)。無ければ `nil`。
+    public var roomJob: RoomJobSummary? {
+        room.jobs.first?.summary
+    }
+
+    /// 走っている仕事へ追記する窓を開く。
+    public func followUpRoomJob() {
+        guard let jobID = room.jobs.first?.jobID else { return }
+        JobRequestWindowController.shared.showFollowup(
+            client: RoomEventClient.makeFromEnvironment(),
+            jobID: jobID
+        )
+    }
+
+    /// 仕事の詳細パネルを開く。記憶の候補はここで本文と承認・却下を見せる。
+    public func openRoomJobDetail() {
+        guard let jobID = room.jobs.first?.jobID else { return }
+        RoomJobDetailWindowController.shared.show(
+            monitor: room,
+            jobID: jobID,
+            onOpenArtifact: { [weak self] url in self?.openRoomArtifact(url) }
+        )
+        Task { [weak self] in
+            await self?.room.refreshMemory(jobID: jobID)
+        }
+    }
+
+    /// 走っている仕事を中断する。
+    public func cancelRoomJob() {
+        guard let jobID = room.jobs.first?.jobID else { return }
+        Task {
+            _ = try? await room.cancel(jobID: jobID)
+        }
+    }
+
+    /// 成果物の URL を開く。http / https だけを開き、それ以外は無視する。
+    public func openRoomArtifact(_ url: URL) {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// 部屋の位相変化をペットに反映する。検知と同じく、固定・一度きり・吹き出しの順で降ろす。
+    private func applyRoomDirective(_ directive: RoomPhaseDirective) {
+        pet.controller.setFixedAnimation(directive.fixedAnimation)
+        if let once = directive.playOnce {
+            pet.controller.playOnce(once)
+        }
+        if let line = directive.line {
+            pet.controller.say(line)
+        }
     }
 
     public func openPermissions() {

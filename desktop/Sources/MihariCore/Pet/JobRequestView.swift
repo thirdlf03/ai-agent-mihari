@@ -1,11 +1,23 @@
 import SwiftUI
 
 /// 依頼窓の中身。タイトルは任意で、本文を書いて「頼む」を押す。
+///
+/// 走っている仕事への「追記」にも同じ窓を使う(タイトル欄を隠して「追記する」になる)。
 public struct JobRequestView: View {
     @StateObject private var model: JobRequestViewModel
 
-    public init(client: JobRequestClient) {
-        _model = StateObject(wrappedValue: JobRequestViewModel(client: client))
+    /// 新しく仕事を頼む窓。
+    public init(client: JobRequestClient, onSubmitted: @escaping @MainActor (String, String) -> Void = { _, _ in }) {
+        _model = StateObject(
+            wrappedValue: JobRequestViewModel(client: client, onSubmitted: onSubmitted)
+        )
+    }
+
+    /// すでに走っている仕事へ追記する窓。
+    public init(followupClient: RoomEventClient, jobID: String) {
+        _model = StateObject(
+            wrappedValue: JobRequestViewModel(followupClient: followupClient, jobID: jobID)
+        )
     }
 
     /// テストから状態を差し込むための入り口。
@@ -15,10 +27,15 @@ public struct JobRequestView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // タイトルは任意。空なら本文の先頭行から作る。
-            TextField("タイトル(空なら本文の先頭行から作る)", text: $model.title)
-                .textFieldStyle(.roundedBorder)
-            Text("ないよう")
+            if model.isFollowup {
+                Text("追記する(仕事 \(model.followupLabel))")
+                    .font(.headline)
+            } else {
+                // タイトルは任意。空なら本文の先頭行から作る。
+                TextField("タイトル(空なら本文の先頭行から作る)", text: $model.title)
+                    .textFieldStyle(.roundedBorder)
+            }
+            Text(model.isFollowup ? "追記の内容" : "ないよう")
                 .font(.headline)
             TextEditor(text: $model.body)
                 .frame(minHeight: 160)
@@ -33,7 +50,7 @@ public struct JobRequestView: View {
                     ProgressView()
                         .controlSize(.small)
                 }
-                Button("頼む") {
+                Button(model.isFollowup ? "追記する" : "頼む") {
                     Task {
                         await model.submit()
                     }
@@ -56,13 +73,41 @@ public final class JobRequestViewModel: ObservableObject {
     @Published public private(set) var notice: String?
     @Published public private(set) var didSucceed = false
 
-    private let client: JobRequestClient
+    private let submitClient: JobRequestClient?
+    private let followupClient: RoomEventClient?
+    private let followupJobID: String?
+    private let onSubmitted: @MainActor (String, String) -> Void
 
-    public init(client: JobRequestClient) {
-        self.client = client
+    /// 新しく仕事を頼む。
+    public init(
+        client: JobRequestClient,
+        onSubmitted: @escaping @MainActor (String, String) -> Void = { _, _ in }
+    ) {
+        self.submitClient = client
+        self.followupClient = nil
+        self.followupJobID = nil
+        self.onSubmitted = onSubmitted
     }
 
-    /// 本文が空のまま「頼む」は押させない。タイトルは空でよい。
+    /// 走っている仕事へ追記する。
+    public init(followupClient: RoomEventClient, jobID: String) {
+        self.submitClient = nil
+        self.followupClient = followupClient
+        self.followupJobID = jobID
+        self.onSubmitted = { _, _ in }
+    }
+
+    /// 追記窓か。タイトル欄を隠し、ボタンの文言も変える。
+    public var isFollowup: Bool {
+        followupJobID != nil
+    }
+
+    /// メニューに出る追記先。無い(新規依頼)ときは空文字。
+    public var followupLabel: String {
+        followupJobID ?? ""
+    }
+
+    /// 本文が空のまま送らせない。タイトルは空でよい。
     public var canSubmit: Bool {
         !isSubmitting && !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -75,18 +120,31 @@ public final class JobRequestViewModel: ObservableObject {
         didSucceed = false
         defer { isSubmitting = false }
         do {
-            let response = try await client.submit(title: title, body: body)
-            didSucceed = true
-            if let jobID = response.jobID, !jobID.isEmpty {
-                notice = "頼んだよ(仕事 \(jobID))"
-            } else {
-                notice = "頼んだよ"
+            if let followupJobID, let followupClient {
+                _ = try await followupClient.followup(jobID: followupJobID, body: body)
+                didSucceed = true
+                notice = "追記したよ"
+                body = ""
+            } else if let submitClient {
+                let response = try await submitClient.submit(title: title, body: body)
+                didSucceed = true
+                if let jobID = response.jobID, !jobID.isEmpty {
+                    notice = "頼んだよ(仕事 \(jobID))"
+                    onSubmitted(jobID, Self.resolvedTitle(title: title, body: body))
+                } else {
+                    notice = "頼んだよ"
+                }
+                title = ""
+                body = ""
             }
-            title = ""
-            body = ""
         } catch {
             didSucceed = false
             notice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
+    }
+
+    /// 送信した仕事のタイトル。`JobRequestClient.resolveTitle` と同じ決め方。
+    private static func resolvedTitle(title: String, body: String) -> String {
+        JobRequestClient.resolveTitle(title: title, body: body)
     }
 }
