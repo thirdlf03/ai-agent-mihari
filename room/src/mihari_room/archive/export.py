@@ -70,12 +70,15 @@ async def export_message(
 
         # ジョブ置き場自体が root の外を指す symlink だったら弾く。
         try:
-            ensure_contained(store.job_dir(job_id), config.root)
+            job_dir = store.job_dir(job_id)
+            ensure_contained(job_dir, config.root)
             downloads_dir = ensure_contained(
-                store.job_dir(job_id) / RESEARCH_DIRNAME / DOWNLOAD_DIRNAME,
-                store.job_dir(job_id),
+                job_dir / RESEARCH_DIRNAME / DOWNLOAD_DIRNAME,
+                job_dir,
             )
         except ValueError as exc:
+            raise ExportError(f"ジョブ置き場の検証に失敗: {exc}") from exc
+        except JobNotFound as exc:
             raise ExportError(f"ジョブ置き場の検証に失敗: {exc}") from exc
         downloads_dir.mkdir(parents=True, exist_ok=True)
 

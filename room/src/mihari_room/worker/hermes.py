@@ -10,6 +10,7 @@ import asyncio
 import os
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 from mihari_room.contracts import (
     INPUT_DIRNAME,
@@ -49,8 +50,17 @@ DISCORD_TOOLSETS = frozenset({"discord", "discord_admin"})
 #: ファイルガード（HERMES_WRITE_SAFE_ROOT）を素通りできる。
 #: 明示の opt-in (MIHARI_ROOM_ALLOW_SHELL=1) がない限り外す。
 #: file 生成 (write_file/patch)・session_search・search/browser 読取は残す。
+#: delegation（nested agents の無制限増殖）・cronjob/kanban（背後の永続実行系）も
+#: 既定では外す。Room の discord_* は in-process の bounded tool（別 toolset）で残す。
 UNSAFE_TOOLSETS_DEFAULT_OFF = frozenset(
-    {"terminal", "computer_use", "code_execution", "cronjob", "kanban"}
+    {"terminal", "computer_use", "code_execution", "cronjob", "kanban", "delegation"}
+)
+
+#: agent 構築時に二重に渡す denylist（toolset 濾過のすり抜け対策）。
+#: enabled 側の allowlist と併用し、MCP 動的 toolset（``mcp-*``）と送信系も塞ぐ。
+#: name レベルの最終扉は ``prune_agent_tools``（委任・skill_manage・実行系を名指し除去）。
+DISABLED_TOOLSETS = sorted(
+    DISCORD_TOOLSETS | UNSAFE_TOOLSETS_DEFAULT_OFF | {"mcp", "hermes-discord", "hermes-gateway"}
 )
 
 
@@ -65,6 +75,7 @@ def filter_toolsets(toolsets: Sequence[str] | None) -> list[str] | None:
 
     None は None のまま（本家の既定解決に任せる前の段階では使わない。
     実際に agent へ渡す直前はリスト化されたものが来る）。
+    Room の bounded ``mihari_room`` toolset（discord_search/context/export）は残す。
     """
     if toolsets is None:
         return None
@@ -72,6 +83,11 @@ def filter_toolsets(toolsets: Sequence[str] | None) -> list[str] | None:
     out: list[str] = []
     for name in toolsets:
         if name in DISCORD_TOOLSETS or "discord" in name:
+            # ただし Room の bounded toolset だけは残す（送信ではなく archive 読取）。
+            if name == "mihari_room":
+                out.append(name)
+            continue
+        if name.startswith("mcp-") or name.startswith("mcp_") or name == "mcp":
             continue
         if not allow_shell and name in UNSAFE_TOOLSETS_DEFAULT_OFF:
             continue
@@ -84,7 +100,7 @@ def filter_toolsets(toolsets: Sequence[str] | None) -> list[str] | None:
 def ensure_baseline_toolsets(toolsets: Sequence[str] | None) -> list[str]:
     """読み・生成に要る最小集合を保証する。"""
     base = list(toolsets) if toolsets else []
-    for required in ("session_search", "search", "file"):
+    for required in ("session_search", "search", "file", "mihari_room", "memory"):
         if required not in base:
             base.append(required)
     return base
@@ -107,10 +123,11 @@ def build_prompt(job: Job) -> str:
         "公開物に API キー・トークン・個人情報（住所・電話・メール等）を入れないでください。\n"
         "直接デプロイや外部投稿はしないでください。公開は Room が行います。\n"
         "過去の会話は組み込みの session_search を先に使ってください。\n"
-        "Discord 横断検索が必要なときだけ discord_search スキル "
-        "(skills に同梱がなければ `MIHARI_ROOM_PYTHON -m mihari_room.discord_search --help` "
-        "相当のモジュール CLI) を使ってください。\n"
-        "記憶に残したいことは memory ツールに書いてください（承認後に保存されます）。"
+        "Discord 横断検索が必要なときは組み込みツール `discord_search` / `discord_context` を使い、"
+        "添付の取り込みは `discord_export` を使ってください（いずれも in-process で動作し、"
+        "shell は要りません。引用には必ず `jump_url` を添えてください）。\n"
+        "記憶に残したいことは memory ツールの action='add' に書いてください"
+        "（承認後に保存されます。replace/remove は未対応です）。"
         "必要な説明は標準出力の最後に 1〜数行で書いてください。"
     )
 
@@ -143,6 +160,36 @@ def _new_files(output_dir: Path, before: set[Path]) -> list[Path]:
         return []
     after = [p.resolve() for p in output_dir.rglob("*") if p.is_file()]
     return sorted(p for p in after if p not in before)
+
+
+def _safe_new_files(job: Job, output_dir: Path, before: set[Path]) -> list[Path]:
+    """Forum へ post してよい新規ファイルだけ返す。
+
+    公開・通知するのは明示的に安全な成果物だけ。manifest・秘密・research・
+    生ログはここで落とす（claim_url 等が外へ出ないように）。
+    """
+    from mihari_room.artifacts import _ALLOWED_WEB_EXT, _is_secret_name
+
+    safe: list[Path] = []
+    for path in _new_files(output_dir, before):
+        try:
+            rel = path.relative_to(output_dir.resolve())
+        except ValueError:
+            continue
+        if any(part in ("", ".", "..") for part in rel.parts):
+            continue
+        if any(_is_secret_name(part) for part in rel.parts):
+            continue
+        if path.suffix.lower() not in _ALLOWED_WEB_EXT:
+            continue
+        if path.is_symlink():
+            continue
+        # manifest / registry 由来は通知しない。
+        if path.name.endswith(".json") and "manifest" in path.name.lower():
+            continue
+        safe.append(path)
+    _ = job  # 将来の job 単位 allowlist 用に引数だけ残す。
+    return safe
 
 
 class HermesWorker:
@@ -180,6 +227,25 @@ class HermesWorker:
             return await self._run_subprocess(job, on_progress)
         return await self._run_inprocess(job, on_progress)
 
+    def request_cancel(self, job_id: str) -> bool:
+        """実行中の worker thread に中断を頼む。届けば True。"""
+        runner = getattr(self, "_runner", None)
+        if runner is not None and hasattr(runner, "request_cancel"):
+            try:
+                return bool(runner.request_cancel(job_id))
+            except Exception:
+                return False
+        return False
+
+    def is_running(self, job_id: str) -> bool:
+        runner = getattr(self, "_runner", None)
+        if runner is not None and hasattr(runner, "is_running"):
+            try:
+                return bool(runner.is_running(job_id))
+            except Exception:
+                return False
+        return False
+
     async def _run_inprocess(
         self,
         job: Job,
@@ -190,10 +256,14 @@ class HermesWorker:
         output_dir = job.directory / OUTPUT_DIRNAME
         before = _snapshot_files(output_dir)
         runner = InProcessHermes(timeout=self._timeout, agent_factory=self._agent_factory)
-        status = await runner.run(job, build_turn_prompt(job), on_progress)
+        self._runner: Any = runner
+        try:
+            status = await runner.run(job, build_turn_prompt(job), on_progress)
+        finally:
+            self._runner = None
         if status is not JobStatus.DONE:
             return status
-        for path in _new_files(output_dir, before):
+        for path in _safe_new_files(job, output_dir, before):
             await on_progress(ProgressEvent(kind=ProgressKind.FILE, text=path.name, path=path))
         return JobStatus.DONE
 
@@ -264,6 +334,6 @@ class HermesWorker:
             await on_progress(ProgressEvent(kind=ProgressKind.SPEECH, text=speech_candidate))
             await on_progress(ProgressEvent(kind=ProgressKind.SUMMARY, text=speech_candidate))
 
-        for path in _new_files(output_dir, before):
+        for path in _safe_new_files(job, output_dir, before):
             await on_progress(ProgressEvent(kind=ProgressKind.FILE, text=path.name, path=path))
         return JobStatus.DONE

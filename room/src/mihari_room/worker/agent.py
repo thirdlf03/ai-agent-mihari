@@ -33,6 +33,7 @@ import logging
 import os
 import queue
 import re
+import threading
 from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -357,8 +358,31 @@ def _memory_store_for(job: Job):
 
 
 def prune_agent_tools(agent: Any) -> int:
-    """Discord 送信ツールを agent 表面から落とす。discord_search skill は残す。"""
+    """Dangerous toolsを agent 表面から落とす。discord_search skill は残す。
+
+    Toolset レベルでは ``filter_toolsets`` が弾くが、toolset 経由で
+    すり抜けた危険ツール名もここで名指しで落とす（defense in depth）:
+
+    - ``delegate_task``: nested agents（再帰委任の無制限増殖を塞ぐ）
+    - ``skill_manage``: skills の自己改変（list/view は残す）
+    - ``cronjob_manage`` / kanban_*: 背後の永続実行系
+    - ``computer_use`` / ``execute_code`` / ``terminal`` / ``process_manage``:
+      無制限実行系（shell opt-in 時のみ残すのは呼び出し側の責任）
+    - ``discord`` / ``discord_admin`` / ``mcp-*``: 外部送信・動的 MCP
+    """
     removed = 0
+    blocked_names = {
+        "discord",
+        "discord_admin",
+        "delegate_task",
+        "subagent",
+        "skill_manage",
+        "cronjob_manage",
+        "computer_use",
+        "execute_code",
+        "terminal",
+        "process_manage",
+    }
     for attr in ("tools",):
         tools = getattr(agent, attr, None)
         if isinstance(tools, list):
@@ -372,7 +396,7 @@ def prune_agent_tools(agent: Any) -> int:
                         name = ""
                 else:
                     name = str(getattr(tool, "__name__", "") or "")
-                if name in {"discord", "discord_admin"}:
+                if name in blocked_names or name.startswith("mcp-") or name.startswith("mcp_"):
                     removed += 1
                     continue
                 kept.append(tool)
@@ -383,11 +407,51 @@ def prune_agent_tools(agent: Any) -> int:
                     pass
     valid = getattr(agent, "valid_tool_names", None)
     if isinstance(valid, set):
-        for name in ("discord", "discord_admin"):
+        for name in blocked_names:
             if name in valid:
                 valid.discard(name)
                 removed += 1
+        for name in [n for n in valid if n.startswith("mcp-") or n.startswith("mcp_")]:
+            valid.discard(name)
+            removed += 1
     return removed
+
+
+def _emit_candidate_event(job: Job, candidate: Any) -> None:
+    """memory 候補が出たら日誌に残す（desktop の refresh 用、queue は塞がない）。"""
+    try:
+        from mihari_room.events import EventJournal, EventPhase, JournalKind
+
+        journal = EventJournal.for_job(job.directory)
+        journal.append(
+            job_id=job.id,
+            phase=EventPhase.WAITING,
+            kind=JournalKind.MEMORY_CANDIDATE,
+            text=f"memory 候補を預かったよ（{candidate.target}、承認待ち）。",
+        )
+    except Exception:
+        logger.debug("memory candidate journal append failed", exc_info=True)
+
+
+def _emit_candidate_event_for_id(job_id: str, candidate_store: Any, candidate: Any) -> None:
+    """job オブジェクトが無い経路（store wrapper）用の候補通知。"""
+    try:
+        from mihari_room.events import EventJournal, EventPhase, JournalKind
+
+        root = Path(candidate_store.root) if hasattr(candidate_store, "root") else None
+        if root is None:
+            return
+        from mihari_room.contracts import JOBS_DIRNAME
+
+        journal = EventJournal.for_job(root / JOBS_DIRNAME / job_id)
+        journal.append(
+            job_id=job_id,
+            phase=EventPhase.WAITING,
+            kind=JournalKind.MEMORY_CANDIDATE,
+            text=f"memory 候補を預かったよ（{candidate.target}、承認待ち）。",
+        )
+    except Exception:
+        logger.debug("memory candidate journal append failed", exc_info=True)
 
 
 def install_memory_guard(agent: Any, job: Job) -> Callable[[], None]:
@@ -400,6 +464,7 @@ def install_memory_guard(agent: Any, job: Job) -> Callable[[], None]:
     """
     store = _memory_store_for(job)
     originals: dict[str, Any] = {}
+    candidate_store = store  # closure: 承認候補の正本。引数の shadow に惑わされない。
 
     # -- agent._memory_store を guard に差し替え --
     try:
@@ -456,30 +521,43 @@ def install_memory_guard(agent: Any, job: Job) -> Callable[[], None]:
             old_text: str | None = None,
             new_text: str | None = None,
             operations: Any | None = None,
-            store: Any | None = None,
+            store: Any | None = None,  # noqa: A002 -- 本家シグネチャ互換。無視する。
         ) -> str:
             import json as _json
 
             from tools.registry import tool_error as _tool_error
 
+            _ = store  # agent 側の store は使わない。正本は closure の candidate_store。
             norm_target = (target or "memory").strip().lower()
             if norm_target not in ("memory", "user"):
                 norm_target = "memory"
             filename = "USER.md" if norm_target == "user" else "MEMORY.md"
-            # Batch は全 op を候補化する。
+            # Batch は add のみ候補化する。replace/remove は MVP では未対応と明示する
+            # （差分指示文を memory として追記すると誤った記憶になるため）。
             if operations:
                 if not isinstance(operations, list):
                     return _tool_error(
                         "operations must be a list of {action, content?, old_text?} objects.",
                         success=False,
                     )
+                for op in operations:
+                    if isinstance(op, dict) and (op.get("action") or "add") != "add":
+                        return _tool_error(
+                            f"Room MVP: batch op '{op.get('action')}' is not supported. "
+                            "Only action='add' is staged as a candidate. "
+                            "For corrections, propose the full corrected entry with add.",
+                            success=False,
+                        )
                 staged = 0
                 for op in operations:
                     if not isinstance(op, dict):
                         continue
                     text = op.get("content", op.get("new_text", ""))
                     try:
-                        store_propose(store, job, norm_target, text, op, filename)
+                        candidate = candidate_store.propose(
+                            job.id, norm_target, (text or "").strip()
+                        )
+                        _emit_candidate_event(job, candidate)
                         staged += 1
                     except ValueError as exc:
                         return _tool_error(str(exc), success=False)
@@ -498,7 +576,7 @@ def install_memory_guard(agent: Any, job: Job) -> Callable[[], None]:
             if action not in {"add", "replace", "remove"}:
                 # 読み・一覧系は承認済み memory を返す。
                 try:
-                    entries = store.approved_entries(norm_target)
+                    entries = candidate_store.approved_entries(norm_target)
                 except Exception:
                     entries = []
                 return _json.dumps(
@@ -512,18 +590,22 @@ def install_memory_guard(agent: Any, job: Job) -> Callable[[], None]:
                     ensure_ascii=False,
                 )
             text = content if content is not None else new_text
-            if action in {"replace", "remove"} and not old_text:
+            # MVP では add のみ対応。replace/remove は差分適用器を持たないので
+            # 明示的に断る（"[replace ...] >> ..." のような指示文を memory として
+            # 追記すると誤った記憶になる。それだけはしない）。
+            if action in {"replace", "remove"}:
                 return _tool_error(
-                    f"'{action}' needs old_text -- a short unique substring of the entry "
-                    f"to {action}. None was provided.",
+                    f"Room MVP: action='{action}' is not supported. "
+                    "Only action='add' is staged as a candidate for owner approval. "
+                    "For corrections, propose the full corrected entry with "
+                    "action='add', content='<corrected entry>'.",
                     success=False,
                 )
-            if action in {"add", "replace"} and not (text or "").strip():
-                return _tool_error(f"Content is required for '{action}' action.", success=False)
+            if not (text or "").strip():
+                return _tool_error("Content is required for 'add' action.", success=False)
             try:
-                candidate = store_propose(
-                    store, job, norm_target, text or "", {"old_text": old_text}, filename
-                )
+                candidate = candidate_store.propose(job.id, norm_target, (text or "").strip())
+                _emit_candidate_event(job, candidate)
             except ValueError as exc:
                 return _tool_error(str(exc), success=False)
             return _json.dumps(
@@ -539,29 +621,6 @@ def install_memory_guard(agent: Any, job: Job) -> Callable[[], None]:
                 },
                 ensure_ascii=False,
             )
-
-        def store_propose(
-            _agent_store: Any,
-            job_arg: Job,
-            norm_target: str,
-            text: str | None,
-            op: Any,
-            filename: str,
-        ):
-            # replace/remove は差分ごと候補化する（上書き・削除の直適用をしない）。
-            _ = (_agent_store, filename)
-            if isinstance(op, dict) and op.get("old_text"):
-                action_name = op.get("action", "update")
-                content_text = f"[{action_name}] {old_text_marker(op)} >> {(text or '').strip()}"
-            else:
-                content_text = (text or "").strip()
-            return _memory_store_for(job_arg).propose(job_arg.id, norm_target, content_text)
-
-        def old_text_marker(op: Any) -> str:
-            try:
-                return str((op or {}).get("old_text") or "")[:120]
-            except Exception:
-                return ""
 
         memory_tool_module.memory_tool = _guarded_memory_tool  # type: ignore[method-assign]
     except ImportError:
@@ -632,35 +691,60 @@ class _ApprovalMemoryStore:
     def _stage(self, target: str, content: str) -> dict[str, Any]:
         norm = "user" if target == "user" else "memory"
         candidate = self._candidates.propose(self._job_id, norm, content)
+        _emit_candidate_event_for_id(self._job_id, self._candidates, candidate)
         return {"success": True, "staged": True, "candidate_id": candidate.id}
 
     def add(self, target: str, content: str) -> dict[str, Any]:
         try:
             norm = "user" if target == "user" else "memory"
             candidate = self._candidates.propose(self._job_id, norm, content)
+            _emit_candidate_event_for_id(self._job_id, self._candidates, candidate)
             return {"success": True, "staged": True, "candidate_id": candidate.id}
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
 
     def replace(self, target: str, old_text: str, new_content: str) -> dict[str, Any]:
-        return self.add(target, f"[replace {old_text[:80]}] >> {(new_content or '').strip()}")
+        # MVP では未対応と明示する。指示文の追記は誤記憶になるのでしない。
+        return {
+            "success": False,
+            "error": (
+                "Room MVP: replace is not supported. Propose the full corrected "
+                "entry with add instead. Nothing was staged."
+            ),
+        }
 
     def remove(self, target: str, old_text: str) -> dict[str, Any]:
+        # MVP では未対応と明示する。削除依頼の文面化もしない。
         return {
-            "success": True,
-            "staged": True,
-            "message": f"削除依頼を候補として預かりました ({old_text[:40]})。承認後に反映されます。",  # noqa: E501,
+            "success": False,
+            "error": (
+                "Room MVP: remove is not supported. "
+                "Ask the owner to edit MEMORY.md/USER.md directly. Nothing was staged."
+            ),
         }
 
     def apply_batch(self, target: str, operations: list[dict[str, Any]]) -> dict[str, Any]:
+        for op in operations or []:
+            if isinstance(op, dict) and (op.get("action") or "add") != "add":
+                return {
+                    "success": False,
+                    "error": (
+                        f"Room MVP: batch op '{op.get('action')}' is not supported. "
+                        "Only action='add' is staged. Nothing was staged."
+                    ),
+                }
         staged = 0
         for op in operations or []:
             if not isinstance(op, dict):
                 continue
             text = str(op.get("content", op.get("new_text", "")) or "")
-            result = self.add(target, text or f"[{op.get('action', '?')}] {op.get('old_text', '')}")
+            if not text.strip():
+                continue
+            result = self.add(target, text)
             if result.get("success"):
                 staged += 1
+            else:
+                return result
         return {"success": True, "staged": True, "proposed": staged}
 
 
@@ -752,6 +836,29 @@ class InProcessHermes:
         self._timeout = timeout
         self._injected = agent_factory is not None
         self._agent_factory = agent_factory or default_agent_factory
+        self._live: dict[str, Any] = {}
+        self._live_lock = threading.Lock()
+
+    def request_cancel(self, job_id: str) -> bool:
+        """実行中の agent に interrupt を届ける。届けば True。"""
+        agent = self._live.get(job_id)
+        if agent is None:
+            return False
+        interrupt = getattr(agent, "interrupt", None)
+        if not callable(interrupt):
+            return False
+        try:
+            try:
+                interrupt("cancelled by owner")
+            except TypeError:
+                interrupt()
+        except Exception:
+            logger.debug("request_cancel interrupt failed", exc_info=True)
+            return False
+        return True
+
+    def is_running(self, job_id: str) -> bool:
+        return job_id in self._live
 
     async def run(
         self,
@@ -826,7 +933,21 @@ class InProcessHermes:
                 runtime = resolved["runtime"]
                 agent = None
                 restore_memory_guard: Callable[[], None] | None = None
+                restore_discord_tools: Callable[[], None] | None = None
                 try:
+                    # Bounded discord_* を registry に先に載せる（agent build が読む）。
+                    try:
+                        from mihari_room.worker.discord_tools import register_discord_tools
+
+                        restore_discord_tools = register_discord_tools(job)
+                    except Exception:
+                        logger.debug("discord tools register failed", exc_info=True)
+                    try:
+                        from mihari_room.worker.hermes import DISABLED_TOOLSETS
+
+                        disabled = list(DISABLED_TOOLSETS)
+                    except Exception:
+                        disabled = ["discord", "discord_admin", "terminal"]
                     agent = self._agent_factory(
                         api_key=runtime.get("api_key"),
                         base_url=runtime.get("base_url"),
@@ -835,6 +956,7 @@ class InProcessHermes:
                         api_mode=runtime.get("api_mode"),
                         model=model,
                         enabled_toolsets=resolved["toolsets"],
+                        disabled_toolsets=disabled,
                         quiet_mode=True,
                         platform="cli",
                         session_id=session_id,
@@ -846,6 +968,7 @@ class InProcessHermes:
                         load_soul_identity=True,
                     )
                     holder.append(agent)
+                    self._live[job.id] = agent
                     # セッション ID は早めに残す（中断時も拾えるように）。
                     _persist_session_best_effort(job, getattr(agent, "session_id", None))
                     try:
@@ -856,6 +979,15 @@ class InProcessHermes:
                         restore_memory_guard = install_memory_guard(agent, job)
                     except Exception:
                         logger.debug("memory guard install failed", exc_info=True)
+                    # 承認済み memory をこのセッションの snapshot に載せる。
+                    # （本家 MemoryStore.load_from_disk と同じ口。次回起動も同様。）
+                    try:
+                        guard_store = getattr(agent, "_memory_store", None)
+                        loader = getattr(guard_store, "load_from_disk", None)
+                        if callable(loader):
+                            loader()
+                    except Exception:
+                        logger.debug("approved memory load failed", exc_info=True)
                     agent.suppress_status_output = True
                     agent._end_session_on_close = False
                     result = agent.run_conversation(
@@ -871,6 +1003,12 @@ class InProcessHermes:
                             restore_memory_guard()
                         except Exception:
                             pass
+                    if restore_discord_tools is not None:
+                        try:
+                            restore_discord_tools()
+                        except Exception:
+                            pass
+                    self._live.pop(job.id, None)
                     # 中断時も ID があれば残す。
                     try:
                         if holder:

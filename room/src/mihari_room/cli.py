@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 
 import uvicorn
@@ -126,9 +127,37 @@ async def _run_with_discord(config: RoomConfig) -> None:
         lifespan="on",
     )
     server = uvicorn.Server(uv_config)
+    discord_task = asyncio.create_task(client.start(config.discord_token), name="mihari-discord")
+    server_task = asyncio.create_task(server.serve(), name="mihari-http")
     try:
-        await asyncio.gather(client.start(config.discord_token), server.serve())
+        done, pending = await asyncio.wait(
+            {discord_task, server_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        # 先に終わった方の例外は取り出す（黙って握りつぶさない）。
+        for task in done:
+            exc = task.exception()
+            if exc is not None:
+                logger.error("デーモンの一部が終了: %r", exc)
     finally:
+        # どちらが落ちてももう片方を止め、discord と archive を確実に閉じる。
+        # uvicorn の exit/error 時もここを通る。
+        server.should_exit = True
+        for task in (discord_task, server_task):
+            if not task.done():
+                task.cancel()
+        for task in (discord_task, server_task):
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        try:
+            await client.close()
+        except Exception:
+            logger.debug("discord close failed", exc_info=True)
+        try:
+            await orchestrator.aclose()
+        except Exception:
+            logger.debug("orchestrator close failed", exc_info=True)
         await archive.aclose()
 
 
@@ -146,4 +175,20 @@ def main() -> None:
     config.root.mkdir(parents=True, exist_ok=True)
     if not config.discord_token or config.forum_channel_id is None:
         raise SystemExit("DISCORD_BOT_TOKEN と MIHARI_FORUM_CHANNEL_ID が要る")
-    asyncio.run(_run_with_discord(config))
+    # Hermes を import する前に専用 HERMES_HOME を決めて pin する。
+    # 対話プロファイル（~/.hermes）には触れない。lease は worker thread 全終了まで離さない。
+    from mihari_room.worker.runtime_lock import hermes_home_lock, resolve_hermes_home, room_lock
+
+    hermes_home = resolve_hermes_home(config.root)
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    os.environ["HERMES_HOME"] = str(hermes_home)
+    logger.info("HERMES_HOME=%s", hermes_home)
+    try:
+        with room_lock(config.root), hermes_home_lock(hermes_home):
+            asyncio.run(_run_with_discord(config))
+    except TimeoutError as error:
+        raise SystemExit(f"lock を取れない（多重起動か）: {error}") from error
+
+
+if __name__ == "__main__":
+    main()

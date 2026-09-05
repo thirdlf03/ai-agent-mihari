@@ -52,6 +52,9 @@ class JournalKind(StrEnum):
     FILE = "file"
     SUMMARY = "summary"
     CANCELLED = "cancelled"
+    #: memory candidate proposed; phase is WAITING. Desktop refreshes the
+    #: memory list on detail refresh; the job queue never blocks on it.
+    MEMORY_CANDIDATE = "memory_candidate"
 
 
 def kind_from_progress(kind: ProgressKind) -> JournalKind:

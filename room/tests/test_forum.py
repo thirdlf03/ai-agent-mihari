@@ -228,5 +228,3 @@ async def test_progress_starts_new_bubble_when_full(monkeypatch) -> None:
     await board.post_log(1, "b" * 40)
     assert thread.send.await_count == 2
     first.edit.assert_not_called()
-
-

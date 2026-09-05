@@ -17,7 +17,7 @@ Hermes の Discord Gateway は起動しない。Forum・タグ・ペット HTTP 
 - Clarify は自動で「最善の仮定で進めて」に丸める（一人作業）
 - 作業の取り消しは `POST /jobs/{id}/cancel`（頼んだ人か `MIHARI_OWNER_ID` だけ）
 - Hermes の memory 候補は `GET /jobs/{id}/memory` に出して、owner の明示承認
-  （`approve` / `reject`）を待つ（この契約は実装中）
+  （`approve` / `reject`）を待つ。`add` のみ候補化し、`replace` / `remove` は未対応として明示拒否する
 - 同時実行は 1 件。タイムアウト 15 分で failed 扱い
 
 **検証状況（正直なところ）:** ローカルは偽 Hermes でのテストのみ。実 Hermes の E2E は

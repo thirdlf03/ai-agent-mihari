@@ -6,7 +6,19 @@
 
 ## 実行環境
 
-全部ローカルの Room Python で走る。Discord トークンもチャンネル設定も要らない。
+Room のジョブ内では **in-process ツール**を使う（shell は既定で無効のため、
+サブプロセスの CLI はジョブ内からは呼ばない）。Hermes の tool として登録済み：
+
+- `discord_search` — 発言の全文検索（`query`, `limit`〜10, `channel` 省略可）
+- `discord_context` — `message_id` の前後を読む（`before`/`after` 0〜10）
+- `discord_export` — 添付を `jobs/<id>/research/downloads/` にコピーし、
+  `sources.json` / `summary.md` を作る（`message_id`, `no_fetch` 省略可）
+
+いずれも Room のアーカイブ DB を読み取り専用で引き、export だけ
+`research/downloads/` の内側に書く。結果は最大 10 件・本文 2000 字で頭打ち。
+引用には必ず `jump_url` を添える。
+
+手元（Room 外）で直接叩きたいときだけ CLI を使う。トークン不要：
 
 - 環境変数 `MIHARI_ROOM_PYTHON` が設定されていれば、それを使う（`uv run` 不要）。
   ```bash

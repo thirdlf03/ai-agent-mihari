@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
+import re
+import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -25,12 +29,19 @@ class JobNotFound(KeyError):
     """指定の仕事がディスクにない。"""
 
 
+#: job id は FileJobStore が振る uuid hex (12 chars)。外からはこの形だけ受け付ける。
+_JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+logger = logging.getLogger("mihari_room")
+
+
 class FileJobStore:
     """meta.json を正本にする JobStore。毎回ディスクから読み直す。"""
 
     def __init__(self, root: Path) -> None:
         # 手元に状態を持たない。再起動後も同じ root なら続きが見える。
-        self._root = root
+        # 相対 root はプロセス全体の chdir に弱いので絶対化する。
+        self._root = Path(root).expanduser().resolve()
 
     @property
     def _jobs_root(self) -> Path:
@@ -103,8 +114,8 @@ class FileJobStore:
         return tuple(restored)
 
     def job_dir(self, job_id: str) -> Path:
-        # meta がない置き場は仕事ではない
-        self._read_meta(job_id)
+        # meta がない置き場は仕事ではない。symlink・脱出は弾く。
+        self._validated_job_path(job_id)
         return self._jobs_root / job_id
 
     def input_dir(self, job_id: str) -> Path:
@@ -119,18 +130,26 @@ class FileJobStore:
         if not self._jobs_root.is_dir():
             return found
         for directory in sorted(self._jobs_root.iterdir(), key=lambda p: p.name):
-            if not directory.is_dir():
+            if not directory.is_dir() or directory.is_symlink():
                 continue
             try:
                 meta = self._read_meta(directory.name)
             except JobNotFound:
+                continue
+            except ValueError:
+                # 不正な id 名の置き場は仕事ではない。落とさず飛ばす。
                 continue
             created_at = meta.get("created_at", 0.0)
             try:
                 order = float(created_at)
             except (TypeError, ValueError):
                 order = 0.0
-            found.append((order, self._job_from_meta(meta)))
+            try:
+                found.append((order, self._job_from_meta(meta)))
+            except (KeyError, TypeError, ValueError):
+                # 壊れた meta は飛ばす（crash loop にしない）。起動時にログで知らせる。
+                logger.warning("壊れた meta.json を飛ばした: %s", directory.name)
+                continue
         # 同時刻に生まれた双子は id 順で決着
         found.sort(key=lambda item: (item[0], item[1].id))
         return found
@@ -147,7 +166,7 @@ class FileJobStore:
                 try:
                     raw = json.loads(meta_path.read_text(encoding="utf-8"))
                     created = float(raw.get("created_at", 0.0))
-                except (ValueError, TypeError, AttributeError):
+                except (ValueError, TypeError, AttributeError, OSError):
                     continue
                 if latest is None or created > latest:
                     latest = created
@@ -156,24 +175,72 @@ class FileJobStore:
         return now
 
     def _meta_path(self, job_id: str) -> Path:
+        self._validate_job_id(job_id)
         return self._jobs_root / job_id / META_FILENAME
 
-    def _read_meta(self, job_id: str) -> dict[str, Any]:
-        path = self._meta_path(job_id)
-        if not path.is_file():
+    @staticmethod
+    def _validate_job_id(job_id: str) -> None:
+        if not _JOB_ID_RE.match(job_id or ""):
+            raise JobNotFound(f"invalid job id: {job_id!r}")
+
+    def _validated_job_path(self, job_id: str) -> Path:
+        """job 置き場の実在・ containment を確かめる。symlink は拒否。"""
+        self._validate_job_id(job_id)
+        jobs_root = self._jobs_root.resolve() if self._jobs_root.exists() else self._jobs_root
+        candidate = self._jobs_root / job_id
+        if candidate.is_symlink():
+            raise JobNotFound(f"job path is a symlink: {job_id}")
+        try:
+            resolved = candidate.resolve()
+        except OSError as exc:
+            raise JobNotFound(job_id) from exc
+        try:
+            resolved.relative_to(jobs_root)
+        except ValueError as exc:
+            raise JobNotFound(f"job escapes room root: {job_id}") from exc
+        if not resolved.is_dir():
             raise JobNotFound(job_id)
-        data = json.loads(path.read_text(encoding="utf-8"))
+        # meta の実在も確かめる（無い置き場は仕事ではない）。
+        self._read_meta(job_id)
+        return resolved
+
+    def _read_meta(self, job_id: str) -> dict[str, Any]:
+        self._validate_job_id(job_id)
+        path = self._meta_path(job_id)
+        if path.is_symlink() or not path.is_file():
+            raise JobNotFound(job_id)
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise JobNotFound(job_id) from exc
+        try:
+            data = json.loads(raw)
+        except ValueError as exc:
+            # 壊れた meta は無い扱い。呼び出し側は飛ばすか 404 にする。
+            raise JobNotFound(job_id) from exc
         if not isinstance(data, dict):
             raise JobNotFound(job_id)
         return data
 
     def _write_meta(self, job_id: str, meta: dict[str, Any]) -> None:
+        self._validate_job_id(job_id)
         path = self._meta_path(job_id)
+        if path.is_symlink():
+            raise JobNotFound(f"job path is a symlink: {job_id}")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        payload = json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        # atomic: 同じ dir の tmp + os.replace。crash 途中の半端書きを残さない。
+        fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".meta.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+            os.replace(tmp_name, path)
+        finally:
+            try:
+                if os.path.exists(tmp_name):
+                    os.unlink(tmp_name)
+            except OSError:
+                pass
 
     def _job_from_meta(self, meta: dict[str, Any]) -> Job:
         job_id = str(meta["id"])

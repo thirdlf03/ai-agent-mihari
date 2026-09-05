@@ -176,11 +176,21 @@ def _job_detail(orchestrator: RoomOrchestrator, job: Job) -> dict[str, Any]:
 
 
 def _preview_headers() -> dict[str, str]:
-    """未認証プレビューの安全ヘッダ。nosniff / no-referrer / sandbox CSP。"""
+    """未認証プレビューの安全ヘッダ。nosniff / no-referrer / sandbox CSP。
+
+    opaque origin の sandbox（allow-same-origin なし）で動かす。
+    相対 CSS/画像/フォントと同一フォルダの JS だけ許し、API origin への権限は渡さない
+    （connect-src 'none'、form-action 'none'）。対話モック用の script は
+    ``sandbox allow-scripts`` で許すが、allow-same-origin は付けないので
+    親ページの DOM・storage には触れない。
+    """
     return {
         "Content-Security-Policy": (
-            "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'; "
-            "img-src data: https:; style-src 'unsafe-inline';"
+            "sandbox allow-scripts; default-src 'none'; base-uri 'none'; "
+            "form-action 'none'; connect-src 'none'; worker-src 'none'; "
+            "img-src 'self' data: https:; media-src 'self' data:; "
+            "style-src 'self' 'unsafe-inline'; script-src 'self'; "
+            "font-src 'self' data:;"
         ),
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "no-referrer",
@@ -190,24 +200,125 @@ def _preview_headers() -> dict[str, str]:
 
 
 def _serve_preview(config: RoomConfig, token: str, rest: str) -> Response:
-    """プレビューを未認証で返す。ルートやメタデータは晒さない。"""
+    """プレビューを未認証で返す。ルートやメタデータは晒さない。
+
+    - token 自体・token 配下の symlink chain は拒否（FS 改ざん時の他 job 漏洩対策）
+    - ``..`` / 絶対パス / 隠しファイル（``.*``）・メタデータ名は 404
+    - 公開 allowlist（ArtifactPublisher と同じ拡張子）以外の実ファイルは出さない
+    """
+    from mihari_room.artifacts import _ALLOWED_WEB_EXT
+
     if not re.fullmatch(r"[A-Za-z0-9_-]+", token):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    previews_root = (config.root / PREVIEWS_DIRNAME).resolve()
     token_dir = config.root / PREVIEWS_DIRNAME / token
-    if not token_dir.is_dir():
+    # token 置き場自体の symlink は拒否。
+    if token_dir.is_symlink() or not token_dir.is_dir():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     rel = Path(rest or "index.html")
     if rel.is_absolute() or ".." in rel.parts:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    if any(part.startswith(".") for part in rel.parts):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     candidate = token_dir / rel
+    if candidate.is_symlink():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     try:
         resolved = candidate.resolve()
     except OSError as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
-    if not resolved.is_relative_to(token_dir.resolve()) or not resolved.is_file():
+    try:
+        token_resolved = token_dir.resolve()
+    except OSError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
+    if token_resolved != previews_root / token or not resolved.is_relative_to(token_resolved):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    # 途中の symlink chain（他 token・root 外への差し替え）も拒否。
+    node = candidate
+    for _ in range(len(rel.parts) + 1):
+        if node.is_symlink():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        if node == token_dir:
+            break
+        node = node.parent
+    if not resolved.is_file() or resolved.is_symlink():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    if resolved.suffix.lower() not in _ALLOWED_WEB_EXT:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     media = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
     return Response(content=resolved.read_bytes(), media_type=media, headers=_preview_headers())
+
+
+#: candidate id は MemoryCandidateStore が振る hex（12 chars）。外からはこの形だけ。
+_CANDIDATE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+
+def _memory_store_for_config(config: RoomConfig):
+    from mihari_room.worker.memory import MemoryCandidateStore
+    from mihari_room.worker.runtime_lock import resolve_hermes_home
+
+    return MemoryCandidateStore(config.root, resolve_hermes_home(config.root))
+
+
+def _candidate_to_dict(candidate: Any) -> dict[str, Any]:
+    return {
+        "id": candidate.id,
+        "target": candidate.target,
+        "content": candidate.content,
+        "status": candidate.status,
+        "created_at": candidate.created_at,
+    }
+
+
+async def _memory_decide(
+    request: Request, job_id: str, candidate_id: str, *, approve: bool
+) -> dict[str, Any]:
+    """memory 候補の approve/reject。承認者は token owner（config 側）のみ。
+
+    body の身分表示は一切使わない。認証済み token の持ち主 = owner として扱い、
+    記録上の approved_by も config.owner_id にする。owner 未設定なら 403。
+    """
+    orchestrator = request.app.state.orchestrator
+    config: RoomConfig = request.app.state.config
+    if not config.owner_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="owner が未設定（MIHARI_OWNER_ID）"
+        )
+    try:
+        orchestrator.store.get(job_id)
+    except JobNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="仕事がない") from error
+    if not _CANDIDATE_ID_RE.match(candidate_id or ""):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="候補がない")
+    store = _memory_store_for_config(config)
+    try:
+        if approve:
+            candidate = store.approve(job_id, candidate_id)
+        else:
+            candidate = store.reject(job_id, candidate_id)
+    except ValueError as error:
+        message = str(error)
+        if "unknown candidate" in message or "unknown job" in message or "invalid job" in message:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="候補がない"
+            ) from error
+        if "already approved" in message or "already rejected" in message:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=message) from error
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=message) from error
+    # 決定を日誌にも残す（SSE で desktop が拾える）。job は塞がない。
+    try:
+        journal = EventJournal.for_job(orchestrator.store.job_dir(job_id))
+        from mihari_room.events import EventPhase, JournalKind
+
+        journal.append(
+            job_id=job_id,
+            phase=EventPhase.WAITING,
+            kind=JournalKind.LOG,
+            text=("memory 候補を確定したよ。" if approve else "memory 候補を捨てたよ。"),
+        )
+    except Exception:
+        pass
+    return _candidate_to_dict(candidate)
 
 
 def create_app(
@@ -358,6 +469,46 @@ def create_app(
                 "X-Accel-Buffering": "no",
             },
         )
+
+    # --- memory 承認（owner の明示承認。body の身分は使わない） ------------------
+
+    @app.get("/jobs/{job_id}/memory", dependencies=[Depends(verify_token)])
+    def job_memory(request: Request, job_id: str) -> dict[str, Any]:
+        orchestrator = request.app.state.orchestrator
+        config = request.app.state.config
+        try:
+            orchestrator.store.get(job_id)
+        except JobNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="仕事がない"
+            ) from error
+        store = _memory_store_for_config(config)
+        try:
+            candidates = store.list(job_id)
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+        return {
+            "candidates": [
+                {
+                    "id": c.id,
+                    "target": c.target,
+                    "content": c.content,
+                    "status": c.status,
+                    "created_at": c.created_at,
+                }
+                for c in candidates
+            ]
+        }
+
+    @app.post("/jobs/{job_id}/memory/{candidate_id}/approve", dependencies=[Depends(verify_token)])
+    async def job_memory_approve(
+        request: Request, job_id: str, candidate_id: str
+    ) -> dict[str, Any]:
+        return await _memory_decide(request, job_id, candidate_id, approve=True)
+
+    @app.post("/jobs/{job_id}/memory/{candidate_id}/reject", dependencies=[Depends(verify_token)])
+    async def job_memory_reject(request: Request, job_id: str, candidate_id: str) -> dict[str, Any]:
+        return await _memory_decide(request, job_id, candidate_id, approve=False)
 
     # --- プレビュー（未認証・安全ヘッダ付き） --------------------------------
 

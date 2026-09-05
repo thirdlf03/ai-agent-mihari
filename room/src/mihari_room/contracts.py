@@ -42,6 +42,8 @@ class ProgressKind(StrEnum):
     LOG = "log"
     FILE = "file"
     SUMMARY = "summary"
+    #: memory candidate proposed (approval-gated, job does not block).
+    MEMORY_CANDIDATE = "memory_candidate"
 
 
 @dataclass(frozen=True, slots=True)

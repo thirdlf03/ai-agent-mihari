@@ -111,7 +111,20 @@ class RoomOrchestrator:
         job = self._store.create(request)
         self._save_attachments(job.id, attachments)
         if job.thread_id is None:
-            thread_id = await self._board.create_thread(job)
+            try:
+                thread_id = await self._board.create_thread(job)
+            except Exception as exc:
+                # スレッド無しで queued のまま残すと、机が thread 無し job を
+                # 拾って crash loop する（phantom running）。失敗で畳んで wake しない。
+                logger.exception("Forum スレッド作成に失敗 job=%s", job.id)
+                self._store.set_status(job.id, JobStatus.FAILED)
+                self._journal(job.id).append(
+                    job_id=job.id,
+                    phase=EventPhase.FAILED,
+                    kind=JournalKind.LOG,
+                    text="スレッドが切れなかったよ。もう一度頼んで。",
+                )
+                raise RuntimeError(f"Forum スレッドが切れない: {exc}") from exc
             job = self._store.set_thread_id(job.id, thread_id)
         await self._board.set_tag(self._require_thread(job), JobStatus.QUEUED)
         self._queue.enqueue(job)
@@ -137,6 +150,11 @@ class RoomOrchestrator:
         if current.status is JobStatus.RUNNING:
             (self._store.job_dir(job.id) / REQUEUE_FILENAME).write_text("1", encoding="utf-8")
             return current
+        if current.status is JobStatus.CANCELLED and self._worker_running(job_id):
+            # 中断した thread がまだ生きている間の追記は、thread 終了後の
+            # requeue 印に載せる。先走って queued に戻すと二重実行になる。
+            (self._store.job_dir(job.id) / REQUEUE_FILENAME).write_text("1", encoding="utf-8")
+            return current
         if current.status is not JobStatus.QUEUED:
             current = self._store.set_status(job.id, JobStatus.QUEUED)
             self._journal(job.id).append(
@@ -152,6 +170,14 @@ class RoomOrchestrator:
 
     async def cancel(self, job_id: str, *, by: str) -> Job:
         job = self._queue.cancel(job_id, by=by)
+        # 実行中の worker thread があれば実際に interrupt する（status flag だけにしない）。
+        # thread 終了は _run_job 側が待つ。ここでは届けただけにする。
+        try:
+            requester = getattr(self._worker, "request_cancel", None)
+            if callable(requester):
+                requester(job_id)
+        except Exception:
+            logger.debug("worker request_cancel failed", exc_info=True)
         thread_id = job.thread_id
         self._journal(job_id).append(
             job_id=job_id,
@@ -168,6 +194,25 @@ class RoomOrchestrator:
     async def cancel_thread(self, thread_id: int, *, by: str) -> Job:
         job = self._require_by_thread(thread_id)
         return await self.cancel(job.id, by=by)
+
+    def _worker_running(self, job_id: str) -> bool:
+        checker = getattr(self._worker, "is_running", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(job_id))
+        except Exception:
+            return False
+
+    async def _wait_worker_exit(self, job_id: str, timeout: float = 30.0) -> None:
+        """中断した thread の終了を待つ。次の job はその後にしか渡さない。"""
+        import time as _time
+
+        deadline = _time.monotonic() + timeout
+        while self._worker_running(job_id):
+            if _time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(0.05)
 
     async def say(self, thread_id: int, text: str) -> None:
         """Forum に短い返事を書く。キャンセルを断ったときなど。"""
@@ -232,7 +277,19 @@ class RoomOrchestrator:
             if latest.status is JobStatus.CANCELLED:
                 return
             if event.phase is not None:
-                current_phase = EventPhase(event.phase)
+                try:
+                    current_phase = EventPhase(event.phase)
+                except ValueError:
+                    pass
+            if event.kind is ProgressKind.MEMORY_CANDIDATE:
+                # 承認待ち候補の通知。phase は WAITING。job は塞がない。
+                journal.append(
+                    job_id=job.id,
+                    phase=EventPhase.WAITING,
+                    kind=JournalKind.MEMORY_CANDIDATE,
+                    text=event.text,
+                )
+                return
             if event.kind is ProgressKind.SPEECH or event.kind is ProgressKind.SUMMARY:
                 # 発話は段階の変わり目だけ残す。段階を明示してないなら
                 # 終端（done / failed）の発話として使う。
@@ -294,6 +351,20 @@ class RoomOrchestrator:
         # 続きの印は成否に関わらず消す。FAILED のまま残すと、次に成功した瞬間に余分に回る。
         wants_again = self._consume_requeue(job.id)
         if latest.status is JobStatus.CANCELLED:
+            # 中断した thread がまだ生きていたら、終了を待ってから次へ。
+            # 先走って次の job を渡すと同プロセスの agent が二重に回る。
+            await self._wait_worker_exit(job.id)
+            if wants_again:
+                # cancel 後の追記は thread 終了後に改めて queued へ（終了前の再開はしない）。
+                latest = self._store.set_status(job.id, JobStatus.QUEUED)
+                journal.append(
+                    job_id=job.id,
+                    phase=EventPhase.QUEUED,
+                    kind=JournalKind.LOG,
+                    text="続きが来た。もう一度やるね。",
+                )
+                await self._board.set_tag(thread_id, JobStatus.QUEUED)
+                self._queue.enqueue(latest)
             self.wake()
             return
         latest = self._store.set_status(job.id, status)

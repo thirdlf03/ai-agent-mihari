@@ -33,7 +33,8 @@ class RoomConfig:
     def from_environment(cls) -> RoomConfig:
         token = (os.environ.get("MIHARI_ROOM_TOKEN") or "").strip()
         raw_root = os.environ.get("MIHARI_ROOM_ROOT") or (Path.home() / "mihari-room")
-        root = Path(raw_root).expanduser()
+        # 相対 root はデーモン全体の chdir（job cwd 運用）に弱いので絶対化する。
+        root = Path(raw_root).expanduser().resolve()
         host = (os.environ.get("MIHARI_ROOM_HOST") or "127.0.0.1").strip()
         port_raw = (os.environ.get("MIHARI_ROOM_PORT") or str(DEFAULT_PORT)).strip()
         forum_raw = (os.environ.get("MIHARI_FORUM_CHANNEL_ID") or "").strip()

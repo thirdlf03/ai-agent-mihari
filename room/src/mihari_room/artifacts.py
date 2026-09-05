@@ -13,7 +13,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -164,15 +166,28 @@ class ArtifactPublisher:
     def _copy_file(self, artifact: Path, parts: list[str], dest_root: Path) -> None:
         if any(part in ("", ".", "..") for part in parts):
             raise ValueError(f"preview の経路が不正: {parts!r}")
+        if any(part.startswith(".") for part in parts):
+            raise ValueError(f"preview の隠し経路は出さない: {parts!r}")
+        src = artifact.joinpath(*parts)
+        if src.is_symlink() or not src.is_file():
+            raise ValueError(f"preview の実体が不正: {parts!r}")
         dest = dest_root.joinpath(*parts)
+        if dest.is_symlink():
+            raise ValueError(f"preview の差し替え symlink を拒否: {parts!r}")
         resolved = dest.resolve()
-        if not resolved.is_relative_to(dest_root.resolve()):
+        try:
+            root_resolved = dest_root.resolve()
+        except OSError:
+            root_resolved = dest_root
+        if not resolved.is_relative_to(root_resolved):
             raise ValueError(f"preview を外へ出そうとした: {parts!r}")
         resolved.parent.mkdir(parents=True, exist_ok=True)
         # 自分で検証した普通のファイルだけを写す（シンボリックリンクは _collect で弾いた）。
-        resolved.write_bytes((artifact.joinpath(*parts)).read_bytes())
+        resolved.write_bytes(src.read_bytes())
 
     def _digest(self, artifact: Path, parts_list: list[list[str]]) -> str:
+        # 決定的ハッシュ: 相対パス昇順に "path\\0bytes\\n" を積む。
+        # session 連続性は manifest の session_id / source_ids で追える。
         h = hashlib.sha256()
         for parts in sorted(parts_list):
             rel = "/".join(parts)
@@ -190,25 +205,46 @@ class ArtifactPublisher:
         return sorted(p.name for p in inp.iterdir() if p.is_file())
 
     def _registry_path(self, job_id: str) -> Path:
-        return self._registry_root / f"{job_id}.json"
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", job_id or ""):
+            raise ValueError(f"preview registry の job id が不正: {job_id!r}")
+        path = self._registry_root / f"{job_id}.json"
+        if path.is_symlink():
+            raise ValueError(f"preview registry の symlink を拒否: {job_id}")
+        return path
 
     def _load_registry(self, job_id: str) -> tuple[str, list[dict[str, Any]]]:
-        path = self._registry_path(job_id)
-        if path.is_file():
+        try:
+            path = self._registry_path(job_id)
+        except ValueError:
+            return f"art-{job_id}", []
+        if path.is_file() and not path.is_symlink():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-                return str(data["artifact_id"]), list(data.get("versions", []))
-            except (ValueError, KeyError, TypeError):
+                versions = data.get("versions", [])
+                if isinstance(data.get("artifact_id"), str) and isinstance(versions, list):
+                    return str(data["artifact_id"]), list(versions)
+            except (ValueError, KeyError, TypeError, OSError):
                 pass
         return f"art-{job_id}", []
 
     def _save_registry(self, job_id: str, artifact_id: str, versions: list[dict[str, Any]]) -> None:
         self._registry_root.mkdir(parents=True, exist_ok=True)
         path = self._registry_path(job_id)
-        path.write_text(
+        payload = (
             json.dumps(
                 {"artifact_id": artifact_id, "versions": versions}, ensure_ascii=False, indent=2
             )
-            + "\n",
-            encoding="utf-8",
+            + "\n"
         )
+        # atomic: 同じ dir の tmp + os.replace。manifest の半端書きを残さない。
+        fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".registry.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+            os.replace(tmp_name, path)
+        finally:
+            try:
+                if os.path.exists(tmp_name):
+                    os.unlink(tmp_name)
+            except OSError:
+                pass
