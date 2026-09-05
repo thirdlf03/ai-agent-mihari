@@ -42,14 +42,75 @@ _LOG_PREFIXES = (
     "working",
 )
 
+#: Discord 送信系。Room が Forum への出版を持つので agent には渡さない。
+DISCORD_TOOLSETS = frozenset({"discord", "discord_admin"})
+
+#: 既定で落とす危険ツールセット。bash/terminal は無制限なので、
+#: ファイルガード（HERMES_WRITE_SAFE_ROOT）を素通りできる。
+#: 明示の opt-in (MIHARI_ROOM_ALLOW_SHELL=1) がない限り外す。
+#: file 生成 (write_file/patch)・session_search・search/browser 読取は残す。
+UNSAFE_TOOLSETS_DEFAULT_OFF = frozenset(
+    {"terminal", "computer_use", "code_execution", "cronjob", "kanban"}
+)
+
+
+def shell_allowed() -> bool:
+    from mihari_room.worker.agent import _is_truthy
+
+    return _is_truthy(os.environ.get("MIHARI_ROOM_ALLOW_SHELL", ""))
+
+
+def filter_toolsets(toolsets: Sequence[str] | None) -> list[str] | None:
+    """Discord 送信を落とし、既定では unsafe な実行系も落とす。
+
+    None は None のまま（本家の既定解決に任せる前の段階では使わない。
+    実際に agent へ渡す直前はリスト化されたものが来る）。
+    """
+    if toolsets is None:
+        return None
+    allow_shell = shell_allowed()
+    out: list[str] = []
+    for name in toolsets:
+        if name in DISCORD_TOOLSETS or "discord" in name:
+            continue
+        if not allow_shell and name in UNSAFE_TOOLSETS_DEFAULT_OFF:
+            continue
+        out.append(name)
+    # session_search / search / browser 読取 / file 生成は落とさない。
+    # 万が一全部落ちたら None にせず空のまま（agent 側で最小集合を足す）。
+    return out
+
+
+def ensure_baseline_toolsets(toolsets: Sequence[str] | None) -> list[str]:
+    """読み・生成に要る最小集合を保証する。"""
+    base = list(toolsets) if toolsets else []
+    for required in ("session_search", "search", "file"):
+        if required not in base:
+            base.append(required)
+    return base
+
 
 def build_prompt(job: Job) -> str:
-    """Hermes に渡すプロンプトを作る。タイトル・本文・入出力の約束を含む。"""
+    """Hermes に渡すプロンプトを作る。タイトル・本文・入出力の約束を含む。
+
+    プロンプトは強制ではない（enforcement は tool hook / store 側）。
+    配置・公開・秘密の約束だけを書く。
+    """
     return (
         f"タイトル: {job.title}\n"
         f"内容:\n{job.body}\n\n"
-        f"`{INPUT_DIRNAME}/` にある入力ファイルを読んで作業し、"
-        f"結果は `{OUTPUT_DIRNAME}/` に書き出してください。"
+        f"`{INPUT_DIRNAME}/` にある入力ファイルを読んで作業してください。\n"
+        "調べものは `research/` に置き、要点は `research/summary.md`、"
+        "出典は `research/sources.json`、生データは `research/downloads/` に置いてください。\n"
+        f"成果物は `{OUTPUT_DIRNAME}/artifact/index.html` を起点に "
+        f"`{OUTPUT_DIRNAME}/` に書き出してください。\n"
+        "公開物に API キー・トークン・個人情報（住所・電話・メール等）を入れないでください。\n"
+        "直接デプロイや外部投稿はしないでください。公開は Room が行います。\n"
+        "過去の会話は組み込みの session_search を先に使ってください。\n"
+        "Discord 横断検索が必要なときだけ discord_search スキル "
+        "(skills に同梱がなければ `MIHARI_ROOM_PYTHON -m mihari_room.discord_search --help` "
+        "相当のモジュール CLI) を使ってください。\n"
+        "記憶に残したいことは memory ツールに書いてください（承認後に保存されます）。"
         "必要な説明は標準出力の最後に 1〜数行で書いてください。"
     )
 
@@ -133,9 +194,7 @@ class HermesWorker:
         if status is not JobStatus.DONE:
             return status
         for path in _new_files(output_dir, before):
-            await on_progress(
-                ProgressEvent(kind=ProgressKind.FILE, text=path.name, path=path)
-            )
+            await on_progress(ProgressEvent(kind=ProgressKind.FILE, text=path.name, path=path))
         return JobStatus.DONE
 
     async def _run_subprocess(
@@ -206,7 +265,5 @@ class HermesWorker:
             await on_progress(ProgressEvent(kind=ProgressKind.SUMMARY, text=speech_candidate))
 
         for path in _new_files(output_dir, before):
-            await on_progress(
-                ProgressEvent(kind=ProgressKind.FILE, text=path.name, path=path)
-            )
+            await on_progress(ProgressEvent(kind=ProgressKind.FILE, text=path.name, path=path))
         return JobStatus.DONE
