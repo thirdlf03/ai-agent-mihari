@@ -1,4 +1,4 @@
-.PHONY: help setup fmt lint lint-swift lint-python build test test-swift test-python run kill clean
+.PHONY: help setup fmt lint lint-swift lint-python build test test-swift test-python run kill clean room-check
 
 help:
 	@echo "make setup         - bridge/ の Python 依存を同期する(初回セットアップ)"
@@ -11,6 +11,8 @@ help:
 	@echo "make lint          - Swift / Python のフォーマットと lint を検査する"
 	@echo "                     (lint-swift / lint-python で片側だけ実行できる)"
 	@echo "make clean         - ビルド成果物を削除する"
+	@echo "make room-check    - room/ の lint・テストと deploy/backup.sh の構文検査"
+	@echo "                     (room だけ手早く確認したいとき。format は make lint 側)"
 
 setup:
 	cd bridge && uv sync
@@ -50,3 +52,8 @@ lint-python:
 
 clean:
 	rm -rf desktop/.build desktop/Mihari.app
+
+room-check:
+	cd room && uv run ruff check .
+	cd room && uv run pytest -q
+	bash -n room/deploy/backup.sh

@@ -1,0 +1,55 @@
+# mihari-room の Caddy 例
+#
+# コピー先: /etc/caddy/Caddyfile（または caddy が読む場所）。配置後 `caddy reload`。
+# ドメインは必ず実値に置き換えること:
+#   api.room.example.com      → API ホスト（実 DNS 名）
+#   preview.room.example.com  → プレビュー ホスト（実 DNS 名）
+#   .example.com のままでは Let's Encrypt も名前解決も動かない。
+#
+# 構成の約束:
+#   - API ホスト: ローカルの Room(127.0.0.1:8787) に全部転送。
+#     認証は Room 自身の X-Mihari-Token（ヘッダ）。Caddy ではトークンを扱わない。
+#   - プレビュー ホスト: /previews/* の静的ファイルだけ。それ以外は全部 404。
+#     API・管理・ルート一覧には触れさせない。
+#   - SSE（/jobs/{id}/events）はバッファしない（flush_interval -1）。
+#   - アクセスログにパス・トークンは出さない（下を参照）。
+#   - Cloudflare はまだ実装していない。cloudflared の設定は入れない。
+
+{
+    # access log を出さない。パス（ジョブ ID が入る）も Authorization 系ヘッダも
+    # ログに残らないのが一番安全。監査で必要になったら remote_ip と status だけ
+    # 出し、request path / headers は出さない形に絞ること。
+    log {
+        output discard
+    }
+}
+
+# ---- API ホスト ----
+api.room.example.com {
+    reverse_proxy 127.0.0.1:8787 {
+        # SSE をバッファしない（flush_interval -1 = レスポンスを溜めずに流す）
+        flush_interval -1
+    }
+    # HTTPS はここで終端する（下の「HTTPS か Tailscale か」参照）。
+    # Caddy が自動で Let's Encrypt を取るには、このホスト名の DNS A/AAAA が
+    # この VPS を向いていて、80/443 が外から届く必要がある。
+}
+
+# ---- プレビュー ホスト ----
+preview.room.example.com {
+    # /previews/<job>/<file> を /var/lib/mihari/room/previews/<job>/<file> から出す
+    #（handle_path が /previews を剥がす）
+    handle_path /previews/* {
+        root * /var/lib/mihari/room/previews
+        file_server
+    }
+    # /previews/* 以外（API 等）は全部 404
+    handle {
+        respond "not found" 404
+    }
+}
+
+# ---- 補足 ----
+# プレビューの公開ディレクトリには、memory / research の成果物や Hermes の
+# manifests を置かない。previews/ には「公開してよい静的成果物」だけを置き、
+# HERMES_HOME や room/jobs へのシンボリックリンクを張らない。
