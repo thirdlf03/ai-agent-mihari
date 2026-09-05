@@ -55,24 +55,24 @@ in-process で import するので、**リビジョンを固定**して、その
 - **pin するリビジョン: `365e2835d490a053d076daa3b429371d6f35210f`**
   （2026-09-02 の commit。ローカル開発機 `~/.hermes/hermes-agent` の git HEAD を
   read-only で解決した実値。`git rev-parse HEAD` で同じ値が出ることを確認してからデプロイする）
-- **Python は 3.13 に揃える**
-  - 理由: Hermes は `requires-python = ">=3.11,<3.14"`、mihari-room は `>=3.13`。
-    共通範囲は **3.13 のみ**。room の venv と hermes の venv を両方 3.13 にすると、
-    3.14 では import できない Rust 製依存（pydantic-core など）も in-process で読める
-  - 参考（ローカル観測）: 開発機は room=3.14.6 / hermes=3.11.14 で混ざっている。
-    本番は混ぜない。両方 3.13 にする
+- **Python は 3.11 に揃える**
+  - 理由: Hermes は `requires-python = ">=3.11,<3.14"`。in-process で import
+    するので、room も同じ 3.11 で動かす（`room/pyproject.toml` は `>=3.11`、
+    `room/.python-version` は `3.11`）
+  - 3.14 の標準ライブラリ（とくに sqlite3）を 3.11 の Hermes に混ぜると落ちる。
+    room の venv と hermes の venv を両方 3.11 にし、開発機の 3.14 とは混ぜない
 
 ```sh
 sudo -u mihari git clone https://github.com/NousResearch/hermes-agent.git /var/lib/mihari/hermes-agent
 cd /var/lib/mihari/hermes-agent
 git checkout 365e2835d490a053d076daa3b429371d6f35210f   # 必ず pin の値で
-sudo -u mihari uv python install 3.13
+sudo -u mihari uv python install 3.11
 sudo -u mihari env HERMES_HOME=/var/lib/mihari/hermes \
-    uv sync --locked --python 3.13
+    uv sync --locked --python 3.11
 ```
 
 - `uv sync --locked` が `pyproject.toml`＋`uv.lock` どおりに `.venv` を作り、
-  hermes-agent 自体を editable で入れる。`--python 3.13` で venv の Python を固定
+  hermes-agent 自体を editable で入れる。`--python 3.11` で venv の Python を固定
 - このあと `HERMES_PYTHON=/var/lib/mihari/hermes-agent/.venv/bin/python` を
   `/etc/mihari-room/env` に入れる（省略時は PATH の hermes の shebang から探すが、
   専用ユーザーには PATH に hermes が居ないので必ず明示する）
@@ -105,9 +105,9 @@ Mihari の Bot（forum・タグ・pet HTTP）は room 自身の Discord 接続�
 ```sh
 git clone <このリポジトリ> /var/lib/mihari/room-src        # 場所は任意。
 cd room-src/room
-sudo -u mihari uv python install 3.13
+sudo -u mihari uv python install 3.11
 sudo -u mihari env UV_PROJECT_ENVIRONMENT=/var/lib/mihari/room-venv \
-    uv sync --locked --python 3.13
+    uv sync --locked --python 3.11
 ```
 
 `uv sync --locked` が `pyproject.toml` の依存（fastapi / uvicorn / httpx /

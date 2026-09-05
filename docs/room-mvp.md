@@ -75,6 +75,7 @@ Discord (Mihari Bot) ────> forum 入出力（本家 Gateway は使わな
 `MIHARI_OWNER_ID`。ディスク: `MIHARI_ROOM_ROOT` / `HERMES_HOME` /
 `HERMES_PYTHON`（省略可） / `MIHARI_ROOM_PYTHON`。任意: `MIHARI_PREVIEW_BASE_URL` /
 `MIHARI_ARCHIVE_CHANNEL_IDS`。ローカルバインド `127.0.0.1:8787`。
+Python は **3.11**（room と Hermes を同じ interpreter で回す。3.14 の stdlib を混ぜない）。
 
 ## 受け入れチェックリスト
 

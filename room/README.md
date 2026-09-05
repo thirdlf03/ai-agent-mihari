@@ -44,7 +44,7 @@ Hermes の Discord Gateway は起動しない。Forum・タグ・ペット HTTP 
 ## デプロイ
 
 `deploy/` に systemd unit・Caddy 例・env 例・backup スクリプトがある。
-流れは `deploy/README.md`（Hermes の pin、Python 3.13、uv sync --locked、
+流れは `deploy/README.md`（Hermes の pin、Python 3.11、uv sync --locked、
 HTTPS / Tailscale、バックアップ復元の旧 URL 継続など）。
 
 Forum にタグ `待ち` `作業中` `完了` `失敗` `中断` を先に作っておく。Hermes の Discord Gateway は使わない。
