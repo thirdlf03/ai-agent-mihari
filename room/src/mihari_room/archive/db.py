@@ -272,10 +272,15 @@ class ArchiveDatabase:
         self,
         stored: StoredMessage,
         *,
-        attachments: Sequence[StoredAttachment] = (),
-        urls: Sequence[StoredUrl] = (),
+        attachments: Sequence[StoredAttachment] | None = None,
+        urls: Sequence[StoredUrl] | None = None,
     ) -> None:
-        """メッセージを上書きする。添付と URL は行ごと置き換える。"""
+        """メッセージを上書きする。
+
+        attachments / urls が None なら既存行を残す（raw 部分更新の欠落対策）。
+        空シーケンスは明示的な空として行を消す。deleted_at は粘着:
+        新規行が None でも既存の削除を消さない（遅延ダウンロードの蘇生防止）。
+        """
         row = (
             stored.message_id,
             stored.guild_id,
@@ -292,38 +297,54 @@ class ArchiveDatabase:
             stored.jump_url,
             to_iso(stored.fetched_at),
         )
-        att_rows = [
-            (
-                a.message_id,
-                a.attachment_id,
-                a.filename,
-                a.content_type,
-                a.size,
-                a.url,
-                a.local_path,
-                a.status,
-                a.extract_status,
-                a.extracted_text,
-                a.error,
-                to_iso(a.fetched_at),
-            )
-            for a in attachments
-        ]
-        url_rows = [
-            (
-                u.message_id,
-                u.url_index,
-                u.url,
-                u.normalized_url,
-                u.fetch_status,
-                u.title,
-                u.description,
-                u.error,
-                to_iso(u.fetched_at),
-            )
-            for u in urls
-        ]
+        att_rows = (
+            [
+                (
+                    a.message_id,
+                    a.attachment_id,
+                    a.filename,
+                    a.content_type,
+                    a.size,
+                    a.url,
+                    a.local_path,
+                    a.status,
+                    a.extract_status,
+                    a.extracted_text,
+                    a.error,
+                    to_iso(a.fetched_at),
+                )
+                for a in attachments
+            ]
+            if attachments is not None
+            else None
+        )
+        url_rows = (
+            [
+                (
+                    u.message_id,
+                    u.url_index,
+                    u.url,
+                    u.normalized_url,
+                    u.fetch_status,
+                    u.title,
+                    u.description,
+                    u.error,
+                    to_iso(u.fetched_at),
+                )
+                for u in urls
+            ]
+            if urls is not None
+            else None
+        )
         with self._lock:
+            # deleted_at は粘着: 新規が None で既存に削除があれば残す。
+            if stored.deleted_at is None:
+                prior = self._conn.execute(
+                    "SELECT deleted_at FROM messages WHERE message_id = ?",
+                    (stored.message_id,),
+                ).fetchone()
+                if prior is not None and prior[0] is not None:
+                    row = row[:11] + (prior[0],) + row[12:]
             self._conn.execute(
                 """
                 INSERT INTO messages
@@ -348,7 +369,10 @@ class ArchiveDatabase:
                 """,
                 row,
             )
-            self._conn.execute("DELETE FROM attachments WHERE message_id = ?", (stored.message_id,))
+            if att_rows is not None:
+                self._conn.execute(
+                    "DELETE FROM attachments WHERE message_id = ?", (stored.message_id,)
+                )
             if att_rows:
                 self._conn.executemany(
                     """
@@ -360,7 +384,8 @@ class ArchiveDatabase:
                     """,
                     att_rows,
                 )
-            self._conn.execute("DELETE FROM urls WHERE message_id = ?", (stored.message_id,))
+            if url_rows is not None:
+                self._conn.execute("DELETE FROM urls WHERE message_id = ?", (stored.message_id,))
             if url_rows:
                 self._conn.executemany(
                     """
@@ -650,24 +675,30 @@ class ArchiveDatabase:
         *,
         query: str,
         channel_ids: Sequence[int] | None = None,
+        channel_names: Sequence[str] | None = None,
         from_dt: dt.datetime | None = None,
         to_dt: dt.datetime | None = None,
+        include_deleted: bool = False,
         limit: int = 20,
         offset: int = 0,
     ) -> list[tuple[StoredAttachment, StoredMessage, str]]:
-        """添付のファイル名・抽出本文の検索。FTS が無ければ filename の LIKE。"""
+        """添付のファイル名・抽出本文の検索。全語 AND、filename/extracted_text 横断。"""
         clauses = ["a.status = 'ok'"]
         params: list[object] = []
         if channel_ids:
             clauses.append(f"m.channel_id IN ({_placeholders(channel_ids)})")
             params.extend(channel_ids)
+        if channel_names:
+            clauses.append(f"m.channel_name IN ({_placeholders(channel_names)})")
+            params.extend(channel_names)
         if from_dt is not None:
             clauses.append("m.created_at >= ?")
             params.append(to_iso(from_dt))
         if to_dt is not None:
             clauses.append("m.created_at < ?")
             params.append(to_iso(to_dt))
-        clauses.append("m.deleted_at IS NULL")
+        if not include_deleted:
+            clauses.append("m.deleted_at IS NULL")
         where = " AND ".join(clauses)
 
         terms = _split_terms(query)
@@ -693,8 +724,14 @@ class ArchiveDatabase:
                     (query, *params, limit, offset),
                 ).fetchall()
         else:
-            like_clauses = ["a.filename LIKE ? ESCAPE '\\'"]
-            like_params: list[object] = ["%" + _escape_like(terms[0] if terms else query) + "%"]
+            like_clauses: list[str] = []
+            like_params = []
+            for term in terms or [query]:
+                like_clauses.append(
+                    "(a.filename LIKE ? ESCAPE '\\' OR a.extracted_text LIKE ? ESCAPE '\\')"
+                )
+                pattern = "%" + _escape_like(term) + "%"
+                like_params.extend([pattern, pattern])
             sql = f"""
                 SELECT a.message_id, a.attachment_id, a.filename, a.content_type,
                        a.size, a.url, a.local_path, a.status, a.extract_status,
@@ -728,17 +765,31 @@ class ArchiveDatabase:
         *,
         query: str,
         channel_ids: Sequence[int] | None = None,
+        channel_names: Sequence[str] | None = None,
+        from_dt: dt.datetime | None = None,
+        to_dt: dt.datetime | None = None,
+        include_deleted: bool = False,
         limit: int = 20,
         offset: int = 0,
     ) -> list[tuple[StoredUrl, StoredMessage]]:
-        """URL・タイトル・説明の検索。FTS が無ければ url の LIKE。"""
+        """URL・タイトル・説明の検索。全語 AND、url/title/description 横断。"""
         clauses: list[str] = []
         params: list[object] = []
         if channel_ids:
             clauses.append(f"m.channel_id IN ({_placeholders(channel_ids)})")
             params.extend(channel_ids)
-        clauses.append("m.deleted_at IS NULL")
-        where = (" AND " + " AND ".join(clauses)) if clauses else " AND m.deleted_at IS NULL"
+        if channel_names:
+            clauses.append(f"m.channel_name IN ({_placeholders(channel_names)})")
+            params.extend(channel_names)
+        if from_dt is not None:
+            clauses.append("m.created_at >= ?")
+            params.append(to_iso(from_dt))
+        if to_dt is not None:
+            clauses.append("m.created_at < ?")
+            params.append(to_iso(to_dt))
+        if not include_deleted:
+            clauses.append("m.deleted_at IS NULL")
+        where = (" AND " + " AND ".join(clauses)) if clauses else ""
 
         terms = _split_terms(query)
         if terms and self._fts and all(len(t) >= MIN_FTS_TERM_LEN for t in terms):
@@ -770,19 +821,27 @@ class ArchiveDatabase:
     def _search_urls_like(
         self, query: str, where: str, params: list[object], *, limit: int, offset: int
     ) -> list[tuple[StoredUrl, StoredMessage]]:
-        terms = _split_terms(query)
-        like_param = "%" + _escape_like(terms[0] if terms else query) + "%"
+        terms = _split_terms(query) or [query]
+        per_term = (
+            "(u.url LIKE ? ESCAPE '\\' OR u.normalized_url LIKE ? ESCAPE '\\'"
+            " OR u.title LIKE ? ESCAPE '\\' OR u.description LIKE ? ESCAPE '\\')"
+        )
+        like_clauses = " AND ".join([per_term] * len(terms))
+        like_params: list[object] = []
+        for term in terms:
+            pattern = "%" + _escape_like(term) + "%"
+            like_params.extend([pattern, pattern, pattern, pattern])
         sql = f"""
             SELECT u.message_id, u.url_index, u.url, u.normalized_url,
                    u.fetch_status, u.title, u.description, u.error, u.fetched_at,
                    {",".join("m." + c for c in self._MESSAGE_COLUMNS.split(", "))}
             FROM urls u JOIN messages m ON m.message_id = u.message_id
-            WHERE (u.url LIKE ? ESCAPE '\\'){where}
+            WHERE ({like_clauses}){where}
             ORDER BY m.created_at DESC
             LIMIT ? OFFSET ?
         """
         with self._lock:
-            rows = self._conn.execute(sql, (like_param, *params, limit, offset)).fetchall()
+            rows = self._conn.execute(sql, (*like_params, *params, limit, offset)).fetchall()
         return [(self._row_to_url(row[:9]), self._row_to_message(row[9:])) for row in rows]
 
 

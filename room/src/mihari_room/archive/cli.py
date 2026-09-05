@@ -131,12 +131,34 @@ def cmd_search(args: argparse.Namespace, db: ArchiveDatabase) -> dict[str, Any]:
         channel_ids, channel_names = _split_channels(args.channel)
         if not channel_ids and not channel_names:
             raise CliError(f"--channel を解釈できない: {args.channel!r}")
+    from_dt = _parse_datetime(args.after, "--after") if args.after else None
+    to_dt = _parse_datetime(args.before, "--before") if args.before else None
     hits = db.search(
         query=args.query,
         channel_ids=channel_ids,
         channel_names=channel_names,
-        from_dt=_parse_datetime(args.after, "--after") if args.after else None,
-        to_dt=_parse_datetime(args.before, "--before") if args.before else None,
+        from_dt=from_dt,
+        to_dt=to_dt,
+        include_deleted=args.include_deleted,
+        limit=args.limit,
+        offset=args.offset,
+    )
+    attachment_rows = db.search_attachments(
+        query=args.query,
+        channel_ids=channel_ids,
+        channel_names=channel_names,
+        from_dt=from_dt,
+        to_dt=to_dt,
+        include_deleted=args.include_deleted,
+        limit=args.limit,
+        offset=args.offset,
+    )
+    url_rows = db.search_urls(
+        query=args.query,
+        channel_ids=channel_ids,
+        channel_names=channel_names,
+        from_dt=from_dt,
+        to_dt=to_dt,
         include_deleted=args.include_deleted,
         limit=args.limit,
         offset=args.offset,
@@ -146,8 +168,47 @@ def cmd_search(args: argparse.Namespace, db: ArchiveDatabase) -> dict[str, Any]:
         "query": args.query,
         "count": len(hits),
         "hits": [
-            {"rank": hit.rank, "snippet": hit.snippet, "message": _message_payload(db, hit.message)}
+            {
+                "kind": "message",
+                "rank": hit.rank,
+                "snippet": hit.snippet,
+                "jump_url": hit.message.jump_url,
+                "message": _message_payload(db, hit.message),
+            }
             for hit in hits
+        ],
+        "attachment_hits": [
+            {
+                "kind": "attachment",
+                "snippet": snippet,
+                "jump_url": message.jump_url,
+                "filename": attachment.filename,
+                "message_id": message.message_id,
+                "attachment_id": attachment.attachment_id,
+                "message": _message_payload(db, message),
+                "attachment": {
+                    "attachment_id": attachment.attachment_id,
+                    "filename": attachment.filename,
+                    "size": attachment.size,
+                    "url": attachment.url,
+                    "status": attachment.status,
+                    "local_path": attachment.local_path,
+                    "extract_status": attachment.extract_status,
+                },
+            }
+            for attachment, message, snippet in attachment_rows
+        ],
+        "url_hits": [
+            {
+                "kind": "url",
+                "jump_url": message.jump_url,
+                "message_id": message.message_id,
+                "url": url.url,
+                "normalized_url": url.normalized_url,
+                "title": url.title,
+                "message": _message_payload(db, message),
+            }
+            for url, message in url_rows
         ],
     }
 
@@ -195,6 +256,8 @@ async def cmd_export(args: argparse.Namespace, config: ArchiveConfig) -> dict[st
         "message": result.message_payload,
         "downloaded": result.downloaded,
         "skipped": result.skipped,
+        "source_ids": result.source_ids,
+        "sources": result.sources,
     }
 
 
@@ -235,7 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
     context.add_argument("--include-deleted", action="store_true")
     context.set_defaults(handler=lambda args, db: cmd_context(args, db))
 
-    export = _add("export", "出典を jobs/<id>/research/downloads へコピー")
+    export = _add("export", "出典を jobs/<id>/research へコピー（PDF は downloads）")
     export.add_argument("--job-id", required=True)
     export.add_argument("--message-id", type=int, required=True)
     export.add_argument(

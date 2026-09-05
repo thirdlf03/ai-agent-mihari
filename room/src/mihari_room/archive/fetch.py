@@ -181,7 +181,7 @@ class SafeFetcher:
         """Discord CDN の添付だけ取得する。それ以外のホストは FetchError。"""
         if not is_discord_cdn_url(url):
             raise FetchError(f"添付 URL が Discord CDN ではない: {url}")
-        return await self._get(url, max_bytes=max_bytes, timeout=timeout)
+        return await self._get(url, max_bytes=max_bytes, timeout=timeout, require_cdn=True)
 
     async def fetch_url_metadata(self, url: str, *, max_bytes: int, timeout: float) -> UrlMetadata:
         """公開 HTTP(S) のメタを取得する。失敗してもエラー付きで返す。"""
@@ -196,20 +196,32 @@ class SafeFetcher:
             return UrlMetadata(fetch_status="error", error=str(exc))
         return _parse_url_metadata(result)
 
-    async def _get(self, url: str, *, max_bytes: int, timeout: float) -> FetchResult:
+    async def _get(
+        self, url: str, *, max_bytes: int, timeout: float, require_cdn: bool = False
+    ) -> FetchResult:
         """全体を timeout で縛る。リダイレクトは手で追い、毎ホップ検証する。"""
         try:
             return await asyncio.wait_for(
-                self._get_unbounded(url, max_bytes=max_bytes), timeout=timeout
+                self._get_unbounded(url, max_bytes=max_bytes, require_cdn=require_cdn),
+                timeout=timeout,
             )
         except TimeoutError as exc:
             raise FetchError(f"タイムアウト: {url}") from exc
 
-    async def _get_unbounded(self, url: str, *, max_bytes: int) -> FetchResult:
+    async def _get_unbounded(
+        self, url: str, *, max_bytes: int, require_cdn: bool = False
+    ) -> FetchResult:
         current = url
         hops: list[str] = []
         for _ in range(self._max_redirects + 1):
-            await self._validate(current)
+            if require_cdn and not is_discord_cdn_url(current):
+                raise FetchError(f"添付のリダイレクト先が CDN 外: {current}")
+            validated = await self._validate(current)
+            # 送信直前に再解決し、私的 IP と総入れ替え（リバインド疑い）を弾く。
+            # 完全な TOCTOU 除去には検証済み IP への固定接続 + Host/SNI 保持が
+            # 必要だが、既定 httpx では再解決ホストを独立に引くため、ここでは
+            # 二重検証 + CDN 固定 + 既定無効で事故面を絞る。
+            await self._recheck_connection(current, validated)
             hops.append(current)
             request = self._client.build_request(
                 "GET",
@@ -259,8 +271,8 @@ class SafeFetcher:
             )
         raise FetchError("リダイレクトが多すぎる")
 
-    async def _validate(self, url: str) -> None:
-        """スキーム・ホスト・DNS 解決先を検証する。引っかかると FetchError。"""
+    async def _validate(self, url: str) -> list[str]:
+        """スキーム・ホスト・DNS 解決先を検証する。検証済み IP 一覧を返す。"""
         parsed = urlsplit(url)
         if parsed.scheme not in {"http", "https"}:
             raise FetchError(f"スキーム不許可: {parsed.scheme}")
@@ -269,11 +281,26 @@ class SafeFetcher:
             raise FetchError("ホストが無い")
         if parsed.username or parsed.password:
             raise FetchError("URL に秘密情報が含まれる")
-        addresses = await self._resolver(host)
+        addresses = list(await self._resolver(host))
         if not addresses:
             raise FetchError(f"名前解決できなかった: {host}")
         if any(_is_private_ip(raw) for raw in addresses):
             raise FetchError(f"プライベート IP を踏まない: {host} {addresses}")
+        return addresses
+
+    async def _recheck_connection(self, url: str, validated: Sequence[str]) -> None:
+        """送信直前の再解決。私的 IP・総入れ替えはリバインド疑いで弾く。"""
+        host = urlsplit(url).hostname or ""
+        try:
+            fresh = list(await self._resolver(host))
+        except Exception as exc:
+            raise FetchError(f"再解決に失敗: {host}") from exc
+        if not fresh:
+            raise FetchError(f"名前解決できなかった: {host}")
+        if any(_is_private_ip(raw) for raw in fresh):
+            raise FetchError(f"プライベート IP を踏まない: {host} {fresh}")
+        if not set(fresh) & set(validated):
+            raise FetchError(f"DNS リバインド疑い: {host} {validated} -> {fresh}")
 
 
 def _parse_url_metadata(result: FetchResult) -> UrlMetadata:

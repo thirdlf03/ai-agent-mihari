@@ -139,9 +139,10 @@ def test_cli_export_copies_attachments_and_sources(tmp_path: Path, capsys) -> No
     assert payload["command"] == "export"
     assert payload["downloaded"], payload["skipped"]
 
-    downloads = root / "jobs" / job.id / "research" / "downloads"
-    sources_path = downloads / "sources.json"
-    summary_path = downloads / "summary.md"
+    research = root / "jobs" / job.id / "research"
+    downloads = research / "downloads"
+    sources_path = research / "sources.json"
+    summary_path = research / "summary.md"
     assert sources_path.is_file()
     assert summary_path.is_file()
     files = list(downloads.iterdir())
@@ -171,7 +172,7 @@ def test_cli_export_no_fetch_skips_missing_file(tmp_path: Path, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["downloaded"] == []
     assert payload["skipped"] == []  # 添付が無いので何もコピーしない
-    sources_path = root / "jobs" / job.id / "research" / "downloads" / "sources.json"
+    sources_path = root / "jobs" / job.id / "research" / "sources.json"
     assert sources_path.is_file()
 
 

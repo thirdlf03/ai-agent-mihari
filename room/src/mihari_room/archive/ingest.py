@@ -213,7 +213,7 @@ class ArchiveIngester:
             logger.exception("アーカイブ編集受付に失敗 message=%s", getattr(after, "id", "?"))
 
     async def handle_raw_edit(self, payload: Any) -> None:
-        """``on_raw_message_edit`` から。収録済みメッセージだけ部分更新する。"""
+        """``on_raw_message_edit`` から。到着順に積み、解決はワーカー側で行う。"""
         if not self.enabled or self._closed:
             return
         self._ensure_started()
@@ -227,21 +227,19 @@ class ArchiveIngester:
                 return
             if not message_id:
                 return
-            existing = self._db.get_message(message_id)
-            if existing is None:
-                return  # 収録していないメッセージの edit は無視
-            await self._submit(_Task("raw_edit", (data, existing)))
+            # DB 照会はワーカー側へ先送り。到着順 FIFO で先行 insert の後に解決する。
+            await self._submit(_Task("raw_edit", dict(data)))
         except Exception:
             logger.exception("アーカイブ raw edit 受付に失敗")
 
     async def handle_raw_delete(self, payload: Any) -> None:
-        """``on_raw_message_delete`` から。収録済みなら deleted_at を立てる。"""
+        """``on_raw_message_delete`` から。到着順に積み、解決はワーカー側で行う。"""
         if not self.enabled or self._closed:
             return
         self._ensure_started()
         try:
             message_id = int(getattr(payload, "message_id", 0) or 0)
-            if message_id and self._db.get_message(message_id) is not None:
+            if message_id:
                 await self._submit(_Task("delete", message_id))
         except Exception:
             logger.exception("アーカイブ raw delete 受付に失敗")
@@ -261,7 +259,7 @@ class ArchiveIngester:
                     message_id = int(raw)
                 except (TypeError, ValueError):
                     continue
-                if message_id and self._db.get_message(message_id) is not None:
+                if message_id:
                     await self._submit(_Task("delete", message_id))
         except Exception:
             logger.exception("アーカイブ raw bulk delete 受付に失敗")
@@ -316,19 +314,46 @@ class ArchiveIngester:
         urls = await self._capture_urls(stored.content, stored.message_id)
         await asyncio.to_thread(self._db.upsert_message, stored, attachments=attachments, urls=urls)
 
-    async def _ingest_raw_edit(self, task_data: tuple[dict[str, Any], StoredMessage]) -> None:
-        data, existing = task_data
-        content = str(data.get("content") or "")
-        attachments = await self._capture_attachments(
-            existing.message_id, _raw_attachments(data.get("attachments") or ())
-        )
-        urls = await self._capture_urls(content, existing.message_id)
+    async def _ingest_raw_edit(self, task_data: dict[str, Any]) -> None:
+        data = task_data
+        try:
+            message_id = int(data.get("id") or 0)
+        except (TypeError, ValueError):
+            return
+        if not message_id:
+            return
+        existing = self._db.get_message(message_id)
+        if existing is None:
+            return  # 収録していないメッセージの edit は無視
+        if not _channel_accepts(existing.channel_id, self._config):
+            return
+        has_content = "content" in data
+        has_attachments = "attachments" in data
+        if has_content:
+            content = str(data.get("content") or "")
+        else:
+            content = existing.content
+        if has_attachments:
+            raw_list = data.get("attachments")
+            attachments = await self._capture_attachments(
+                existing.message_id,
+                _raw_attachments(raw_list if isinstance(raw_list, list) else ()),
+            )
+        else:
+            attachments = None  # 省略は保持（消さない）
+        if has_content and content != existing.content:
+            urls = await self._capture_urls(content, existing.message_id)
+        else:
+            urls = None  # 不変・省略時は既存の URL 濃縮を保持
+        raw_edited = data.get("edited_timestamp")
+        if "edited_timestamp" in data and raw_edited:
+            edited_at = _as_datetime(str(raw_edited).replace("Z", "+00:00"))
+        else:
+            edited_at = existing.edited_at
         updated = dataclasses.replace(
             existing,
             content=content,
-            edited_at=_as_datetime(
-                (data.get("edited_timestamp") or "").replace("Z", "+00:00") or None
-            ),
+            edited_at=edited_at,
             fetched_at=utc_now(),
         )
         await asyncio.to_thread(

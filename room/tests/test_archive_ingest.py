@@ -282,7 +282,7 @@ async def test_graceful_shutdown_drains_queue(tmp_path: Path) -> None:
 
 async def test_url_indexed_even_when_fetch_fails(tmp_path: Path) -> None:
     ing = _ingester(
-        _config(tmp_path),
+        _config(tmp_path, fetch_urls=True),
         responses={"broken.example": httpx.Response(500, content=b"")},
         # DNS は通るが HTTP は 500 を返す
     )
@@ -328,7 +328,7 @@ async def test_url_metadata_extracted(tmp_path: Path) -> None:
             headers={"content-type": "text/html"},
         )
     }
-    ing = _ingester(_config(tmp_path), responses=responses)
+    ing = _ingester(_config(tmp_path, fetch_urls=True), responses=responses)
     ing.start()
     await ing.handle_message(fake_message(1, "https://example.com/article を見て"))
     await ing.aclose()
