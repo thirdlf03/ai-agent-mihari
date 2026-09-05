@@ -126,7 +126,7 @@ class ArchiveConfig:
     max_redirects: int = DEFAULT_MAX_REDIRECTS
     pdf_max_chars: int = DEFAULT_PDF_MAX_CHARS
     queue_size: int = DEFAULT_QUEUE_SIZE
-    fetch_urls: bool = True
+    fetch_urls: bool = False
     fetch_attachments: bool = True
 
     @property
@@ -175,12 +175,18 @@ class ArchiveConfig:
             max_redirects=_env_int("MIHARI_ARCHIVE_MAX_REDIRECTS", DEFAULT_MAX_REDIRECTS),
             pdf_max_chars=_env_int("MIHARI_ARCHIVE_PDF_MAX_CHARS", DEFAULT_PDF_MAX_CHARS),
             queue_size=_env_int("MIHARI_ARCHIVE_QUEUE_SIZE", DEFAULT_QUEUE_SIZE),
-            fetch_urls=_env_bool("MIHARI_ARCHIVE_FETCH_URLS", True),
+            fetch_urls=_env_bool("MIHARI_ARCHIVE_FETCH_URLS", False),
             fetch_attachments=_env_bool("MIHARI_ARCHIVE_FETCH_ATTACHMENTS", True),
         )
 
     def validate(self) -> None:
         """不正な上限値を弾く。0 以下の上限は事故のもと。"""
+        if self.fetch_urls:
+            raise ValueError(
+                "MIHARI_ARCHIVE_FETCH_URLS=1 は未対応: "
+                "任意 URL メタ取得は DNS リバインド TOCTOU が残るため既定で無効。"
+                "検証済み IP 固定 + Host/SNI 保持の接続が入るまで有効化しないこと"
+            )
         if self.max_attachment_bytes <= 0 or self.max_url_bytes <= 0:
             raise ValueError("アーカイブの上限値は正の数にして")
         if self.queue_size <= 0:
