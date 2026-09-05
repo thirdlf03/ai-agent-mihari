@@ -220,11 +220,7 @@ def build_turn_prompt(job: Job) -> str:
             f"結果は `{OUTPUT_DIRNAME}/` に書き出してください。"
             "必要な説明は標準出力の最後に 1〜数行で書いてください。"
         )
-    base = build_prompt(job)
-    if followups:
-        notes = "\n\n".join(path.read_text(encoding="utf-8") for path in followups)
-        return f"{base}\n\n追記:\n{notes}"
-    return base
+    return build_prompt(job)
 
 
 @contextmanager
@@ -929,6 +925,7 @@ class InProcessHermes:
         def run_sync() -> tuple[Mapping[str, Any], str | None]:
             from mihari_room.worker.runtime_lock import scoped_hermes_home
 
+            room_root = _room_root_for(job)
             hermes_home = _memory_store_for(job).hermes_home
             with (
                 _CWD_LOCK,
