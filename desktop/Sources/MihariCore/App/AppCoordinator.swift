@@ -465,6 +465,19 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         )
     }
 
+    /// 仕事の詳細パネルを開く。記憶の候補はここで本文と承認・却下を見せる。
+    public func openRoomJobDetail() {
+        guard let jobID = room.jobs.first?.jobID else { return }
+        RoomJobDetailWindowController.shared.show(
+            monitor: room,
+            jobID: jobID,
+            onOpenArtifact: { [weak self] url in self?.openRoomArtifact(url) }
+        )
+        Task { [weak self] in
+            await self?.room.refreshMemory(jobID: jobID)
+        }
+    }
+
     /// 走っている仕事を中断する。
     public func cancelRoomJob() {
         guard let jobID = room.jobs.first?.jobID else { return }

@@ -44,6 +44,22 @@ struct RoomJobMonitorTests {
             return JobRequestResponse(jobID: jobID, threadID: nil, status: "cancelled")
         }
 
+        var memoryResults: [String: [RoomMemoryCandidate]] = [:]
+        private(set) var approveCalls: [(String, String)] = []
+        private(set) var rejectCalls: [(String, String)] = []
+
+        func listMemory(jobID: String) async throws -> [RoomMemoryCandidate] {
+            memoryResults[jobID] ?? []
+        }
+
+        func approveMemory(jobID: String, candidateID: String) async throws {
+            approveCalls.append((jobID, candidateID))
+        }
+
+        func rejectMemory(jobID: String, candidateID: String) async throws {
+            rejectCalls.append((jobID, candidateID))
+        }
+
         @MainActor
         func openEventStream(jobID: String, lastEventID: String?) async throws -> (RoomEventByteStream, Int) {
             openedJobIDs.append(jobID)
@@ -284,9 +300,9 @@ struct RoomJobMonitorTests {
         access.streamsForOpen = [
             (
                 sse(frames: [
-                    frame(eventJSON(id: "ev-1", jobID: "abc", phase: "queued", kind: "speech", text: "始める")),
-                    frame(eventJSON(id: "ev-2", jobID: "abc", phase: "researching", kind: "speech", text: "調べる")),
-                    frame(eventJSON(id: "ev-3", jobID: "abc", phase: "building", kind: "speech", text: "組み立てる")),
+                    frame(eventJSON(id: "1", jobID: "abc", phase: "queued", kind: "speech", text: "始める")),
+                    frame(eventJSON(id: "2", jobID: "abc", phase: "researching", kind: "speech", text: "調べる")),
+                    frame(eventJSON(id: "3", jobID: "abc", phase: "building", kind: "speech", text: "組み立てる")),
                 ]),
                 200
             )
@@ -310,7 +326,7 @@ struct RoomJobMonitorTests {
         #expect(job.latestText == "組み立てる")
         #expect(spoken == ["始める", "調べる", "組み立てる"])
         // カーソルが保存されている。
-        #expect(store.cursor(for: "abc") == "ev-3")
+        #expect(store.cursor(for: "abc") == "3")
         #expect(store.lastJobID == "abc")
         // 最初はカーソルなしで開く。
         #expect(access.openedCursors.first.flatMap { $0 } == nil)
@@ -322,10 +338,10 @@ struct RoomJobMonitorTests {
         access.streamsForOpen = [
             (
                 sse(frames: [
-                    frame(eventJSON(id: "ev-1", jobID: "abc", phase: "queued", kind: "speech", text: "始める")),
-                    frame(eventJSON(id: "ev-1", jobID: "abc", phase: "queued", kind: "speech", text: "始める")),
-                    frame(eventJSON(id: "ev-2", jobID: "abc", phase: "researching", kind: "speech", text: "調べる")),
-                    frame(eventJSON(id: "ev-2", jobID: "abc", phase: "researching", kind: "speech", text: "調べる")),
+                    frame(eventJSON(id: "1", jobID: "abc", phase: "queued", kind: "speech", text: "始める")),
+                    frame(eventJSON(id: "1", jobID: "abc", phase: "queued", kind: "speech", text: "始める")),
+                    frame(eventJSON(id: "2", jobID: "abc", phase: "researching", kind: "speech", text: "調べる")),
+                    frame(eventJSON(id: "2", jobID: "abc", phase: "researching", kind: "speech", text: "調べる")),
                 ]),
                 200
             )
@@ -354,8 +370,8 @@ struct RoomJobMonitorTests {
         access.streamsForOpen = [
             (
                 sse(frames: [
-                    frame(eventJSON(id: "ev-1", jobID: "abc", phase: "queued", kind: "speech", text: "始める")),
-                    frame(eventJSON(id: "ev-2", jobID: "abc", phase: "researching", kind: "speech", text: "調べる")),
+                    frame(eventJSON(id: "1", jobID: "abc", phase: "queued", kind: "speech", text: "始める")),
+                    frame(eventJSON(id: "2", jobID: "abc", phase: "researching", kind: "speech", text: "調べる")),
                 ]),
                 200
             ),
@@ -370,7 +386,7 @@ struct RoomJobMonitorTests {
             access.openedCursors.count >= 2
         }
         #expect(access.openedCursors.first.flatMap { $0 } == nil)
-        #expect(access.openedCursors[1] == "ev-2")
+        #expect(access.openedCursors[1] == "2")
         #expect(access.openedJobIDs.allSatisfy { $0 == "abc" })
     }
 
@@ -417,7 +433,7 @@ struct RoomJobMonitorTests {
                 status: "running",
                 artifacts: [],
                 latestEvent: RoomEvent(
-                    id: "ev-9",
+                    id: "9",
                     jobID: "running-1",
                     phase: .downloading,
                     kind: .speech,
@@ -441,14 +457,14 @@ struct RoomJobMonitorTests {
         try await eventually("SSE が開かれる") {
             access.openedCursors.count >= 1
         }
-        #expect(access.openedCursors[0] == "ev-9")
+        #expect(access.openedCursors[0] == "9")
 
         // 配信に「すでに見た位相の speech」が流れても喋らない(検出済みの再送)。
         access.streamsForOpen = [
             (
                 sse(frames: [
                     frame(
-                        eventJSON(id: "ev-10", jobID: "running-1", phase: "downloading", kind: "speech", text: "取得中だよ")
+                        eventJSON(id: "10", jobID: "running-1", phase: "downloading", kind: "speech", text: "取得中だよ")
                     )
                 ]),
                 200
@@ -478,7 +494,7 @@ struct RoomJobMonitorTests {
                         previewURL: URL(string: "https://example.com/r.pdf")!
                     )
                 ],
-                latestEvent: RoomEvent(id: "ev-20", jobID: "running-1", phase: .done, kind: .summary, text: "完了した")
+                latestEvent: RoomEvent(id: "20", jobID: "running-1", phase: .done, kind: .summary, text: "完了した")
             )
         ]
         await monitor.resume()
@@ -495,7 +511,7 @@ struct RoomJobMonitorTests {
         access.streamsForOpen = [
             (
                 sse(frames: [
-                    frame(eventJSON(id: "ev-1", jobID: "abc", phase: "waiting", kind: "cancelled", text: "止めた"))
+                    frame(eventJSON(id: "1", jobID: "abc", phase: "waiting", kind: "cancelled", text: "止めた"))
                 ]),
                 200
             )
@@ -551,7 +567,7 @@ struct RoomJobMonitorTests {
                 && monitor.jobs.contains { $0.jobID == "aaa" && $0.latestText == "A 調べる" }
                 && monitor.jobs.contains { $0.jobID == "bbb" && $0.latestText == "B 取得する" }
         }
-        #expect(spoken == ["A 調べる", "B 取得する"])
+        #expect(Set(spoken) == Set(["A 調べる", "B 取得する"]))
     }
 
     @Test("resume は最後に追っていた仕事も詳細から拾い直す")
@@ -570,7 +586,7 @@ struct RoomJobMonitorTests {
                         previewURL: URL(string: "https://example.com/r.pdf")!
                     )
                 ],
-                latestEvent: RoomEvent(id: "ev-9", jobID: "abc", phase: .done, kind: .summary, text: "完了した")
+                latestEvent: RoomEvent(id: "9", jobID: "abc", phase: .done, kind: .summary, text: "完了した")
             )
         ]
         let store = makeStore()
@@ -590,7 +606,7 @@ struct RoomJobMonitorTests {
         try await eventually("SSE が開かれる") {
             access.openedCursors.count >= 1
         }
-        #expect(access.openedCursors[0] == "ev-9")
+        #expect(access.openedCursors[0] == "9")
     }
 
     @Test("バックオフは上限で頭打ちになる")

@@ -43,6 +43,12 @@ public protocol RoomAccess: Sendable {
     func followup(jobID: String, body: String, requestedBy: String?) async throws -> JobRequestResponse
     /// `POST /jobs/{id}/cancel`。仕事を中断する。
     func cancel(jobID: String) async throws -> JobRequestResponse
+    /// `GET /jobs/{id}/memory`。承認待ちを含む記憶の候補の一覧。
+    func listMemory(jobID: String) async throws -> [RoomMemoryCandidate]
+    /// `POST /jobs/{id}/memory/{candidateID}/approve`。承認する。
+    func approveMemory(jobID: String, candidateID: String) async throws
+    /// `POST /jobs/{id}/memory/{candidateID}/reject`。却下する。
+    func rejectMemory(jobID: String, candidateID: String) async throws
     /// `GET /jobs/{id}/events`。SSE をつなぎ、バイト列と HTTP 状態を返す。
     ///
     /// `lastEventID` が渡されたら `Last-Event-ID` ヘッダで再開点を伝える。
@@ -124,6 +130,25 @@ public struct RoomEventClient: Sendable, RoomAccess {
 
     public func cancel(jobID: String) async throws -> JobRequestResponse {
         try await post("jobs/\(jobID)/cancel", body: RoomCancelBody())
+    }
+
+    public func listMemory(jobID: String) async throws -> [RoomMemoryCandidate] {
+        let response: RoomMemoryCandidatesResponse = try await get("jobs/\(jobID)/memory")
+        return response.candidates
+    }
+
+    public func approveMemory(jobID: String, candidateID: String) async throws {
+        let _: RoomMemoryDecisionAck = try await post(
+            "jobs/\(jobID)/memory/\(candidateID)/approve",
+            body: RoomEmptyBody()
+        )
+    }
+
+    public func rejectMemory(jobID: String, candidateID: String) async throws {
+        let _: RoomMemoryDecisionAck = try await post(
+            "jobs/\(jobID)/memory/\(candidateID)/reject",
+            body: RoomEmptyBody()
+        )
     }
 
     /// SSE をつなぎ、バイト列と応答を返す。
@@ -214,6 +239,14 @@ public struct RoomEventClient: Sendable, RoomAccess {
 
     /// `POST /jobs/{id}/cancel` の本文。中身は無いが、JSON の `{}` は送る。
     private struct RoomCancelBody: Encodable {}
+
+    /// 記憶の承認・却下の本文。部屋側は本文を要しないが、JSON の `{}` は送る。
+    private struct RoomEmptyBody: Encodable {}
+
+    /// 記憶の承認・却下の応答。部屋側の形が変わっても落とさないための入れ物。
+    private struct RoomMemoryDecisionAck: Decodable {
+        init(from decoder: Decoder) throws { _ = decoder }
+    }
 
     /// 失敗の応答。本文の `detail` だけ読む。
     private struct RoomErrorPayload: Decodable {

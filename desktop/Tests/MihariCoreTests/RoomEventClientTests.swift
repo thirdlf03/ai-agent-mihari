@@ -233,6 +233,55 @@ struct RoomEventClientTests {
         #expect(sent.value(forHTTPHeaderField: DaemonClient.tokenHeader) == "部屋の合言葉")
     }
 
+    @Test("GET /jobs/{id}/memory に合言葉を載せて引く")
+    func listsMemory() async throws {
+        let client = makeClient()
+        StubURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (
+                response,
+                Data(#"{"candidates":[{"id":"c1","target":"MEMORY.md","content":"深煎りが好き","status":"pending","created_at":1757073600}]}"#.utf8)
+            )
+        }
+
+        let candidates = try await client.listMemory(jobID: "abc")
+
+        let sent = try #require(StubURLProtocol.lastRequest)
+        #expect(sent.httpMethod == "GET")
+        #expect(sent.url?.path == "/jobs/abc/memory")
+        #expect(sent.value(forHTTPHeaderField: DaemonClient.tokenHeader) == "部屋の合言葉")
+        #expect(candidates.first?.content == "深煎りが好き")
+    }
+
+    @Test("POST /jobs/{id}/memory/{candidate}/approve|reject は空の JSON で送る")
+    func decidesMemory() async throws {
+        let client = makeClient()
+        StubURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data("{}".utf8))
+        }
+
+        try await client.approveMemory(jobID: "abc", candidateID: "c1")
+        var sent = try #require(StubURLProtocol.lastRequest)
+        #expect(sent.httpMethod == "POST")
+        #expect(sent.url?.path == "/jobs/abc/memory/c1/approve")
+        #expect(sent.value(forHTTPHeaderField: DaemonClient.tokenHeader) == "部屋の合言葉")
+
+        try await client.rejectMemory(jobID: "abc", candidateID: "c2")
+        sent = try #require(StubURLProtocol.lastRequest)
+        #expect(sent.url?.path == "/jobs/abc/memory/c2/reject")
+    }
+
     @Test("SSE はカーソルが無ければ Last-Event-ID を載せない")
     func eventStreamWithoutCursor() async throws {
         let client = makeClient()

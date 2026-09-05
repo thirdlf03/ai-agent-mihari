@@ -11,6 +11,16 @@ public protocol RoomJobCursorStoring {
     func setCursor(_ eventID: String?, for jobID: String)
     /// 最後に追った仕事の ID。再起動時に優先して拾う目印。
     var lastJobID: String? { get set }
+    /// カーソルが残っている仕事の ID。再起動時に詳細から拾い直す目印。
+    func knownJobIDs() -> [String]
+}
+
+extension RoomJobCursorStoring {
+    /// 知らない保存場所は「最後の仕事だけ知っている」扱い。
+    public func knownJobIDs() -> [String] {
+        guard let lastJobID else { return [] }
+        return [lastJobID]
+    }
 }
 
 /// UserDefaults に保存する実体。キーは仕事単位なので、並んで走る複数の仕事を区別できる。
@@ -39,6 +49,16 @@ public final class UserDefaultsRoomJobCursorStore: RoomJobCursorStoring {
         } else {
             defaults.removeObject(forKey: Self.cursorKey(for: jobID))
         }
+    }
+
+    /// カーソルが残っている仕事の ID。`room.eventCursor.<jobID>` の一覧。
+    public func knownJobIDs() -> [String] {
+        let prefix = "room.eventCursor."
+        return defaults.dictionaryRepresentation().keys.compactMap { key in
+            guard key.hasPrefix(prefix) else { return nil }
+            let jobID = String(key.dropFirst(prefix.count))
+            return jobID.isEmpty ? nil : jobID
+        }.sorted()
     }
 
     /// 最後に追った仕事の ID。無ければ `nil`。

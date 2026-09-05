@@ -18,6 +18,8 @@ final class StubPetMenuActions: ObservableObject, PetMenuActions {
     private(set) var jobRequestOpens = 0
     /// いま追っている仕事。テストからの差し込み口。
     var roomJob: RoomJobSummary?
+    /// 「詳細を開く…」が押された回数。
+    private(set) var roomDetailOpens = 0
     /// 「追記する…」が押された回数。
     private(set) var roomFollowUps = 0
     /// 「中断する」が押された回数。
@@ -34,6 +36,7 @@ final class StubPetMenuActions: ObservableObject, PetMenuActions {
     func endBreak() {}
     func openDiscordSettings() {}
     func openJobRequest() { jobRequestOpens += 1 }
+    func openRoomJobDetail() { roomDetailOpens += 1 }
     func followUpRoomJob() { roomFollowUps += 1 }
     func cancelRoomJob() { roomCancels += 1 }
     func openRoomArtifact(_ url: URL) { roomArtifactURLs.append(url) }

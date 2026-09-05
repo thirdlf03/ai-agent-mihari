@@ -34,8 +34,14 @@ public struct RoomJobTrackedJob: Equatable, Sendable, Identifiable {
     public let artifacts: [RoomArtifact]
     /// 配信が止まっている理由。正常なら `nil`。
     public let lastError: String?
+    /// 直近で取れた記憶の候補。承認待ちの表示と件数に使う。
+    public let memories: [RoomMemoryCandidate]
+    /// 記憶の一覧を取りに行くときの失敗。正常なら `nil`。
+    public let memoryError: String?
     /// 直近の位相変化でペットへ与える指示。テストからの観測点にもなる。
     public let directive: RoomPhaseDirective?
+    /// 承認待ちの件数。
+    public var pendingMemoryCount: Int { memories.filter(\.isPending).count }
 
     public var id: String { jobID }
 
@@ -48,7 +54,8 @@ public struct RoomJobTrackedJob: Equatable, Sendable, Identifiable {
             phase: phase,
             latestText: latestText,
             artifacts: artifacts,
-            lastError: lastError
+            lastError: lastError,
+            memoryCandidates: memories
         )
     }
 }
@@ -101,6 +108,8 @@ public final class RoomJobMonitor: ObservableObject {
         var status: RoomJobStatus = .queued
         var latestText: String?
         var artifacts: [RoomArtifact] = []
+        var memories: [RoomMemoryCandidate] = []
+        var memoryError: String?
         var lastError: String?
         var lastActivityAt = Date.distantPast
         var lastDirective: RoomPhaseDirective?
@@ -132,12 +141,15 @@ public final class RoomJobMonitor: ObservableObject {
     /// 起動時・繋ぎ直しに `/jobs/running` を引き、走っている仕事を拾う。
     ///
     /// すでに走っている仕事に付け直すときは、最新イベントの位相と ID を「すでに見た」状態に
-    /// してから購読する。過去の配信を全部喋り直さないため。
+    /// してから購読する。過去の配信を全部喋り直さないため。`/jobs/running` は走っている
+    /// 仕事だけを返すので、カーソルが残っている仕事(待ち・完了・失敗)は詳細から拾い直して
+    /// 状態と成果物と記憶の候補を見せ続ける。
     public func resume() async {
         do {
             let running = try await access.listRunning()
             lastError = nil
-            // 見えなくなった仕事は監視をやめる。
+            // 見えなくなった仕事は監視をやめる。ただしカーソルが残っている仕事は
+            // 下で詳細から拾い直すので、ここでは走っている仕事以外をいったん外すだけ。
             let liveIDs = Set(running.map(\.jobID))
             for jobID in states.keys where !liveIDs.contains(jobID) {
                 stop(jobID: jobID)
@@ -146,13 +158,13 @@ public final class RoomJobMonitor: ObservableObject {
             for detail in running {
                 attach(detail: detail)
             }
-            // 最後に追っていた仕事が走っていなくても、詳細を引いて状態と成果物を
-            // 見せられるようにする(完了した仕事の成果物を開くため)。
-            if let lastID = cursorStore.lastJobID,
-                !liveIDs.contains(lastID),
-                !states.keys.contains(lastID),
-                let detail = try? await access.detail(jobID: lastID)
-            {
+            // カーソルが残っている仕事は、走っていなくても詳細から拾い直す。
+            // 待ち・完了・失敗の仕事の成果物と記憶の候補を開くため。
+            var restoreIDs = Set(cursorStore.knownJobIDs())
+            if let lastID = cursorStore.lastJobID { restoreIDs.insert(lastID) }
+            for jobID in restoreIDs.sorted() where !liveIDs.contains(jobID) {
+                guard !states.keys.contains(jobID) else { continue }
+                guard let detail = try? await access.detail(jobID: jobID) else { continue }
                 attach(detail: detail)
             }
         } catch {
@@ -181,7 +193,22 @@ public final class RoomJobMonitor: ObservableObject {
         states[detail.jobID] = state
         cursorStore.lastJobID = detail.jobID
         startStream(jobID: detail.jobID)
+        // 記憶の候補は別口なので、詳細と一緒に引き直す。取れなくても購読は続く。
+        Task { [weak self] in
+            await self?.refreshMemory(jobID: detail.jobID)
+        }
         publish()
+    }
+
+    /// いま追っている仕事を切り替える。古い仕事の配信は止め、橋(bridge)の購読とは無関係。
+    ///
+    /// 付け替えたあとは新しい仕事だけを追う。SSE は部屋専用の別セッションで開くので、
+    /// デーモン側の流れを奪わない。
+    public func focus(jobID: String, title: String?) {
+        for known in Array(states.keys) where known != jobID {
+            stop(jobID: known)
+        }
+        attach(jobID: jobID, title: title)
     }
 
     /// 監視をやめる。アプリ終了時にもここを通る。
@@ -214,6 +241,8 @@ public final class RoomJobMonitor: ObservableObject {
             states[jobID] = state
             publish()
         }
+        // 終端で部屋が stream を閉じたあとでも、追記したら続きを追えるよう開き直す。
+        startStream(jobID: jobID)
         return response
     }
 
@@ -239,6 +268,7 @@ public final class RoomJobMonitor: ObservableObject {
     }
 
     /// 成果物を最新に引き直す。完了・失敗で配信が止まったあとに呼ぶ。
+    /// 記憶の候補も一緒に引き直す(詳細・候補イベント・決定後の更新口)。
     public func refreshArtifacts(jobID: String) async {
         do {
             let detail = try await access.detail(jobID: jobID)
@@ -256,6 +286,38 @@ public final class RoomJobMonitor: ObservableObject {
             // 取れなくても配信は続けられる。エラーだけ残す。
             setStreamError(jobID, message: describe(error))
         }
+        await refreshMemory(jobID: jobID)
+    }
+
+    /// 記憶の候補を最新に引き直す。詳細の取得・候補イベント・決定後に呼ぶ。
+    public func refreshMemory(jobID: String) async {
+        do {
+            let candidates = try await access.listMemory(jobID: jobID)
+            if var state = states[jobID] {
+                state.memories = candidates
+                state.memoryError = nil
+                states[jobID] = state
+                publish()
+            }
+        } catch {
+            if var state = states[jobID] {
+                state.memoryError = describe(error)
+                states[jobID] = state
+                publish()
+            }
+        }
+    }
+
+    /// 記憶の候補を承認する。API が成功してから一覧を引き直すまで約束しない。
+    public func approveMemory(jobID: String, candidateID: String) async throws {
+        try await access.approveMemory(jobID: jobID, candidateID: candidateID)
+        await refreshMemory(jobID: jobID)
+    }
+
+    /// 記憶の候補を却下する。API が成功してから一覧を引き直すまで約束しない。
+    public func rejectMemory(jobID: String, candidateID: String) async throws {
+        try await access.rejectMemory(jobID: jobID, candidateID: candidateID)
+        await refreshMemory(jobID: jobID)
     }
 
     // MARK: - 監視の中身
@@ -269,10 +331,30 @@ public final class RoomJobMonitor: ObservableObject {
         states[jobID]?.task = task
     }
 
+    /// 部屋へ渡すカーソル。数値文字列だけを通し、旧式(`ev-*`)や壊れた値は `nil` にする。
+    ///
+    /// 部屋側は解釈できない `Last-Event-ID` を 0(最初から)とみなして全部返してくる。
+    /// 旧式のまま送ると再送の嵐になるので、送る前に落とす。`nil` でも最初からは
+    /// 変わらないが、呼び出し側は詳細の最新イベントで種付けして喋り直しを抑える。
+    nonisolated static func normalizeCursor(_ raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        guard !raw.isEmpty, raw.allSatisfy(\.isNumber) else { return nil }
+        return raw
+    }
+
     private func runStream(jobID: String) async {
+        // 旧式のカーソルが残っていたら、詳細の最新イベントで種付けしてから開く。
+        // そのまま開くと部屋が最初から全部返し、過去を喋り直してしまう。
+        if cursorStore.cursor(for: jobID) != nil,
+            Self.normalizeCursor(cursorStore.cursor(for: jobID)) == nil
+        {
+            await seedFromDetail(jobID: jobID)
+        }
         var attempt = 0
         while !Task.isCancelled {
-            let cursor = cursorStore.cursor(for: jobID)
+            let cursor = Self.normalizeCursor(cursorStore.cursor(for: jobID))
             do {
                 let (bytes, status) = try await access.openEventStream(jobID: jobID, lastEventID: cursor)
                 // 4xx は張り直しても直らないことが多いので、その仕事の配信を諦めて理由を残す。
@@ -337,7 +419,17 @@ public final class RoomJobMonitor: ObservableObject {
         )
         // 未知の位相は前のまま保つ。
         state.lastPhase = event.phase ?? state.lastPhase
-        state.status = Self.status(after: event)
+        // 終わった仕事は後の雑音で巻き戻さない。失敗を見落とさないため。
+        let next = Self.status(after: event)
+        if state.status == .done || state.status == .failed || state.status == .cancelled {
+            if next != .done, next != .failed, next != .cancelled {
+                // 終端のまま保つ。
+            } else {
+                state.status = next
+            }
+        } else {
+            state.status = next
+        }
         state.handledCount += 1
         state.lastDirective = directive
         states[jobID] = state
@@ -348,10 +440,35 @@ public final class RoomJobMonitor: ObservableObject {
         }
 
         // 終わったあとで成果物を取り直す。配信はフォローアップのために開いたままにする。
+        // 部屋は終端のあと hold して stream を閉じるので、張り直しは runStream が担う。
         if event.phase?.isTerminal == true {
             Task { [weak self] in
                 await self?.refreshArtifacts(jobID: jobID)
             }
+        }
+        // 記憶の候補が出たら一覧を引き直す。喋らない。
+        if event.kind == .memoryCandidate {
+            Task { [weak self] in
+                await self?.refreshMemory(jobID: jobID)
+            }
+        }
+    }
+
+    /// 詳細の最新イベントで種付けする。未知のカーソルで過去を喋り直さないため。
+    private func seedFromDetail(jobID: String) async {
+        guard var state = states[jobID] else { return }
+        guard let detail = try? await access.detail(jobID: jobID) else { return }
+        if let latest = detail.latestEvent {
+            state.seeded = true
+            state.handledCount = max(state.handledCount, 1)
+            state.lastPhase = latest.phase ?? state.lastPhase
+            state.latestText = state.latestText ?? latest.text
+            state.latestEventID = latest.id
+            state.seenIDs.insert(latest.id)
+            cursorStore.setCursor(latest.id, for: jobID)
+            states[jobID] = state
+        } else {
+            cursorStore.setCursor(nil, for: jobID)
         }
     }
 
@@ -384,6 +501,8 @@ public final class RoomJobMonitor: ObservableObject {
                     latestText: state.latestText,
                     artifacts: state.artifacts,
                     lastError: state.lastError,
+                    memories: state.memories,
+                    memoryError: state.memoryError,
                     directive: state.lastDirective
                 )
             }
@@ -399,6 +518,8 @@ public final class RoomJobMonitor: ObservableObject {
                 latestText: state.latestText,
                 artifacts: state.artifacts,
                 lastError: state.lastError,
+                memories: state.memories,
+                memoryError: state.memoryError,
                 directive: state.lastDirective
             )
         }
@@ -416,7 +537,7 @@ public final class RoomJobMonitor: ObservableObject {
     ///   は集中、building/verifying は確認、done は 1 回だけのお祝い(waving / jumping)、
     ///   failed は落ち込む。
     /// - 喋るのは `kind == speech` だけ。位相の変わり目・始まり・終わり(done/failed/cancelled)
-    ///   に限る。summary は一切喋らない。
+    ///   に限る。summary・log・file・memory_candidate は一切喋らない。
     nonisolated static func makeDirective(
         event: RoomEvent,
         previousPhase: RoomJobPhase?,

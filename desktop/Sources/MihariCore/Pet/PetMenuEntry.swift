@@ -111,6 +111,10 @@ public enum PetMenuEntries {
                 action: {}
             ),
             .item(
+                title: "詳細を開く…",
+                action: { actions.openRoomJobDetail() }
+            ),
+            .item(
                 title: "追記する…",
                 action: { actions.followUpRoomJob() }
             ),
@@ -119,6 +123,14 @@ public enum PetMenuEntries {
                 action: { actions.cancelRoomJob() }
             ),
         ]
+        if job.pendingMemoryCount > 0 {
+            entries.append(
+                .item(
+                    title: "記憶の候補: \(job.pendingMemoryCount)件待ち — 詳細で承認",
+                    action: { actions.openRoomJobDetail() }
+                )
+            )
+        }
         if let latestText = job.latestText, !latestText.isEmpty {
             entries.append(
                 .item(title: "進捗: \(latestText)", action: {})

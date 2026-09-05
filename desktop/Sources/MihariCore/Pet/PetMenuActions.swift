@@ -39,6 +39,8 @@ public protocol PetMenuActions: AnyObject, ObservableObject {
     var roomJob: RoomJobSummary? { get }
     /// 走っている仕事へ追記する窓を開く。
     func followUpRoomJob()
+    /// 仕事の詳細パネル(記憶の候補・成果物)を開く。
+    func openRoomJobDetail()
     /// 走っている仕事を中断する。
     func cancelRoomJob()
     /// 成果物の URL を開く。http/https だけを開く。

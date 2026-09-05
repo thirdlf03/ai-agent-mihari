@@ -136,6 +136,33 @@ struct PetMenuEntriesTests {
         #expect(actions.jobRequestOpens == 1)
     }
 
+    @Test("記憶の候補があれば件数と詳細への導線が出る")
+    func roomSubmenuShowsMemoryPending() throws {
+        let presenter = makePresenter()
+        let actions = StubPetMenuActions()
+        actions.roomJob = RoomJobSummary(
+            jobID: "abc",
+            title: "掃除",
+            status: .running,
+            phase: .waiting,
+            latestText: nil,
+            artifacts: [],
+            lastError: nil,
+            memoryCandidates: [
+                RoomMemoryCandidate(candidateID: "c1", target: "MEMORY.md", content: "深煎りが好き", status: "pending")
+            ]
+        )
+
+        let entries = PetMenuEntries.make(actions: actions, presenter: presenter)
+        let submenu = try #require(findSubmenu("作業部屋", in: entries))
+        let detail = try #require(findItem("詳細を開く…", in: submenu))
+        detail.action()
+        #expect(actions.roomDetailOpens == 1)
+        let pending = try #require(findItem("記憶の候補: 1件待ち — 詳細で承認", in: submenu))
+        pending.action()
+        #expect(actions.roomDetailOpens == 2)
+    }
+
     /// タイトルの一致するサブメニューを探す。
     private func findSubmenu(_ title: String, in entries: [PetMenuEntry]) -> [PetMenuEntry]? {
         for entry in entries {

@@ -58,6 +58,8 @@ public enum RoomEventKind: String, Sendable, Equatable, CaseIterable {
     case summary
     case file
     case cancelled
+    /// 記憶の候補が出た。位相は waiting。喋らず、記憶の一覧を引き直す合図。
+    case memoryCandidate = "memory_candidate"
 }
 
 /// ペットに渡す位相の変化。
@@ -134,7 +136,7 @@ public struct RoomEvent: Decodable, Equatable, Sendable, Identifiable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let text = try container.decodeIfPresent(String.self, forKey: .text) ?? ""
-        let rawID = try container.decodeIfPresent(String.self, forKey: .id)
+        let rawID = Self.decodeFlexibleID(container)
         let createdAtRaw = try container.decodeIfPresent(String.self, forKey: .createdAt)
         let createdAt = createdAtRaw.flatMap(DaemonEvent.parseTimestamp)
         // id が無くても重複排除の目印が欲しいので、本文と時刻から合成する。
@@ -145,6 +147,23 @@ public struct RoomEvent: Decodable, Equatable, Sendable, Identifiable {
         self.text = text
         progress = try container.decodeIfPresent(Double.self, forKey: .progress)
         self.createdAt = createdAt
+    }
+
+    /// `id` を文字列でも数値でも読む。部屋の日誌は数値、SSE の `id:` 行は文字列。
+    ///
+    /// 数値はそのまま文字列化するので、カーソル(`Last-Event-ID`)も数値文字列で
+    /// 往復する。部屋側は数値以外を 0(最初から)とみなす。
+    static func decodeFlexibleID(_ container: KeyedDecodingContainer<CodingKeys>) -> String? {
+        if let string = try? container.decodeIfPresent(String.self, forKey: .id) {
+            return string
+        }
+        if let number = try? container.decodeIfPresent(Int.self, forKey: .id) {
+            return String(number)
+        }
+        if let number = try? container.decodeIfPresent(Double.self, forKey: .id) {
+            return String(Int(number))
+        }
+        return nil
     }
 
     /// `id` が付いていないときの代替。同じ本文・同じ時刻は同じ ID に見えるようにする。
@@ -304,6 +323,88 @@ public struct RoomJobsResponse: Decodable, Equatable, Sendable {
     }
 }
 
+/// 承認待ちの記憶の候補。`GET /jobs/{id}/memory` の `candidates` の 1 件。
+///
+/// 部屋側の正本は `jobs/<id>/memory_candidates.json`。`target` は `MEMORY.md` /
+/// `USER.md`、`status` は `pending` / `approved` / `rejected`。`created_at` は
+/// 時刻(秒)でも ISO8601 文字列でも読む。承認・却下は API が成功してから一覧を
+/// 引き直すまで約束しない。
+public struct RoomMemoryCandidate: Decodable, Equatable, Sendable, Identifiable {
+    public let candidateID: String
+    public let target: String
+    public let content: String
+    public let status: String
+    public let createdAt: Date?
+
+    public var id: String { candidateID }
+    /// まだ決めていない候補か。
+    public var isPending: Bool { status.lowercased() == "pending" }
+
+    enum CodingKeys: String, CodingKey {
+        case candidateID = "id"
+        case target
+        case content
+        case status
+        case createdAt = "created_at"
+    }
+
+    public init(
+        candidateID: String,
+        target: String = "",
+        content: String = "",
+        status: String = "pending",
+        createdAt: Date? = nil
+    ) {
+        self.candidateID = candidateID
+        self.target = target
+        self.content = content
+        self.status = status
+        self.createdAt = createdAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        candidateID = Self.decodeFlexibleID(container) ?? ""
+        target = (try? container.decodeIfPresent(String.self, forKey: .target)) ?? ""
+        content = (try? container.decodeIfPresent(String.self, forKey: .content)) ?? ""
+        status = (try? container.decodeIfPresent(String.self, forKey: .status)) ?? "pending"
+        createdAt = Self.decodeFlexibleDate(container)
+    }
+
+    static func decodeFlexibleID(_ container: KeyedDecodingContainer<CodingKeys>) -> String? {
+        if let string = try? container.decodeIfPresent(String.self, forKey: .candidateID) {
+            return string
+        }
+        if let number = try? container.decodeIfPresent(Int.self, forKey: .candidateID) {
+            return String(number)
+        }
+        return nil
+    }
+
+    static func decodeFlexibleDate(_ container: KeyedDecodingContainer<CodingKeys>) -> Date? {
+        if let epoch = try? container.decodeIfPresent(Double.self, forKey: .createdAt) {
+            return Date(timeIntervalSince1970: epoch)
+        }
+        if let epoch = try? container.decodeIfPresent(Int.self, forKey: .createdAt) {
+            return Date(timeIntervalSince1970: Double(epoch))
+        }
+        if let raw = try? container.decodeIfPresent(String.self, forKey: .createdAt) {
+            if let epoch = Double(raw) { return Date(timeIntervalSince1970: epoch) }
+            return DaemonEvent.parseTimestamp(raw)
+        }
+        return nil
+    }
+}
+
+/// `GET /jobs/{id}/memory` の応答。`{candidates:[...]}`。
+public struct RoomMemoryCandidatesResponse: Decodable, Equatable, Sendable {
+    public let candidates: [RoomMemoryCandidate]
+
+    public init(candidates: [RoomMemoryCandidate] = []) {
+        self.candidates = candidates
+    }
+}
+
 /// ペットメニューに出す仕事の要約。
 public struct RoomJobSummary: Equatable, Sendable {
     public let jobID: String
@@ -317,4 +418,28 @@ public struct RoomJobSummary: Equatable, Sendable {
     public let artifacts: [RoomArtifact]
     /// 配信が止まっている理由。正常なら `nil`。
     public let lastError: String?
+    /// 直近で取れた記憶の候補。承認待ちの表示と件数に使う。
+    public let memoryCandidates: [RoomMemoryCandidate]
+    /// 承認待ちの件数。
+    public var pendingMemoryCount: Int { memoryCandidates.filter(\.isPending).count }
+
+    public init(
+        jobID: String,
+        title: String,
+        status: RoomJobStatus,
+        phase: RoomJobPhase? = nil,
+        latestText: String? = nil,
+        artifacts: [RoomArtifact] = [],
+        lastError: String? = nil,
+        memoryCandidates: [RoomMemoryCandidate] = []
+    ) {
+        self.jobID = jobID
+        self.title = title
+        self.status = status
+        self.phase = phase
+        self.latestText = latestText
+        self.artifacts = artifacts
+        self.lastError = lastError
+        self.memoryCandidates = memoryCandidates
+    }
 }
