@@ -245,7 +245,11 @@ struct RoomEventClientTests {
             )!
             return (
                 response,
-                Data(#"{"candidates":[{"id":"c1","target":"MEMORY.md","content":"深煎りが好き","status":"pending","created_at":1757073600}]}"#.utf8)
+                Data(
+                    (#"{"candidates":[{"id":"c1","target":"MEMORY.md","#
+                        + #"content":"深煎りが好き","status":"pending","created_at":1757073600}]}"#)
+                        .utf8
+                )
             )
         }
 
