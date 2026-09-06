@@ -39,7 +39,7 @@ Hermes の Discord Gateway は起動しない。Forum・タグ・ペット HTTP 
 | `HERMES_HOME` | Hermes 専用プロファイル（`state.db`、config、sessions、skills）。VPS では `/var/lib/mihari/hermes` |
 | `MIHARI_ROOM_PYTHON` | mihari-room を動かす Python（systemd の ExecStart 用） |
 | `MIHARI_PREVIEW_BASE_URL` | 静的プレビューの公開ホスト名。API ホストとは別にする（推奨） |
-| `MIHARI_ARCHIVE_CHANNEL_IDS` | アーカイブ投稿を許すチャンネルの明示リスト。空なら archive は投稿しない |
+| `MIHARI_ARCHIVE_CHANNEL_IDS` | 任意。絞るときだけチャンネル ID をカンマ区切り。空なら Bot が見えるチャンネル全部を収録 |
 
 ## デプロイ
 

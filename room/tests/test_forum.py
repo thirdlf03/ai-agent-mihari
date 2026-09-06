@@ -58,6 +58,22 @@ async def test_create_thread_caps_title_at_100_chars(tmp_path: Path) -> None:
     assert len(kwargs["name"]) == 100
 
 
+async def test_create_thread_uses_default_title_when_empty(tmp_path: Path) -> None:
+    board, forum, _ = _make_board()
+    job = _make_job(tmp_path, title="  ", body="本文だけ")
+    await board.create_thread(job)
+    kwargs = forum.create_thread.await_args.kwargs
+    assert kwargs["name"] == "依頼"
+
+
+async def test_create_thread_caps_starter_body_at_2000(tmp_path: Path) -> None:
+    board, forum, _ = _make_board()
+    job = _make_job(tmp_path, title="題", body="あ" * 2500)
+    await board.create_thread(job)
+    kwargs = forum.create_thread.await_args.kwargs
+    assert len(kwargs["content"]) == 2000
+
+
 async def test_set_tag_uses_status_tag_names() -> None:
     # 全ステータスのタグ名（待ち・作業中・完了・失敗・中断）を確認。
     expected = {

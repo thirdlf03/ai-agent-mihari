@@ -443,6 +443,104 @@ class ArchiveDatabase:
             return None
         return self._row_to_message(row)
 
+    def latest_created_at_for_scope(
+        self,
+        *,
+        channel_id: int | None = None,
+        thread_id: int | None = None,
+    ) -> dt.datetime | None:
+        """チャンネルまたはスレッドごとの最新 created_at。catchup の after に使う。"""
+        if thread_id is not None:
+            where_sql = "thread_id = ?"
+            params: tuple[object, ...] = (thread_id,)
+        elif channel_id is not None:
+            where_sql = "channel_id = ? AND thread_id IS NULL"
+            params = (channel_id,)
+        else:
+            with self._lock:
+                row = self._conn.execute("SELECT MAX(created_at) FROM messages").fetchone()
+            if not row or not row[0]:
+                return None
+            return dt.datetime.fromisoformat(str(row[0]))
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT MAX(created_at) FROM messages WHERE {where_sql}",
+                params,
+            ).fetchone()
+        if not row or not row[0]:
+            return None
+        return dt.datetime.fromisoformat(str(row[0]))
+
+    def list_channels(self, *, limit: int = 200) -> list[dict[str, Any]]:
+        """収録済みチャンネルの件数と最終発言。"""
+        cap = max(1, min(500, int(limit)))
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT channel_id, channel_name, COUNT(*) AS n, MAX(created_at)
+                FROM messages
+                WHERE deleted_at IS NULL
+                GROUP BY channel_id, channel_name
+                ORDER BY MAX(created_at) DESC
+                LIMIT ?
+                """,
+                (cap,),
+            ).fetchall()
+        return [
+            {
+                "channel_id": int(row[0]),
+                "channel_name": str(row[1]),
+                "message_count": int(row[2]),
+                "last_message_at": str(row[3]) if row[3] is not None else None,
+            }
+            for row in rows
+        ]
+
+    def list_messages(
+        self,
+        *,
+        channel_id: int | None = None,
+        thread_id: int | None = None,
+        author_id: int | None = None,
+        from_dt: dt.datetime | None = None,
+        to_dt: dt.datetime | None = None,
+        include_deleted: bool = False,
+        limit: int = 50,
+    ) -> list[StoredMessage]:
+        """新しい順の一覧。キーワード無しの最近の発言用。"""
+        clauses: list[str] = []
+        params: list[object] = []
+        if channel_id is not None:
+            clauses.append("channel_id = ?")
+            params.append(channel_id)
+        if thread_id is not None:
+            clauses.append("thread_id = ?")
+            params.append(thread_id)
+        if author_id is not None:
+            clauses.append("author_id = ?")
+            params.append(author_id)
+        if from_dt is not None:
+            clauses.append("created_at >= ?")
+            params.append(to_iso(from_dt))
+        if to_dt is not None:
+            clauses.append("created_at < ?")
+            params.append(to_iso(to_dt))
+        if not include_deleted:
+            clauses.append("deleted_at IS NULL")
+        where = " AND ".join(clauses) if clauses else "1=1"
+        cap = max(1, min(200, int(limit)))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT {self._MESSAGE_COLUMNS} FROM messages
+                WHERE {where}
+                ORDER BY created_at DESC, message_id DESC
+                LIMIT ?
+                """,
+                (*params, cap),
+            ).fetchall()
+        return [self._row_to_message(row) for row in rows]
+
     def require_message(self, message_id: int) -> StoredMessage:
         message = self.get_message(message_id)
         if message is None:
@@ -562,6 +660,8 @@ class ArchiveDatabase:
         include_deleted: bool = False,
         limit: int = 20,
         offset: int = 0,
+        author_ids: Sequence[int] | None = None,
+        author_names: Sequence[str] | None = None,
     ) -> list[SearchHit]:
         """キーワード全文検索。長い語は FTS、短い語は LIKE フォールバック。"""
         filters, filter_params = self._search_filters(
@@ -570,6 +670,8 @@ class ArchiveDatabase:
             from_dt=from_dt,
             to_dt=to_dt,
             include_deleted=include_deleted,
+            author_ids=author_ids,
+            author_names=author_names,
         )
         terms = _split_terms(query)
         if terms and self._fts and all(len(term) >= MIN_FTS_TERM_LEN for term in terms):
@@ -590,6 +692,8 @@ class ArchiveDatabase:
         from_dt: dt.datetime | None,
         to_dt: dt.datetime | None,
         include_deleted: bool,
+        author_ids: Sequence[int] | None = None,
+        author_names: Sequence[str] | None = None,
     ) -> tuple[str, list[object]]:
         clauses: list[str] = []
         params: list[object] = []
@@ -599,6 +703,12 @@ class ArchiveDatabase:
         if channel_names:
             clauses.append(f"m.channel_name IN ({_placeholders(channel_names)})")
             params.extend(channel_names)
+        if author_ids:
+            clauses.append(f"m.author_id IN ({_placeholders(author_ids)})")
+            params.extend(author_ids)
+        if author_names:
+            clauses.append(f"m.author_name IN ({_placeholders(author_names)})")
+            params.extend(author_names)
         if from_dt is not None:
             clauses.append("m.created_at >= ?")
             params.append(to_iso(from_dt))
@@ -702,6 +812,7 @@ class ArchiveDatabase:
         where = " AND ".join(clauses)
 
         terms = _split_terms(query)
+        rows: list[Any] | None = None
         if terms and self._fts and all(len(t) >= MIN_FTS_TERM_LEN for t in terms):
             sql = f"""
                 SELECT a.message_id, a.attachment_id, a.filename, a.content_type,
@@ -718,12 +829,16 @@ class ArchiveDatabase:
                 ORDER BY rank
                 LIMIT ? OFFSET ?
             """
-            with self._lock:
-                rows = self._conn.execute(
-                    sql,
-                    (query, *params, limit, offset),
-                ).fetchall()
-        else:
+            try:
+                with self._lock:
+                    rows = self._conn.execute(
+                        sql,
+                        (query, *params, limit, offset),
+                    ).fetchall()
+            except sqlite3.OperationalError as exc:
+                logger.info("添付 FTS クエリを LIKE に落とした: %s", exc)
+                rows = None
+        if rows is None:
             like_clauses: list[str] = []
             like_params = []
             for term in terms or [query]:

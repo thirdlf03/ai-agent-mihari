@@ -139,6 +139,19 @@ JOBS_DIRNAME = "jobs"
 INPUT_DIRNAME = "input"
 OUTPUT_DIRNAME = "output"
 META_FILENAME = "meta.json"
+#: ペット依頼の本文。input/ が空に見えるのを防ぐ。
+REQUEST_FILENAME = "request.md"
+#: Discord Forum のスレッド名が空のときの題。
+DEFAULT_JOB_TITLE = "依頼"
+
+
+def write_request_markdown(input_dir: Path, title: str, body: str) -> None:
+    """依頼本文を input/request.md に置く。添付が無くても読む先があるようにする。"""
+    heading = title.strip() or DEFAULT_JOB_TITLE
+    text = f"# {heading}\n\n{body.rstrip()}\n"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    (input_dir / REQUEST_FILENAME).write_text(text, encoding="utf-8")
+
 
 AuthHeader = Literal["X-Mihari-Token"]
 AUTH_HEADER: AuthHeader = "X-Mihari-Token"

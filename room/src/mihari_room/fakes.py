@@ -14,6 +14,7 @@ from mihari_room.contracts import (
     CreateJobRequest,
     Job,
     JobStatus,
+    write_request_markdown,
 )
 
 
@@ -30,6 +31,7 @@ class InMemoryJobStore:
         directory.mkdir(parents=True)
         (directory / INPUT_DIRNAME).mkdir()
         (directory / OUTPUT_DIRNAME).mkdir()
+        write_request_markdown(directory / INPUT_DIRNAME, request.title, request.body)
         job = Job(
             id=job_id,
             title=request.title,

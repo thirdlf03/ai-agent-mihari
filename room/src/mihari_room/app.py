@@ -22,7 +22,13 @@ from starlette.responses import Response, StreamingResponse
 from mihari_room.artifacts import PREVIEWS_DIRNAME, ArtifactPublisher
 from mihari_room.auth import verify_token
 from mihari_room.config import RoomConfig
-from mihari_room.contracts import CreateJobRequest, Job, JobSource, JobStatus
+from mihari_room.contracts import (
+    DEFAULT_JOB_TITLE,
+    CreateJobRequest,
+    Job,
+    JobSource,
+    JobStatus,
+)
 from mihari_room.discord.board import MAX_TITLE_LEN
 from mihari_room.events import EventJournal
 from mihari_room.orchestrator import RoomOrchestrator
@@ -61,15 +67,18 @@ class CancelBody(BaseModel):
 
 
 def derive_title(title: str, body: str) -> str:
-    """ペット側と同じ。空なら本文の先頭行、最大 100 文字。"""
+    """ペット側と同じ。空なら本文の先頭の中身がある行、最大 100 文字。
+
+    どちらも空なら Discord が弾く空スレ名を避けるため「依頼」。
+    """
     trimmed = title.strip()
     if trimmed:
         return trimmed[:MAX_TITLE_LEN]
-    first = ""
     for line in body.splitlines():
         first = line.strip()
-        break
-    return first[:MAX_TITLE_LEN]
+        if first:
+            return first[:MAX_TITLE_LEN]
+    return DEFAULT_JOB_TITLE
 
 
 def parse_last_event_id(raw: str | None) -> int:

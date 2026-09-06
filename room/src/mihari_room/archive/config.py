@@ -1,6 +1,7 @@
 """アーカイブの起動設定。RoomConfig（トークン要り）には依存しない。
 
-- ``MIHARI_ARCHIVE_CHANNEL_IDS`` … 収録チャンネル（カンマ区切り）。未設定なら収録 OFF。
+- 収録は既定で ON。Bot が見えるギルドのテキスト / スレッド / Forum を全部控える。
+- ``MIHARI_ARCHIVE_CHANNEL_IDS`` … 任意の絞り込み（カンマ区切り）。空なら全チャンネル。
 - ``MIHARI_ARCHIVE_ROOT`` … 省略時は ``MIHARI_ROOM_ROOT``、さらに無ければ ``~/mihari-room``。
 - 添付・URL の上限とタイムアウトも全部ここで読む。
 """
@@ -131,8 +132,8 @@ class ArchiveConfig:
 
     @property
     def enabled(self) -> bool:
-        """収録チャンネルが一つも無ければ、アーカイブ全体を無効にする。"""
-        return bool(self.channel_ids)
+        """アーカイブは常に有効。チャンネルリストが空なら見えるチャンネル全部。"""
+        return True
 
     @property
     def db_path(self) -> Path:
@@ -144,7 +145,7 @@ class ArchiveConfig:
 
     @classmethod
     def from_environment(cls, root: Path | None = None) -> ArchiveConfig:
-        """環境変数から作る。``MIHARI_ARCHIVE_CHANNEL_IDS`` が無ければ無効。"""
+        """環境変数から作る。チャンネル ID が空なら全チャンネル収録。"""
         raw = (os.environ.get("MIHARI_ARCHIVE_CHANNEL_IDS") or "").strip()
         channel_ids: tuple[int, ...] = ()
         if raw:

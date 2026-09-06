@@ -65,8 +65,10 @@ async def test_success_emits_speech_summary_and_file(tmp_path: Path) -> None:
     prompt_text = prompt_file.read_text(encoding="utf-8")
     assert "まとめ" in prompt_text
     assert "今日の分" in prompt_text
-    assert "input" in prompt_text
+    assert "input/request.md" in prompt_text
     assert "output" in prompt_text
+    assert "入力ファイルを読んで" not in prompt_text
+    assert "無いファイルを探" in prompt_text
 
 
 async def test_failure_returns_failed(tmp_path: Path) -> None:

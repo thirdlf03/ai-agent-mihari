@@ -42,18 +42,20 @@ public struct JobRequestClient: Sendable {
         self.session = session
     }
 
-    /// タイトルが空なら本文の先頭行から作る(最大 100 文字)。
-    ///
-    /// 前後の空白だけのタイトルも「空」とみなす。
+    /// タイトルが空なら本文の先頭の中身がある行から作る(最大 100 文字)。
+    /// どちらも空なら Discord が弾く空スレ名を避けるため「依頼」。
     public static func resolveTitle(title: String, body: String) -> String {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
-            return trimmed
+            return String(trimmed.prefix(100))
         }
-        let firstLine =
-            body.split(separator: "\n", omittingEmptySubsequences: false).first.map(String.init)
-            ?? ""
-        return String(firstLine.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100))
+        for line in body.split(separator: "\n", omittingEmptySubsequences: false) {
+            let candidate = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !candidate.isEmpty {
+                return String(candidate.prefix(100))
+            }
+        }
+        return "依頼"
     }
 
     /// 仕事を 1 件頼む。タイトルが空なら本文の先頭行から作る。

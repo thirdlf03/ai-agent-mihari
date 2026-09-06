@@ -22,6 +22,7 @@ from mihari_room.contracts import (
     Job,
     JobSource,
     JobStatus,
+    write_request_markdown,
 )
 
 
@@ -59,6 +60,7 @@ class FileJobStore:
         directory.mkdir(parents=True)
         (directory / INPUT_DIRNAME).mkdir(parents=True, exist_ok=True)
         (directory / OUTPUT_DIRNAME).mkdir(parents=True, exist_ok=True)
+        write_request_markdown(directory / INPUT_DIRNAME, request.title, request.body)
         meta: dict[str, Any] = {
             "id": job_id,
             "title": request.title,

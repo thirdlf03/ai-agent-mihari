@@ -228,6 +228,14 @@ def test_sse_unknown_last_event_id_replays_all(tmp_path: Path, monkeypatch) -> N
         assert [f["id"] for f in unknown] == [f["id"] for f in all_frames]
 
 
+def test_derive_title_falls_back_and_skips_blank_lines() -> None:
+    from mihari_room.app import derive_title
+
+    assert derive_title("", "") == "依頼"
+    assert derive_title("  ", "\n\n本文の本題\n続き") == "本文の本題"
+    assert derive_title("", "あ" * 150) == "あ" * 100
+
+
 def test_parse_last_event_id() -> None:
     assert parse_last_event_id(None) == 0
     assert parse_last_event_id("") == 0

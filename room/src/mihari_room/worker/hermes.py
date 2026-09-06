@@ -75,7 +75,7 @@ def filter_toolsets(toolsets: Sequence[str] | None) -> list[str] | None:
 
     None は None のまま（本家の既定解決に任せる前の段階では使わない。
     実際に agent へ渡す直前はリスト化されたものが来る）。
-    Room の bounded ``mihari_room`` toolset（discord_search/context/export）は残す。
+    Room の bounded ``mihari_room`` toolset（discord_* 検索群）は残す。
     """
     if toolsets is None:
         return None
@@ -115,7 +115,11 @@ def build_prompt(job: Job) -> str:
     return (
         f"タイトル: {job.title}\n"
         f"内容:\n{job.body}\n\n"
-        f"`{INPUT_DIRNAME}/` にある入力ファイルを読んで作業してください。\n"
+        "作業内容は上のタイトルと内容です。"
+        f"同じ文面は `{INPUT_DIRNAME}/request.md` にもあります。\n"
+        f"ペットからの依頼では `{INPUT_DIRNAME}/` に添付ファイルが無いのが普通です。"
+        "無いファイルを探したり、無いことを失敗としないでください。"
+        f"追記があるときだけ `{INPUT_DIRNAME}/followup-*.txt` を読んでください。\n"
         "調べものは `research/` に置き、要点は `research/summary.md`、"
         "出典は `research/sources.json`、生データは `research/downloads/` に置いてください。\n"
         f"成果物は `{OUTPUT_DIRNAME}/artifact/index.html` を起点に "
@@ -123,9 +127,13 @@ def build_prompt(job: Job) -> str:
         "公開物に API キー・トークン・個人情報（住所・電話・メール等）を入れないでください。\n"
         "直接デプロイや外部投稿はしないでください。公開は Room が行います。\n"
         "過去の会話は組み込みの session_search を先に使ってください。\n"
-        "Discord 横断検索が必要なときは組み込みツール `discord_search` / `discord_context` を使い、"
-        "添付の取り込みは `discord_export` を使ってください（いずれも in-process で動作し、"
-        "shell は要りません。引用には必ず `jump_url` を添えてください）。\n"
+        "Discord 横断検索が必要なときは組み込みツールを使う:"
+        " `discord_search`（本文・添付・URL、日時/チャンネル/作者で絞れる）、"
+        " `discord_recent`（最近の発言）、`discord_channels`（収録チャンネル一覧）、"
+        " `discord_message`（1件の詳細）、`discord_context`（前後）、"
+        " 添付の取り込みは `discord_export`。"
+        "いずれも in-process で messages.db を読むだけ。shell は要らない。"
+        "引用には必ず `jump_url` を添えてください。\n"
         "記憶に残したいことは memory ツールの action='add' に書いてください"
         "（承認後に保存されます。replace/remove は未対応です）。"
         "必要な説明は標準出力の最後に 1〜数行で書いてください。"

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from mihari_room.contracts import Job, JobStatus
+from mihari_room.contracts import DEFAULT_JOB_TITLE, Job, JobStatus
 
 #: スレッド名の上限（Discord Forum の名前に合わせる）。
 MAX_TITLE_LEN = 100
@@ -44,8 +44,9 @@ async def _pulse_typing(thread: Any) -> None:
 
 
 def cap_title(title: str, limit: int = MAX_TITLE_LEN) -> str:
-    """スレッド名を指定文字数で丸める。前後空白は落とす。"""
-    return title.strip()[:limit]
+    """スレッド名を指定文字数で丸める。空なら「依頼」。"""
+    capped = title.strip()[:limit]
+    return capped or DEFAULT_JOB_TITLE
 
 
 def _raw_log_len(text: str) -> int:
@@ -109,7 +110,9 @@ class DiscordForumBoard:
     async def create_thread(self, job: Job) -> int:
         """Forum 投稿を作る。タイトルは job.title（100 字丸め）。"""
         title = cap_title(job.title)
-        body = job.body
+        body = (job.body or "").strip() or "…"
+        if len(body) > MESSAGE_LIMIT:
+            body = body[: MESSAGE_LIMIT - 1] + "…"
         # discord.py: ForumChannel.create_thread(name=..., content=...) -> Thread
         created = await self._forum.create_thread(name=title, content=body)
         # バージョン差で tuple (Thread, Message) が返ることがある。
