@@ -48,9 +48,7 @@ def _format_started(tool_name: str, preview: str | None, args: dict[str, Any] | 
 
     emoji = get_tool_emoji(tool_name, default="⚙️")
     verb = get_tool_verb(tool_name)
-    prepared = prepare_tool_preview(
-        tool_name, args, fallback=preview or "", max_len=_PREVIEW_CAP
-    )
+    prepared = prepare_tool_preview(tool_name, args, fallback=preview or "", max_len=_PREVIEW_CAP)
     text = prepared.text if prepared.text else (preview or "")
     if not verb:
         return f'{emoji} {tool_name}: "{text}"' if text else f"{emoji} {tool_name}..."

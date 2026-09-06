@@ -1,0 +1,61 @@
+# mihari-room の systemd unit 例
+# コピー先: /etc/systemd/system/mihari-room.service
+#   sudo install -o root -g root -m 644 deploy/mihari-room.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now mihari-room
+#
+# 前提:
+#   - 専用ユーザー mihari（service はこのユーザーで走る）
+#   - /etc/mihari-room/env（mode 600）に実値（env.example 参照）
+#   - MIHARI_ROOM_PYTHON は room の venv の python。uv sync --locked 済み
+#   - Hermes は Discord Gateway を起動しない。AIAgent を in-process で借りるだけ
+
+[Unit]
+Description=Mihari Room daemon (Hermes in-process job room)
+Documentation=file:/usr/share/doc/mihari-room/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mihari
+Group=mihari
+EnvironmentFile=/etc/mihari-room/env
+
+# foreground の uvicorn を mihari-room CLI 経由で立てる（cli.py が同プロセスで server.serve()）。
+# ${MIHARI_ROOM_PYTHON} は EnvironmentFile の値が展開される（systemd の ExecStart 展開）。
+ExecStart=${MIHARI_ROOM_PYTHON} -m mihari_room.cli
+WorkingDirectory=${MIHARI_ROOM_ROOT}
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillMode=control-group
+# 落ちてた机（running）は起動直後に queued へ戻る（orchestrator.restore）。
+# 再起動で仕事が消えることはない。ただし中断中の Hermes ターンはそれまでの分が無駄になる。
+
+# --- 秘密を広げない ---
+# umask 0077: デーモンが作るファイルは既定 600/700。ログやバックアップに映らない。
+UMask=0077
+Environment=PYTHONUNBUFFERED=1
+
+# --- サンドボックス ---
+# Hermes を in-process で回す。つまり:
+#   - ジョブフォルダ（MIHARI_ROOM_ROOT）と HERMES_HOME に書き込む
+#   - サブプロセスで python / node / bash を exec する（ツール実行）
+#   - 外のネットワークに出る（API 呼び出し、Discord、preview 配信）
+# だから下記は付けない:
+#   ProtectSystem=strict（書き込みが死ぬ。full で /usr /boot /etc を RO にするだけ）
+#   ProtectHome=true（mihari の $HOME=/var/lib/mihari は /home 配下でないので意味が薄いが、
+#     ツールが ~/.cache を見る可能性があるため付けない）
+#   MemoryDenyWriteExecute / SystemCallFilter / RestrictAddressFamilies
+#     （ツールの exec・ソケット・JIT が死ぬ）
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

@@ -42,6 +42,8 @@ class ProgressKind(StrEnum):
     LOG = "log"
     FILE = "file"
     SUMMARY = "summary"
+    #: memory candidate proposed (approval-gated, job does not block).
+    MEMORY_CANDIDATE = "memory_candidate"
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +81,11 @@ class ProgressEvent:
     kind: ProgressKind
     text: str
     path: Path | None = None
+    #: 進捗がどの段階（調査中・ビルド中…）かを表す任意の値。
+    #: 未指定なら既存どおり振る舞う（後方互換）。
+    phase: str | None = None
+    #: どのツールから来た進捗かを表す任意の値。未指定なら None。
+    tool_name: str | None = None
 
 
 class JobStore(Protocol):

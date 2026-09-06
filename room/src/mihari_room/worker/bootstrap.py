@@ -36,9 +36,7 @@ def bootstrap_hermes() -> None:
     for python in _hermes_pythons():
         theirs = _python_version(python)
         if theirs is not None and theirs != sys.version_info[:2]:
-            skipped_versions.append(
-                f"{python} ({theirs[0]}.{theirs[1]})"
-            )
+            skipped_versions.append(f"{python} ({theirs[0]}.{theirs[1]})")
             logger.warning(
                 "Hermes の Python が部屋と違うので飛ばす: %s は %s.%s、部屋は %s.%s",
                 python,
@@ -181,9 +179,7 @@ def _is_usable_import_path(raw: str) -> bool:
     if "site-packages" in text.split("/"):
         return True
     try:
-        if path.is_dir() and (
-            (path / "run_agent.py").is_file() or (path / "hermes_cli").is_dir()
-        ):
+        if path.is_dir() and ((path / "run_agent.py").is_file() or (path / "hermes_cli").is_dir()):
             return True
     except OSError:
         return False

@@ -26,17 +26,21 @@ class RoomConfig:
     forum_channel_id: int | None = None
     discord_token: str = ""
     owner_id: str = ""
+    #: プレビューの公開 URL の土台。空の間は成果物の公開を無効にする。
+    preview_base_url: str = ""
 
     @classmethod
     def from_environment(cls) -> RoomConfig:
         token = (os.environ.get("MIHARI_ROOM_TOKEN") or "").strip()
         raw_root = os.environ.get("MIHARI_ROOM_ROOT") or (Path.home() / "mihari-room")
-        root = Path(raw_root).expanduser()
+        # 相対 root はデーモン全体の chdir（job cwd 運用）に弱いので絶対化する。
+        root = Path(raw_root).expanduser().resolve()
         host = (os.environ.get("MIHARI_ROOM_HOST") or "127.0.0.1").strip()
         port_raw = (os.environ.get("MIHARI_ROOM_PORT") or str(DEFAULT_PORT)).strip()
         forum_raw = (os.environ.get("MIHARI_FORUM_CHANNEL_ID") or "").strip()
         discord_token = (os.environ.get("DISCORD_BOT_TOKEN") or "").strip()
         owner_id = (os.environ.get("MIHARI_OWNER_ID") or "").strip()
+        preview_base_url = (os.environ.get("MIHARI_PREVIEW_BASE_URL") or "").strip()
         try:
             port = int(port_raw)
         except ValueError as error:
@@ -50,6 +54,7 @@ class RoomConfig:
             forum_channel_id=forum_channel_id,
             discord_token=discord_token,
             owner_id=owner_id,
+            preview_base_url=preview_base_url,
         )
 
     def __post_init__(self) -> None:
@@ -57,3 +62,6 @@ class RoomConfig:
             raise ValueError("MIHARI_ROOM_TOKEN は空にできない")
         if not 0 <= self.port <= 65535:
             raise ValueError(f"port が範囲外: {self.port}")
+        base = self.preview_base_url
+        if base and not (base.startswith("http://") or base.startswith("https://")):
+            raise ValueError("MIHARI_PREVIEW_BASE_URL は http(s):// で始めて")
