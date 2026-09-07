@@ -48,23 +48,39 @@ struct PetMenuEntriesTests {
         #expect(disabled.isChecked == false)
     }
 
-    @Test("「仕事を頼む…」は作業部屋のそばにあり、押すと依頼窓を開く")
+    @Test("「仕事を頼む…」は一覧と作業部屋のそばにあり、押すと依頼窓を開く")
     func jobRequestEntryOpensTheWindow() throws {
         let presenter = makePresenter()
         let actions = StubPetMenuActions()
 
         let entries = PetMenuEntries.make(actions: actions, presenter: presenter)
         let titles = titles(of: entries)
-        // 仕事を頼む… の直後に作業部屋(仕事なし)を置き、その次に Discord 設定を置く。
+        // 仕事を頼む… の直後に一覧、その次に作業部屋(仕事なし)、そして Discord 設定を置く。
         let jobIndex = try #require(titles.firstIndex(of: "仕事を頼む…"))
+        let listIndex = try #require(titles.firstIndex(of: "仕事一覧を開く…"))
         let roomIndex = try #require(titles.firstIndex(of: "作業部屋(仕事なし)"))
         let discordIndex = try #require(titles.firstIndex(of: "Discord 設定…"))
-        #expect(roomIndex == jobIndex + 1)
+        #expect(listIndex == jobIndex + 1)
+        #expect(roomIndex == listIndex + 1)
         #expect(discordIndex == roomIndex + 1)
 
         let item = try #require(findItem("仕事を頼む…", in: entries))
         item.action()
         #expect(actions.jobRequestOpens == 1)
+
+        let listItem = try #require(findItem("仕事一覧を開く…", in: entries))
+        listItem.action()
+        #expect(actions.roomListOpens == 1)
+    }
+
+    @Test("旧バックエンドでは「仕事一覧を開く…」を出さない")
+    func jobListEntryHiddenWhenUnsupported() throws {
+        let presenter = makePresenter()
+        let actions = StubPetMenuActions()
+        actions.supportsRoomJobList = false
+
+        let entries = PetMenuEntries.make(actions: actions, presenter: presenter)
+        #expect(!titles(of: entries).contains("仕事一覧を開く…"))
     }
 
     @Test("作業部屋のサブメニューに仕事の状態と追記・中断・成果物が並ぶ")

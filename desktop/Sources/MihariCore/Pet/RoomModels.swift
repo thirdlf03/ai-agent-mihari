@@ -64,6 +64,19 @@ public enum RoomEventKind: String, Sendable, Equatable, CaseIterable {
     case tempDeploy = "temp_deploy"
 }
 
+/// 詳細パネルの「履歴」に出す 1 件。監視中に流れたイベントの要約。
+public struct RoomJobHistoryEntry: Equatable, Sendable {
+    public let phase: RoomJobPhase?
+    public let kind: RoomEventKind?
+    public let text: String
+
+    public init(phase: RoomJobPhase?, kind: RoomEventKind?, text: String) {
+        self.phase = phase
+        self.kind = kind
+        self.text = text
+    }
+}
+
 /// ペットに渡す位相の変化。
 ///
 /// 位相を写した固着アニメーションと、1 回だけ挟むアニメーション、吹き出しのセリフ。
@@ -337,11 +350,16 @@ public struct RoomJobDetail: Decodable, Equatable, Sendable, Identifiable {
     public let jobID: String
     public let title: String?
     public let status: String?
+    public let source: String?
     public let threadID: Int?
     public let sessionID: String?
     public let artifacts: [RoomArtifact]
     public let tempDeploys: [RoomTempDeploy]
     public let latestEvent: RoomEvent?
+    /// 出生時刻（秒）。一覧の並びに使う。旧バックエンドでは `nil`。
+    public let createdAt: Date?
+    /// 依頼本文。一覧の検索に使う。旧バックエンドでは `nil`。
+    public let body: String?
 
     public var id: String { jobID }
 
@@ -349,31 +367,40 @@ public struct RoomJobDetail: Decodable, Equatable, Sendable, Identifiable {
         case jobID = "job_id"
         case title
         case status
+        case source
         case threadID = "thread_id"
         case sessionID = "session_id"
         case artifacts
         case tempDeploys = "temp_deploys"
         case latestEvent = "latest_event"
+        case createdAt = "created_at"
+        case body
     }
 
     public init(
         jobID: String,
         title: String? = nil,
         status: String? = nil,
+        source: String? = nil,
         threadID: Int? = nil,
         sessionID: String? = nil,
         artifacts: [RoomArtifact] = [],
         tempDeploys: [RoomTempDeploy] = [],
-        latestEvent: RoomEvent? = nil
+        latestEvent: RoomEvent? = nil,
+        createdAt: Date? = nil,
+        body: String? = nil
     ) {
         self.jobID = jobID
         self.title = title
         self.status = status
+        self.source = source
         self.threadID = threadID
         self.sessionID = sessionID
         self.artifacts = artifacts
         self.tempDeploys = tempDeploys
         self.latestEvent = latestEvent
+        self.createdAt = createdAt
+        self.body = body
     }
 
     public init(from decoder: Decoder) throws {
@@ -381,12 +408,21 @@ public struct RoomJobDetail: Decodable, Equatable, Sendable, Identifiable {
         jobID = try container.decodeIfPresent(String.self, forKey: .jobID) ?? ""
         title = try container.decodeIfPresent(String.self, forKey: .title)
         status = try container.decodeIfPresent(String.self, forKey: .status)
+        source = try container.decodeIfPresent(String.self, forKey: .source)
         threadID = try container.decodeIfPresent(Int.self, forKey: .threadID)
         sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID)
         artifacts = try container.decodeIfPresent([RoomArtifact].self, forKey: .artifacts) ?? []
         tempDeploys =
             try container.decodeIfPresent([RoomTempDeploy].self, forKey: .tempDeploys) ?? []
         latestEvent = try container.decodeIfPresent(RoomEvent.self, forKey: .latestEvent)
+        if let raw = try container.decodeIfPresent(Double.self, forKey: .createdAt) {
+            createdAt = Date(timeIntervalSince1970: raw)
+        } else if let raw = try container.decodeIfPresent(Int.self, forKey: .createdAt) {
+            createdAt = Date(timeIntervalSince1970: Double(raw))
+        } else {
+            createdAt = nil
+        }
+        body = try container.decodeIfPresent(String.self, forKey: .body)
     }
 }
 
@@ -496,6 +532,8 @@ public struct RoomJobSummary: Equatable, Sendable {
     public let tempDeploys: [RoomTempDeploy]
     /// 配信が止まっている理由。正常なら `nil`。
     public let lastError: String?
+    /// 直近の中断・承認・公開などの操作の失敗。正常なら `nil`。
+    public let operationError: String?
     /// 直近で取れた記憶の候補。承認待ちの表示と件数に使う。
     public let memoryCandidates: [RoomMemoryCandidate]
     /// 承認待ちの件数。
@@ -510,6 +548,7 @@ public struct RoomJobSummary: Equatable, Sendable {
         artifacts: [RoomArtifact] = [],
         tempDeploys: [RoomTempDeploy] = [],
         lastError: String? = nil,
+        operationError: String? = nil,
         memoryCandidates: [RoomMemoryCandidate] = []
     ) {
         self.jobID = jobID
@@ -520,6 +559,7 @@ public struct RoomJobSummary: Equatable, Sendable {
         self.artifacts = artifacts
         self.tempDeploys = tempDeploys
         self.lastError = lastError
+        self.operationError = operationError
         self.memoryCandidates = memoryCandidates
     }
 }

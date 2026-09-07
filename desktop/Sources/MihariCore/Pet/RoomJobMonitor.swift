@@ -36,6 +36,8 @@ public struct RoomJobTrackedJob: Equatable, Sendable, Identifiable {
     public let tempDeploys: [RoomTempDeploy]
     /// 配信が止まっている理由。正常なら `nil`。
     public let lastError: String?
+    /// 直近の中断・承認・公開などの操作の失敗。正常なら `nil`。
+    public let operationError: String?
     /// 直近で取れた記憶の候補。承認待ちの表示と件数に使う。
     public let memories: [RoomMemoryCandidate]
     /// 記憶の一覧を取りに行くときの失敗。正常なら `nil`。
@@ -44,8 +46,38 @@ public struct RoomJobTrackedJob: Equatable, Sendable, Identifiable {
     public let directive: RoomPhaseDirective?
     /// 承認待ちの件数。
     public var pendingMemoryCount: Int { memories.filter(\.isPending).count }
+    /// 監視中に見た出来事の履歴（新しい順）。詳細パネルの「履歴」に出す。
+    public var history: [RoomJobHistoryEntry] = []
 
     public var id: String { jobID }
+
+    public init(
+        jobID: String,
+        title: String,
+        status: RoomJobStatus,
+        phase: RoomJobPhase? = nil,
+        latestText: String? = nil,
+        artifacts: [RoomArtifact] = [],
+        tempDeploys: [RoomTempDeploy] = [],
+        lastError: String? = nil,
+        memories: [RoomMemoryCandidate] = [],
+        memoryError: String? = nil,
+        directive: RoomPhaseDirective? = nil,
+        history: [RoomJobHistoryEntry] = []
+    ) {
+        self.jobID = jobID
+        self.title = title
+        self.status = status
+        self.phase = phase
+        self.latestText = latestText
+        self.artifacts = artifacts
+        self.tempDeploys = tempDeploys
+        self.lastError = lastError
+        self.memories = memories
+        self.memoryError = memoryError
+        self.directive = directive
+        self.history = history
+    }
 
     /// メニューに出す要約。
     public var summary: RoomJobSummary {
@@ -58,6 +90,7 @@ public struct RoomJobTrackedJob: Equatable, Sendable, Identifiable {
             artifacts: artifacts,
             tempDeploys: tempDeploys,
             lastError: lastError,
+            operationError: operationError,
             memoryCandidates: memories
         )
     }
@@ -82,6 +115,8 @@ public final class RoomJobMonitor: ObservableObject {
     static let seenIDLimit = 512
     /// 重複排除の集合が上限を超えたとき、残しておく件数。
     static let seenIDTrim = 256
+    /// 詳細の「履歴」に残す出来事の上限。
+    static let historyLimit = 100
     /// バックオフの上限(秒)。これ以上は長くしない。
     nonisolated static let backoffCapSeconds: TimeInterval = 30
     /// バックオフの起点(秒)。
@@ -115,8 +150,10 @@ public final class RoomJobMonitor: ObservableObject {
         var memories: [RoomMemoryCandidate] = []
         var memoryError: String?
         var lastError: String?
+        var operationError: String?
         var lastActivityAt = Date.distantPast
         var lastDirective: RoomPhaseDirective?
+        var history: [RoomJobHistoryEntry] = []
     }
 
     public init(access: any RoomAccess, cursorStore: RoomJobCursorStoring) {
@@ -192,7 +229,10 @@ public final class RoomJobMonitor: ObservableObject {
             state.latestEventID = latest.id
             state.lastActivityAt = latest.createdAt ?? .now
             state.seenIDs.insert(latest.id)
-            state.status = Self.status(after: latest)
+            // ジョブ状態（詳細の status）を正とする。記憶の決定・候補（waiting）が
+            // 最新でも「作業中」へ巻き戻さない。
+            state.status =
+                Self.status(fromRaw: detail.status) ?? Self.status(after: latest)
             cursorStore.setCursor(latest.id, for: detail.jobID)
         }
         states[detail.jobID] = state
@@ -238,11 +278,25 @@ public final class RoomJobMonitor: ObservableObject {
     /// 仕事へ追記する。戻り値は依頼と同じ `Create` 契約の応答。
     @discardableResult
     public func followup(jobID: String, body: String, requestedBy: String? = nil) async throws -> JobRequestResponse {
-        let response = try await access.followup(jobID: jobID, body: body, requestedBy: requestedBy)
+        let response: JobRequestResponse
+        do {
+            response = try await access.followup(jobID: jobID, body: body, requestedBy: requestedBy)
+        } catch {
+            recordOperationError(jobID, error)
+            throw error
+        }
         if var state = states[jobID] {
             state.latestText = "追記: \(body)"
             state.lastActivityAt = .now
             state.lastError = nil
+            state.operationError = nil
+            // ジョブ状態を正とする。追記で待ちに戻ったら、イベントを待たずに表示を切り替える。
+            if let raw = response.status, let parsed = Self.status(fromRaw: raw) {
+                state.status = parsed
+                if let phase = Self.phase(forStatus: parsed) {
+                    state.lastPhase = phase
+                }
+            }
             states[jobID] = state
             publish()
         }
@@ -254,14 +308,21 @@ public final class RoomJobMonitor: ObservableObject {
     /// 仕事を中断する。戻り値は依頼と同じ `Create` 契約の応答。
     @discardableResult
     public func cancel(jobID: String) async throws -> JobRequestResponse {
-        let response = try await access.cancel(jobID: jobID)
+        let response: JobRequestResponse
+        do {
+            response = try await access.cancel(jobID: jobID)
+        } catch {
+            recordOperationError(jobID, error)
+            throw error
+        }
         if var state = states[jobID] {
-            state.status = .cancelled
+            state.status = Self.status(fromRaw: response.status) ?? .cancelled
             state.lastPhase = .waiting
             state.latestText = "中断した"
             state.latestEventID = nil
             state.lastActivityAt = .now
             state.lastError = nil
+            state.operationError = nil
             state.lastDirective = RoomPhaseDirective(fixedAnimation: .waiting)
             states[jobID] = state
             publish()
@@ -273,7 +334,7 @@ public final class RoomJobMonitor: ObservableObject {
     }
 
     /// 成果物を最新に引き直す。完了・失敗で配信が止まったあとに呼ぶ。
-    /// 記憶の候補も一緒に引き直す(詳細・候補イベント・決定後の更新口)。
+    /// ジョブ状態（詳細の `status`）と最新イベント・成果物・記憶の候補を引き直す。
     public func refreshArtifacts(jobID: String) async {
         do {
             let detail = try await access.detail(jobID: jobID)
@@ -281,16 +342,35 @@ public final class RoomJobMonitor: ObservableObject {
                 state.artifacts = detail.artifacts
                 state.tempDeploys = detail.tempDeploys
                 state.title = state.title ?? detail.title ?? jobID
-                if state.lastPhase == nil, let latest = detail.latestEvent {
-                    state.lastPhase = latest.phase
-                    state.latestText = latest.text
+                // ジョブ状態を正とする。記憶の決定・候補（waiting）が最新でも
+                // 「作業中」へ巻き戻さない。
+                let raw = detail.status.flatMap(Self.status(fromRaw:))
+                if let latest = detail.latestEvent {
+                    let currentID = state.latestEventID
+                    if currentID == nil || Self.isNewerEventID(latest.id, than: currentID) {
+                        if let raw { state.status = raw }
+                        state.lastPhase = latest.phase ?? state.lastPhase
+                        if !latest.text.isEmpty { state.latestText = latest.text }
+                        state.latestEventID = latest.id
+                        state.seenIDs.insert(latest.id)
+                        cursorStore.setCursor(latest.id, for: jobID)
+                    } else if let raw {
+                        // 配信が詳細より先まで進んでいるときも、状態だけは正へ寄せる。
+                        state.status = raw
+                    }
+                } else if let raw {
+                    state.status = raw
                 }
                 states[jobID] = state
                 publish()
             }
         } catch {
-            // 取れなくても配信は続けられる。エラーだけ残す。
-            setStreamError(jobID, message: describe(error))
+            if Self.isJobMissing(error) {
+                // 部屋から消えた仕事は追い続けない。詳細は「追っていない」表示になる。
+                stop(jobID: jobID)
+            } else {
+                setStreamError(jobID, message: describe(error))
+            }
         }
         await refreshMemory(jobID: jobID)
     }
@@ -316,20 +396,39 @@ public final class RoomJobMonitor: ObservableObject {
 
     /// 記憶の候補を承認する。API が成功してから一覧を引き直すまで約束しない。
     public func approveMemory(jobID: String, candidateID: String) async throws {
-        try await access.approveMemory(jobID: jobID, candidateID: candidateID)
+        do {
+            try await access.approveMemory(jobID: jobID, candidateID: candidateID)
+        } catch {
+            recordOperationError(jobID, error)
+            throw error
+        }
+        clearOperationError(jobID)
         await refreshMemory(jobID: jobID)
     }
 
     /// 記憶の候補を却下する。API が成功してから一覧を引き直すまで約束しない。
     public func rejectMemory(jobID: String, candidateID: String) async throws {
-        try await access.rejectMemory(jobID: jobID, candidateID: candidateID)
+        do {
+            try await access.rejectMemory(jobID: jobID, candidateID: candidateID)
+        } catch {
+            recordOperationError(jobID, error)
+            throw error
+        }
+        clearOperationError(jobID)
         await refreshMemory(jobID: jobID)
     }
 
     /// 旧バージョンを新しい token として再公開する。成功したら成果物を引き直す。
     @discardableResult
     public func rollbackArtifact(jobID: String, version: String) async throws -> RoomArtifact {
-        let manifest = try await access.rollbackArtifact(jobID: jobID, version: version)
+        let manifest: RoomArtifact
+        do {
+            manifest = try await access.rollbackArtifact(jobID: jobID, version: version)
+        } catch {
+            recordOperationError(jobID, error)
+            throw error
+        }
+        clearOperationError(jobID)
         await refreshArtifacts(jobID: jobID)
         return manifest
     }
@@ -433,19 +532,20 @@ public final class RoomJobMonitor: ObservableObject {
         )
         // 未知の位相は前のまま保つ。
         state.lastPhase = event.phase ?? state.lastPhase
-        // 終わった仕事は後の雑音で巻き戻さない。失敗を見落とさないため。
-        let next = Self.status(after: event)
-        if state.status == .done || state.status == .failed || state.status == .cancelled {
-            if next != .done, next != .failed, next != .cancelled {
-                // 終端のまま保つ。
-            } else {
-                state.status = next
-            }
-        } else {
-            state.status = next
-        }
+        // 終わった仕事は後の雑音で巻き戻さない（失敗を見落とさない、
+        // 記憶の決定・候補で「作業中」に戻さない）。ただし追記で本当に
+        // 再実行が始まったとき（queued）だけは終端を抜けて「待ち」へ戻す。
+        state.status = Self.advanceStatus(from: state.status, after: event)
         state.handledCount += 1
         state.lastDirective = directive
+        // 履歴は新しい順に保ち、上限で古いものを落とす。
+        state.history.insert(
+            RoomJobHistoryEntry(phase: event.phase, kind: event.kind, text: event.text),
+            at: 0
+        )
+        if state.history.count > Self.historyLimit {
+            state.history = Array(state.history.prefix(Self.historyLimit))
+        }
         states[jobID] = state
 
         publish()
@@ -499,6 +599,44 @@ public final class RoomJobMonitor: ObservableObject {
         }
     }
 
+    /// 中断・承認・公開などの操作の失敗を、その仕事の表示へ残して伝える。
+    /// 部屋から仕事が消えていたら（404）監視もやめる。
+    private func recordOperationError(_ jobID: String, _ error: Error) {
+        if var state = states[jobID] {
+            state.operationError = describe(error)
+            states[jobID] = state
+            publish()
+        }
+        if Self.isJobMissing(error) {
+            stop(jobID: jobID)
+        }
+    }
+
+    /// 直近の操作の失敗表示を消す。
+    private func clearOperationError(_ jobID: String) {
+        if var state = states[jobID], state.operationError != nil {
+            state.operationError = nil
+            states[jobID] = state
+            publish()
+        }
+    }
+
+    /// 部屋に仕事が無い（404）失敗か。対象が消えていたら追跡もやめる目印。
+    nonisolated static func isJobMissing(_ error: Error) -> Bool {
+        guard case RoomError.requestFailed(let status, _) = error else { return false }
+        return status == 404
+    }
+
+    /// 候補のイベント ID が、すでに見た ID より新しいか（同一は同じイベントの再取得なので新しい扱い）。
+    /// 部屋の ID は整数連番なので数値で比べる。文字列比較は桁で狂う。
+    nonisolated static func isNewerEventID(_ candidate: String, than seen: String?) -> Bool {
+        guard let seen else { return true }
+        if let a = Int(candidate), let b = Int(seen) {
+            return a >= b
+        }
+        return candidate == seen
+    }
+
     /// バックオフの待ち時間。`attempt` が大きくなるほど長く、上限で頭打ちになる。
     nonisolated static func backoffDelay(attempt: Int) -> Duration {
         let exponent = Double(min(max(attempt, 0), 5))
@@ -521,9 +659,11 @@ public final class RoomJobMonitor: ObservableObject {
                     artifacts: state.artifacts,
                     tempDeploys: state.tempDeploys,
                     lastError: state.lastError,
+                    operationError: state.operationError,
                     memories: state.memories,
                     memoryError: state.memoryError,
-                    directive: state.lastDirective
+                    directive: state.lastDirective,
+                    history: state.history
                 )
             }
     }
@@ -539,11 +679,18 @@ public final class RoomJobMonitor: ObservableObject {
                 artifacts: state.artifacts,
                 tempDeploys: state.tempDeploys,
                 lastError: state.lastError,
+                operationError: state.operationError,
                 memories: state.memories,
                 memoryError: state.memoryError,
-                directive: state.lastDirective
+                directive: state.lastDirective,
+                history: state.history
             )
         }
+    }
+
+    /// その仕事をいま監視しているか。詳細を開く前に拾い直す判断に使う。
+    public func isTracking(_ jobID: String) -> Bool {
+        states[jobID] != nil
     }
 
     private func describe(_ error: Error) -> String {
@@ -596,6 +743,17 @@ public final class RoomJobMonitor: ObservableObject {
         )
     }
 
+    /// ジョブ状態から位相の見た目を決める。`running` はイベント任せにする。
+    nonisolated static func phase(forStatus status: RoomJobStatus) -> RoomJobPhase? {
+        switch status {
+        case .queued: return .queued
+        case .done: return .done
+        case .failed: return .failed
+        case .cancelled: return .waiting
+        case .running: return nil
+        }
+    }
+
     /// イベントから仕事の状態を決める。
     nonisolated static func status(after event: RoomEvent) -> RoomJobStatus {
         if event.kind == .cancelled { return .cancelled }
@@ -605,6 +763,31 @@ public final class RoomJobMonitor: ObservableObject {
         case .failed: return .failed
         case nil, .waiting, .researching, .downloading, .building, .deploying, .verifying:
             return .running
+        }
+    }
+
+    /// 現在の状態とイベント 1 件から次の状態を決める。
+    ///
+    /// 終端（完了・失敗・中断）は、本当に再実行が始まったとき（queued）だけ抜けられる。
+    /// 記憶の決定・候補のような waiting イベントや、中断後に残る worker の進捗では
+    /// 巻き戻さない。ジョブ状態（詳細の status）を正とする。
+    nonisolated static func advanceStatus(from current: RoomJobStatus, after event: RoomEvent) -> RoomJobStatus {
+        let next = status(after: event)
+        switch current {
+        case .queued, .running:
+            return next
+        case .done, .failed, .cancelled:
+            if event.kind == .cancelled {
+                return .cancelled
+            }
+            if event.phase == .queued {
+                return .queued
+            }
+            if next == .done || next == .failed || next == .cancelled {
+                return next
+            }
+            // waiting や working のイベントでは終端のまま保つ。
+            return current
         }
     }
 

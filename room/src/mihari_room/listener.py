@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from mihari_room.discord.inbound import (
     ForumPostEvent,
-    is_cancel_request,
+    is_cancel_command,
     parse_forum_post,
 )
 from mihari_room.orchestrator import RoomOrchestrator
@@ -17,6 +17,31 @@ from mihari_room.queue.file_queue import CancelNotAllowed
 from mihari_room.store.file_store import JobNotFound
 
 logger = logging.getLogger("mihari_room")
+
+#: お礼・労いだけの文面。Bot への返信・メンションでも修正依頼にはしない。
+_THANKS_ONLY = frozenset(
+    {
+        "ありがとう",
+        "ありがとうございます",
+        "ありがとうございました",
+        "有難う",
+        "有難うございます",
+        "thank you",
+        "thanks",
+        "thx",
+        "感謝",
+        "感謝します",
+        "助かった",
+        "助かりました",
+        "お疲れ様",
+        "お疲れさま",
+        "おつかれさま",
+        "おつかれ様",
+    }
+)
+
+#: 文末の勢い（感嘆符・疑問符・句点）は落として比べる。
+_TRAILING_NOISE = " \t\n　!！?？。．.、,､～〜…"
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +56,21 @@ class IncomingMessage:
     parent_channel_id: int | None
     is_thread_starter: bool
     attachments: Sequence[tuple[str, bytes]] = ()
+    #: 返信先が Bot の投稿か。修正依頼（追記）を受け付ける目印。
+    replies_to_bot: bool = False
+    #: 本文に Bot へのメンションを含むか。同じく修正依頼の目印。
+    mentions_bot: bool = False
+
+
+def is_thanks_only(text: str) -> bool:
+    """お礼・労いだけで、修正依頼ではない文面か。"""
+    normalized = text.strip().casefold().rstrip(_TRAILING_NOISE).strip()
+    return normalized in _THANKS_ONLY
+
+
+def is_addressed_to_bot(message: IncomingMessage) -> bool:
+    """Bot への返信かメンションで、Bot に宛てた発言か。"""
+    return message.replies_to_bot or message.mentions_bot
 
 
 async def handle_incoming(
@@ -40,7 +80,12 @@ async def handle_incoming(
     forum_channel_id: int,
     owner_id: str | None,
 ) -> None:
-    """Forum のスレッドだけ扱う。自分の投稿は呼ぶ側で捨てる。"""
+    """Forum のスレッドだけ扱う。自分の投稿は呼ぶ側で捨てる。
+
+    既存の仕事のスレッドでは中止命令を先に判定する。修正依頼（追記）は
+    Bot への返信またはメンションが付いた発言だけ受け付け、通常会話では
+    再実行しない。
+    """
     if message.is_bot:
         return
     if message.thread_id is None or message.parent_channel_id != forum_channel_id:
@@ -50,16 +95,27 @@ async def handle_incoming(
     existing = orchestrator.store.find_by_thread_id(thread_id)
 
     if existing is not None:
-        starter_id = existing.requested_by or ""
-        if is_cancel_request(
-            message.content,
-            message.author_id,
-            thread_starter_id=starter_id,
-            owner_id=owner_id,
-        ):
+        # 中止命令は先に見る。権限が無くても「追記」扱いにはしない。
+        if is_cancel_command(message.content):
             await _cancel_or_explain(orchestrator, thread_id, by=message.author_id)
             return
-        await orchestrator.follow_up(thread_id, message.content, requested_by=message.author_id)
+        if not is_addressed_to_bot(message):
+            # 誰に宛てたわけでもない発言（相づち・世間話）では再実行しない。
+            logger.info("通常会話なので再実行しない thread=%s", thread_id)
+            return
+        if is_thanks_only(message.content):
+            # Bot への「ありがとう」もお礼であり修正依頼ではない。
+            logger.info("お礼だけなので再実行しない thread=%s", thread_id)
+            return
+        await orchestrator.follow_up(
+            thread_id,
+            message.content,
+            requested_by=message.author_id,
+            attachments=message.attachments,
+        )
+        if message.attachments:
+            names = "、".join(name for name, _ in message.attachments)
+            await _say_or_log(orchestrator, thread_id, f"資料を受け取ったよ: {names}")
         return
 
     if not message.is_thread_starter:
