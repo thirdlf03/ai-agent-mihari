@@ -76,10 +76,37 @@ struct RoomJobMonitorTests {
         }
 
         private(set) var rollbackCalls: [(String, String)] = []
+        private(set) var publishCalls: [(String, String)] = []
+        private(set) var unpublishCalls: [(String, String)] = []
+        private(set) var restoreCalls: [(String, String)] = []
 
         func rollbackArtifact(jobID: String, version: String) async throws -> RoomArtifact {
             rollbackCalls.append((jobID, version))
             return RoomArtifact(artifactID: "rolled-\(version)", version: version)
+        }
+
+        func publishArtifact(jobID: String, version: String) async throws -> RoomArtifact {
+            publishCalls.append((jobID, version))
+            return RoomArtifact(
+                artifactID: "art-\(jobID)-v\(version)",
+                version: version,
+                previewURL: URL(string: "https://preview.example.test/\(version)tok/")!,
+                visibility: "public"
+            )
+        }
+
+        func unpublishArtifact(jobID: String, version: String) async throws -> RoomArtifact {
+            unpublishCalls.append((jobID, version))
+            return RoomArtifact(
+                artifactID: "art-\(jobID)-v\(version)",
+                version: version,
+                previewURL: nil,
+                visibility: "private"
+            )
+        }
+
+        func restoreArtifact(jobID: String, version: String) async throws {
+            restoreCalls.append((jobID, version))
         }
 
         @MainActor

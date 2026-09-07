@@ -532,10 +532,24 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     }
 
     private func showRoomJobDetail(jobID: String) {
+        let title = room.jobs.first(where: { $0.jobID == jobID })?.title ?? "仕事の詳細"
         RoomJobDetailWindowController.shared.show(
             monitor: room,
             jobID: jobID,
-            onOpenArtifact: { [weak self] url in self?.openRoomArtifact(url) }
+            onOpenArtifact: { [weak self] url in self?.openRoomArtifact(url) },
+            onPreviewAuthenticated: { [weak self] previewJobID, version in
+                self?.openRoomArtifactPreview(jobID: previewJobID, version: version, title: title)
+            }
+        )
+    }
+
+    /// 非公開版の認証付きアプリ内プレビューを開く。トークンはヘッダだけに載せる。
+    public func openRoomArtifactPreview(jobID: String, version: String, title: String) {
+        RoomArtifactPreviewWindowController.shared.show(
+            client: RoomEventClient.makeFromEnvironment(),
+            jobID: jobID,
+            version: version,
+            title: "プレビュー v\(version) - \(title)"
         )
     }
 

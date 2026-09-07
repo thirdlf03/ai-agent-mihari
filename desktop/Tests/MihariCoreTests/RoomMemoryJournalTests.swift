@@ -46,6 +46,13 @@ struct RoomMemoryJournalTests {
         func rollbackArtifact(jobID: String, version: String) async throws -> RoomArtifact {
             RoomArtifact(artifactID: "rolled-\(version)", version: version)
         }
+        func publishArtifact(jobID: String, version: String) async throws -> RoomArtifact {
+            RoomArtifact(artifactID: "art-\(jobID)-v\(version)", version: version, visibility: "public")
+        }
+        func unpublishArtifact(jobID: String, version: String) async throws -> RoomArtifact {
+            RoomArtifact(artifactID: "art-\(jobID)-v\(version)", version: version, visibility: "private")
+        }
+        func restoreArtifact(jobID: String, version: String) async throws {}
         @MainActor
         func openEventStream(jobID: String, lastEventID: String?) async throws -> (RoomEventByteStream, Int) {
             guard !streamsForOpen.isEmpty else {

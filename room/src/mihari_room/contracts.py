@@ -57,6 +57,9 @@ class Job:
     thread_id: int | None = None
     requested_by: str | None = None
     parent_id: str | None = None
+    #: 依頼時の明示的な外部公開許可（Temporary Deploy の扉）。
+    #: 認証なしで外向けに出す worker 等を動かすための合図。
+    allow_external_publish: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +70,9 @@ class CreateJobRequest:
     requested_by: str | None = None
     parent_id: str | None = None
     thread_id: int | None = None
+    #: 依頼ごとの明示的な外部公開許可（既定は拒否）。
+    #: この合図がない限り Temporary Deploy の道具は渡さない。
+    allow_external_publish: bool = False
 
 
 @dataclass(frozen=True, slots=True)

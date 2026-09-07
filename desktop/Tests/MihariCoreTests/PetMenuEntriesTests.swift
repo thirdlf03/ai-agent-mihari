@@ -118,7 +118,7 @@ struct PetMenuEntriesTests {
         #expect(actions.roomArtifactURLs == [URL(string: "https://example.com/r.pdf")!])
     }
 
-    @Test("開けないプロトコルの成果物はメニューに載せない")
+    @Test("開けないプロトコルの成果物はメニューに開く項目を載せない（非公開はプレビュー案内）")
     func roomSubmenuSkipsNonHttpArtifacts() throws {
         let presenter = makePresenter()
         let actions = StubPetMenuActions()
@@ -129,7 +129,18 @@ struct PetMenuEntriesTests {
             phase: .done,
             latestText: nil,
             artifacts: [
-                RoomArtifact(artifactID: "art-1", kind: "local", previewURL: URL(string: "file:///tmp/out.pdf")!)
+                RoomArtifact(
+                    artifactID: "art-1",
+                    kind: "local",
+                    previewURL: URL(string: "file:///tmp/out.pdf")!
+                ),
+                RoomArtifact(
+                    artifactID: "art-2",
+                    version: "1",
+                    kind: "web",
+                    previewURL: nil,
+                    visibility: "private"
+                ),
             ],
             lastError: nil
         )
@@ -137,8 +148,10 @@ struct PetMenuEntriesTests {
         let entries = PetMenuEntries.make(actions: actions, presenter: presenter)
         let submenu = try #require(findSubmenu("作業部屋", in: entries))
         let titles = titles(of: submenu)
-        #expect(titles.contains("成果物なし"))
+        // 開けないプロトコル（file:）は開く項目を出さない。
         #expect(!titles.contains("成果物を開く: local"))
+        // 非公開の版はアプリ内プレビュー（詳細パネル）への案内が出る。
+        #expect(titles.contains("v1 をプレビュー（非公開）"))
     }
 
     @Test("仕事が無いときは作業部屋を押すと依頼窓を開く")
@@ -183,7 +196,7 @@ struct PetMenuEntriesTests {
         #expect(!titles(of: submenu).contains("記憶の候補: 1件待ち — 詳細で承認"))
     }
 
-    @Test("成果物は version 付きで開き、ロールバックできる")
+    @Test("成果物は version 付きで開き、再公開できる")
     func roomSubmenuShowsVersionedArtifacts() throws {
         let presenter = makePresenter()
         let actions = StubPetMenuActions()
@@ -197,13 +210,15 @@ struct PetMenuEntriesTests {
                     artifactID: "art-abc-v1",
                     version: "1",
                     kind: "web",
-                    previewURL: URL(string: "https://preview.example/a/")!
+                    previewURL: URL(string: "https://preview.example/a/")!,
+                    visibility: "public"
                 ),
                 RoomArtifact(
                     artifactID: "art-abc-v2",
                     version: "2",
                     kind: "web",
-                    previewURL: URL(string: "https://preview.example/b/")!
+                    previewURL: nil,
+                    visibility: "private"
                 ),
             ]
         )
@@ -211,12 +226,13 @@ struct PetMenuEntriesTests {
         let entries = PetMenuEntries.make(actions: actions, presenter: presenter)
         let submenu = try #require(findSubmenu("作業部屋", in: entries))
         let titles = titles(of: submenu)
+        // 公開中は開く項目、非公開はプレビュー案内。再公開（rollback の改称）は両方にある。
         #expect(titles.contains("v1 を開く"))
-        #expect(titles.contains("v2 を開く"))
-        #expect(titles.contains("v1 に戻す"))
-        #expect(titles.contains("v2 に戻す"))
+        #expect(titles.contains("v2 をプレビュー（非公開）"))
+        #expect(titles.contains("v1 を再公開"))
+        #expect(titles.contains("v2 を再公開"))
 
-        let rollback = try #require(findItem("v1 に戻す", in: submenu))
+        let rollback = try #require(findItem("v1 を再公開", in: submenu))
         rollback.action()
         #expect(actions.rolledBackVersions == ["1"])
     }

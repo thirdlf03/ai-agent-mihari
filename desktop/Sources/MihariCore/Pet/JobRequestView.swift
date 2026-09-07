@@ -180,6 +180,14 @@ public struct JobRequestView: View {
                 .buttonStyle(.borderless)
                 .font(.caption)
             }
+            Toggle("一時デプロイ（外部公開）を許す", isOn: $model.allowExternalPublish)
+                .font(.caption)
+            Text(
+                "付けると agent が cloudflare_temp_deploy（約 60 分の外部公開）を"
+                    + "使えるようになる。普通の依頼では付けなくてよい"
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
             if model.supportsAttachments {
                 attachmentsSection
             }
@@ -374,6 +382,8 @@ public struct JobRequestView: View {
 public final class JobRequestViewModel: ObservableObject {
     @Published public var title = ""
     @Published public var body = ""
+    /// 一時デプロイ（外部公開）を許すか。依頼ごとの明示許可。
+    @Published public var allowExternalPublish = false
     /// タイトルを本文から自動で作り続けるか。手入力で off になる。
     @Published public var autoTitle = true
     @Published public private(set) var attachments: [JobAttachment] = []
@@ -620,6 +630,7 @@ public final class JobRequestViewModel: ObservableObject {
                 let response = try await submitClient.submit(
                     title: title,
                     body: body,
+                    allowExternalPublish: allowExternalPublish,
                     screenshots: payloads,
                     attachments: attachments
                 )
@@ -648,6 +659,7 @@ public final class JobRequestViewModel: ObservableObject {
     private func resetAfterSubmit(clearDraft: Bool) {
         title = ""
         body = ""
+        allowExternalPublish = false
         attachments = []
         attachmentPaths = []
         screenshots = []

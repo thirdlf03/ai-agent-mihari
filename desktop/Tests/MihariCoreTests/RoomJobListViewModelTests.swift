@@ -36,6 +36,13 @@ struct RoomJobListViewModelTests {
         func rollbackArtifact(jobID: String, version: String) async throws -> RoomArtifact {
             RoomArtifact(artifactID: "a")
         }
+        func publishArtifact(jobID: String, version: String) async throws -> RoomArtifact {
+            RoomArtifact(artifactID: "a", version: version, visibility: "public")
+        }
+        func unpublishArtifact(jobID: String, version: String) async throws -> RoomArtifact {
+            RoomArtifact(artifactID: "a", version: version, visibility: "private")
+        }
+        func restoreArtifact(jobID: String, version: String) async throws {}
         func openEventStream(jobID: String, lastEventID: String?) async throws -> (RoomEventByteStream, Int) {
             (RoomEventByteStream(AsyncStream<UInt8> { $0.finish() }), 200)
         }

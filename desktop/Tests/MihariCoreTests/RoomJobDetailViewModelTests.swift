@@ -22,6 +22,7 @@ struct RoomJobDetailViewModelTests {
         private(set) var followupCalls: [String] = []
 
         func listRunning() async throws -> [RoomJobDetail] { listRunningResults }
+        func listJobs() async throws -> [RoomJobDetail] { listRunningResults }
         func detail(jobID: String) async throws -> RoomJobDetail {
             if let detailError { throw detailError }
             return detailResults[jobID] ?? RoomJobDetail(jobID: jobID)
@@ -47,6 +48,17 @@ struct RoomJobDetailViewModelTests {
         func rollbackArtifact(jobID: String, version: String) async throws -> RoomArtifact {
             if let operationError { throw operationError }
             return RoomArtifact(artifactID: "rolled-\(version)", version: version)
+        }
+        func publishArtifact(jobID: String, version: String) async throws -> RoomArtifact {
+            if let operationError { throw operationError }
+            return RoomArtifact(artifactID: "pub-\(version)", version: version, visibility: "public")
+        }
+        func unpublishArtifact(jobID: String, version: String) async throws -> RoomArtifact {
+            if let operationError { throw operationError }
+            return RoomArtifact(artifactID: "unpub-\(version)", version: version, visibility: "private")
+        }
+        func restoreArtifact(jobID: String, version: String) async throws {
+            if let operationError { throw operationError }
         }
         @MainActor
         func openEventStream(jobID: String, lastEventID: String?) async throws -> (RoomEventByteStream, Int) {

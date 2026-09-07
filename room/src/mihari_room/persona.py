@@ -194,14 +194,22 @@ def publish_failed_line() -> str:
     return "プレビューの公開に失敗したよ（仕事は完了）。作り直しが要るなら、また頼んで。"
 
 
+#: 成果物の版を置いた（新規は非公開。共有 URL は出さない）。
+def artifact_placed_private_line(version: object) -> str:
+    return (
+        f"成果物を置いたよ（v{version}・非公開）。"
+        "公開したら共有 URL を出せるよ（ペットの詳細から）。"
+    )
+
+
 #: プレビュー（恒久 URL）を置けた。
 def preview_posted_line(url: str) -> str:
     return f"プレビューを置いたよ: {url}"
 
 
-#: 一時デプロイ（workers.dev）を置けた。
+#: 一時デプロイ（workers.dev）を置けた。外部公開であることは明示する。
 def temp_deploy_posted_line(url: str) -> str:
-    return f"一時デプロイしたよ: {url}"
+    return f"一時デプロイしたよ（外部公開・約 60 分）: {url}"
 
 
 #: memory の承認待ち候補を預かった。

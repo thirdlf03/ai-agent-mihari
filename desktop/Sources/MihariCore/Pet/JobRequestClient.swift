@@ -59,6 +59,9 @@ public struct JobRequestClient: Sendable {
     }
 
     /// 仕事を 1 件頼む。タイトルが空なら本文の先頭行から作る。
+    ///
+    /// ``allowExternalPublish`` は Temporary Deploy（外部公開）の依頼ごとの明示許可。
+    /// 付けない限り部屋は agent へ外部公開の道具を渡さない。
     /// スクショ付きならバイト列（base64）を `screenshots` に載せる。
     ///
     /// 添付は上限（10 個・各 20MB・合計 50MB）と形式（PNG/JPEG/PDF/Markdown/テキスト）
@@ -67,6 +70,7 @@ public struct JobRequestClient: Sendable {
     public func submit(
         title: String,
         body: String,
+        allowExternalPublish: Bool = false,
         screenshots: [ScreenshotUploadPayload] = [],
         attachments: [JobAttachment] = []
     ) async throws -> JobRequestResponse {
@@ -84,6 +88,7 @@ public struct JobRequestClient: Sendable {
             JobRequestPayload(
                 title: Self.resolveTitle(title: title, body: body),
                 body: body,
+                allowExternalPublish: allowExternalPublish,
                 screenshots: screenshots,
                 attachments: attachments
             )
@@ -147,18 +152,21 @@ public struct JobRequestClient: Sendable {
         let title: String
         let body: String
         let source: String
+        let allowExternalPublish: Bool
         let screenshots: [ScreenshotUploadPayload]
         let attachments: [AttachmentPayload]?
 
         init(
             title: String,
             body: String,
+            allowExternalPublish: Bool = false,
             screenshots: [ScreenshotUploadPayload] = [],
             attachments: [JobAttachment] = []
         ) {
             self.title = title
             self.body = body
             self.source = "pet"
+            self.allowExternalPublish = allowExternalPublish
             self.screenshots = screenshots
             self.attachments =
                 attachments.isEmpty
@@ -172,6 +180,7 @@ public struct JobRequestClient: Sendable {
             case title
             case body
             case source
+            case allowExternalPublish = "allow_external_publish"
             case screenshots
             case attachments
         }
@@ -181,6 +190,7 @@ public struct JobRequestClient: Sendable {
             try container.encode(title, forKey: .title)
             try container.encode(body, forKey: .body)
             try container.encode(source, forKey: .source)
+            try container.encode(allowExternalPublish, forKey: .allowExternalPublish)
             if !screenshots.isEmpty {
                 try container.encode(screenshots, forKey: .screenshots)
             }
