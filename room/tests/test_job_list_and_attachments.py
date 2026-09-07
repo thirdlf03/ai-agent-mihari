@@ -88,6 +88,25 @@ def test_create_with_attachments_saves_into_input_dir(tmp_path: Path) -> None:
     assert (input_dir / "request.md").is_file()
 
 
+def test_attachment_named_request_md_does_not_overwrite_body(tmp_path: Path) -> None:
+    client, _, store, _ = _make_app(tmp_path)
+    response = client.post(
+        "/jobs",
+        json={
+            "title": "掃除",
+            "body": "本文は残して",
+            "source": "pet",
+            "attachments": [{"name": "request.md", "content_base64": _b64(b"# fake")}],
+        },
+        headers=_auth(),
+    )
+    assert response.status_code == 200
+    job_id = response.json()["job_id"]
+    input_dir = store.input_dir(job_id)
+    assert "本文は残して" in input_dir.joinpath("request.md").read_text(encoding="utf-8")
+    assert (input_dir / "attached-request.md").read_bytes() == b"# fake"
+
+
 def test_attachment_rejects_unsupported_extension(tmp_path: Path) -> None:
     client, _, _, _ = _make_app(tmp_path)
     response = client.post(

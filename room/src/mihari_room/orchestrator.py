@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from mihari_room.contracts import (
+    REQUEST_FILENAME,
     CreateJobRequest,
     ForumBoard,
     Job,
@@ -469,10 +470,26 @@ class RoomOrchestrator:
         path.write_text(body, encoding="utf-8")
 
     def _save_attachments(self, job_id: str, attachments: Sequence[tuple[str, bytes]]) -> None:
+        """資料を input/ に置く。依頼本文や追記ファイルは上書きしない。"""
         folder = self._store.input_dir(job_id)
         for name, data in attachments:
-            safe = Path(name).name or "attachment"
-            (folder / safe).write_bytes(data)
+            self._attachment_dest(folder, name).write_bytes(data)
+
+    @staticmethod
+    def _attachment_dest(folder: Path, name: str) -> Path:
+        safe = Path(name).name or "attachment"
+        if safe == REQUEST_FILENAME or safe.startswith("followup-"):
+            safe = f"attached-{safe}"
+        dest = folder / safe
+        if not dest.exists():
+            return dest
+        stem, suffix = dest.stem, dest.suffix
+        n = 2
+        while True:
+            candidate = folder / f"{stem}-{n}{suffix}"
+            if not candidate.exists():
+                return candidate
+            n += 1
 
     def _require_thread(self, job: Job) -> int:
         if job.thread_id is None:
