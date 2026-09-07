@@ -28,6 +28,10 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     public let questioner = HeadGestureQuestioner()
     /// 作業部屋の仕事の進捗。ペットの右クリック / メニューバーから操作する。
     public let room: RoomJobMonitor
+    /// いま固定して操作対象にしている仕事。一覧・詳細で選んだ仕事が入る。
+    @Published public private(set) var pinnedRoomJobID: String?
+    /// 部屋が対応している機能。旧バックエンドでは未対応操作を出さないための判断に使う。
+    @Published public private(set) var roomCapabilities: RoomCapabilities?
 
     /// 音楽を止めて聞かせる全画面オーバーレイ。
     ///
@@ -180,6 +184,12 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
             showPermissionWindow(canStart: true)
         } else {
             begin()
+        }
+
+        // 部屋の対応機能を引き、旧バックエンドなら未対応操作（仕事一覧など）を出さない。
+        Task { [weak self] in
+            let caps = await JobRequestClient.makeFromEnvironment().fetchCapabilities()
+            self?.roomCapabilities = caps
         }
     }
 
@@ -437,28 +447,63 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
 
     /// 作業部屋への仕事の依頼窓を開く。行き先とトークンは環境変数で決まる。
     ///
-    /// 依頼が通ったら、その仕事の進捗を監視し始める。
+    /// 依頼が通ったら、その仕事の進捗を監視し始め、操作対象として固定する。
     public func openJobRequest() {
         JobRequestWindowController.shared.show(
             client: JobRequestClient.makeFromEnvironment(),
             onSubmitted: { [weak self] jobID, title in
                 Task { @MainActor in
                     self?.room.attach(jobID: jobID, title: title)
+                    self?.pinRoomJob(jobID)
+                    // 成功したら下書きを消して、当該ジョブの詳細を開く（成果確認からの導線）。
+                    self?.openRoomJobDetail(jobID: jobID)
                 }
             }
         )
     }
 
+    /// 仕事一覧の窓を開く。選んだ仕事の詳細を固定して開く。
+    public func openRoomJobList() {
+        RoomJobListWindowController.shared.show(
+            access: RoomEventClient.makeFromEnvironment(),
+            monitor: room,
+            onOpenJob: { [weak self] jobID in
+                self?.openRoomJobDetail(jobID: jobID)
+            },
+            onOpenRequest: { [weak self] in
+                self?.openJobRequest()
+            }
+        )
+    }
+
+    /// 操作対象の仕事を固定する。別ジョブの進捗で追記・中断・承認の行き先が変わらないようにする。
+    public func pinRoomJob(_ jobID: String) {
+        pinnedRoomJobID = jobID
+    }
+
     // MARK: - 作業部屋の操作
+
+    /// いま操作対象にしている仕事(固定があればそれ)。無ければ `nil`。
+    private var currentRoomJobID: String? {
+        if let pinned = pinnedRoomJobID, room.isTracking(pinned) {
+            return pinned
+        }
+        return room.jobs.first?.jobID
+    }
 
     /// いま追っている仕事(直近に動いたもの)。無ければ `nil`。
     public var roomJob: RoomJobSummary? {
-        room.jobs.first?.summary
+        if let pinned = pinnedRoomJobID,
+            let job = room.jobs.first(where: { $0.jobID == pinned })
+        {
+            return job.summary
+        }
+        return room.jobs.first?.summary
     }
 
     /// 走っている仕事へ追記する窓を開く。
     public func followUpRoomJob() {
-        guard let jobID = room.jobs.first?.jobID else { return }
+        guard let jobID = currentRoomJobID else { return }
         JobRequestWindowController.shared.showFollowup(
             client: RoomEventClient.makeFromEnvironment(),
             jobID: jobID
@@ -467,20 +512,50 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
 
     /// 仕事の詳細パネルを開く。記憶の候補はここで本文と承認・却下を見せる。
     public func openRoomJobDetail() {
-        guard let jobID = room.jobs.first?.jobID else { return }
+        guard let jobID = currentRoomJobID else { return }
+        openRoomJobDetail(jobID: jobID)
+    }
+
+    /// 指定した仕事の詳細を開く。監視していなければ詳細から拾い直してから見せる。
+    public func openRoomJobDetail(jobID: String) {
+        pinRoomJob(jobID)
+        showRoomJobDetail(jobID: jobID)
+        Task { @MainActor in
+            if !room.isTracking(jobID) {
+                let client = RoomEventClient.makeFromEnvironment()
+                if let detail = try? await client.detail(jobID: jobID) {
+                    room.attach(detail: detail)
+                }
+            }
+            await room.refreshMemory(jobID: jobID)
+        }
+    }
+
+    private func showRoomJobDetail(jobID: String) {
+        let title = room.jobs.first(where: { $0.jobID == jobID })?.title ?? "仕事の詳細"
         RoomJobDetailWindowController.shared.show(
             monitor: room,
             jobID: jobID,
-            onOpenArtifact: { [weak self] url in self?.openRoomArtifact(url) }
+            onOpenArtifact: { [weak self] url in self?.openRoomArtifact(url) },
+            onPreviewAuthenticated: { [weak self] previewJobID, version in
+                self?.openRoomArtifactPreview(jobID: previewJobID, version: version, title: title)
+            }
         )
-        Task { [weak self] in
-            await self?.room.refreshMemory(jobID: jobID)
-        }
+    }
+
+    /// 非公開版の認証付きアプリ内プレビューを開く。トークンはヘッダだけに載せる。
+    public func openRoomArtifactPreview(jobID: String, version: String, title: String) {
+        RoomArtifactPreviewWindowController.shared.show(
+            client: RoomEventClient.makeFromEnvironment(),
+            jobID: jobID,
+            version: version,
+            title: "プレビュー v\(version) - \(title)"
+        )
     }
 
     /// 走っている仕事を中断する。
     public func cancelRoomJob() {
-        guard let jobID = room.jobs.first?.jobID else { return }
+        guard let jobID = currentRoomJobID else { return }
         Task {
             _ = try? await room.cancel(jobID: jobID)
         }
@@ -496,7 +571,7 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
 
     /// 作業部屋メニューから記憶の候補を承認する。
     public func approveRoomMemory(candidateID: String) {
-        guard let jobID = room.jobs.first?.jobID else { return }
+        guard let jobID = currentRoomJobID else { return }
         Task {
             try? await room.approveMemory(jobID: jobID, candidateID: candidateID)
         }
@@ -504,7 +579,7 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
 
     /// 作業部屋メニューから記憶の候補を却下する。
     public func rejectRoomMemory(candidateID: String) {
-        guard let jobID = room.jobs.first?.jobID else { return }
+        guard let jobID = currentRoomJobID else { return }
         Task {
             try? await room.rejectMemory(jobID: jobID, candidateID: candidateID)
         }
@@ -512,10 +587,15 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
 
     /// 作業部屋メニューから静的プレビューを指定バージョンへ戻す。
     public func rollbackRoomArtifact(version: String) {
-        guard let jobID = room.jobs.first?.jobID else { return }
+        guard let jobID = currentRoomJobID else { return }
         Task {
             _ = try? await room.rollbackArtifact(jobID: jobID, version: version)
         }
+    }
+
+    /// 部屋が仕事一覧を出せるか。`/capabilities` がとれるまではとりあえず出す。
+    public var supportsRoomJobList: Bool {
+        roomCapabilities?.supportsJobList ?? true
     }
 
     /// 部屋の位相変化をペットに反映する。検知と同じく、固定・一度きり・吹き出しの順で降ろす。

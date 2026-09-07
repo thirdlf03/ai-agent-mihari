@@ -85,36 +85,47 @@ def _publish(job: object, tmp_path: Path) -> dict:
 def test_publish_lists_markdown_and_pdf_documents(tmp_path: Path) -> None:
     job = _make_job(tmp_path)
     _write_docs(job, docs={"report.md": MARKDOWN, "report.pdf": b"%PDF-1.4"})
-    manifest = _publish(job, tmp_path)
+    publisher = ArtifactPublisher(root=tmp_path, preview_base_url=BASE)
+    manifest = publisher.publish(job, session_id="sess-1")
+    assert manifest is not None
 
     documents = manifest["documents"]
     assert [doc["kind"] for doc in documents] == ["markdown", "pdf"]
     names = {doc["name"] for doc in documents}
     assert names == {"report.md", "report.pdf"}
-    md = next(doc for doc in documents if doc["kind"] == "markdown")
-    assert (
-        md["preview_url"]
-        == BASE + "/" + manifest["preview_url"].rstrip("/").rsplit("/", 1)[-1] + "/report.md.html"
-    )
-    assert md["download_url"].endswith("/report.md")
-    pdf = next(doc for doc in documents if doc["kind"] == "pdf")
-    assert pdf["preview_url"].endswith("/report.pdf")
-    assert pdf["download_url"].endswith("/report.pdf")
+    # 新規の版は非公開。文書の共有 URL はまだ出さない。
+    assert manifest["visibility"] == "private"
+    assert manifest["preview_url"] is None
+    for doc in documents:
+        assert doc["preview_url"] is None
+        assert doc["download_url"] is None
 
-    token = manifest["preview_url"].rstrip("/").rsplit("/", 1)[-1]
+    token = publisher.content_token_for(job.id, 1)
     preview_dir = tmp_path / "previews" / token
     assert (preview_dir / "report.md").is_file()
     assert (preview_dir / "report.md.html").is_file()
     assert (preview_dir / "report.pdf").is_file()
     assert (preview_dir / "index.html").is_file()  # web 版は従来どおり
 
+    # 公開すると文書 URL も共有 token 経路に乗る。
+    public = publisher.publish_version(job.id, 1)
+    share = public["preview_url"].rstrip("/").rsplit("/", 1)[-1]
+    md = next(doc for doc in public["documents"] if doc["kind"] == "markdown")
+    assert md["preview_url"] == f"{BASE}/{share}/report.md.html"
+    assert md["download_url"].endswith("/report.md")
+    pdf = next(doc for doc in public["documents"] if doc["kind"] == "pdf")
+    assert pdf["preview_url"].endswith("/report.pdf")
+    assert pdf["download_url"].endswith("/report.pdf")
+
 
 def test_doc_only_publish_creates_listing_page(tmp_path: Path) -> None:
     job = _make_job(tmp_path)
     _write_docs(job, web=False, docs={"報告書.md": "# 報告\n\n本文\n"})
-    manifest = _publish(job, tmp_path)
+    publisher = ArtifactPublisher(root=tmp_path, preview_base_url=BASE)
+    manifest = publisher.publish(job)
+    assert manifest is not None
     assert manifest["documents"][0]["kind"] == "markdown"
-    token = manifest["preview_url"].rstrip("/").rsplit("/", 1)[-1]
+    token = publisher.content_token_for(job.id, 1)
     listing = (tmp_path / "previews" / token / "index.html").read_text(encoding="utf-8")
     assert "報告書.md.html" in listing
     assert "ダウンロード" in listing
@@ -124,8 +135,10 @@ def test_doc_only_publish_creates_listing_page(tmp_path: Path) -> None:
 def test_markdown_preview_renders_and_escapes_raw_html(tmp_path: Path) -> None:
     job = _make_job(tmp_path)
     _write_docs(job, docs={"report.md": MARKDOWN})
-    manifest = _publish(job, tmp_path)
-    token = manifest["preview_url"].rstrip("/").rsplit("/", 1)[-1]
+    publisher = ArtifactPublisher(root=tmp_path, preview_base_url=BASE)
+    manifest = publisher.publish(job)
+    assert manifest is not None
+    token = publisher.content_token_for(job.id, 1)
     preview = (tmp_path / "previews" / token / "report.md.html").read_text(encoding="utf-8")
     assert "<table>" in preview and "項目" in preview
     assert "print(" in preview
@@ -135,25 +148,38 @@ def test_markdown_preview_renders_and_escapes_raw_html(tmp_path: Path) -> None:
 
 
 def test_unpublished_documents_require_preview_token(tmp_path: Path) -> None:
-    """既存プレビュー許可（token 経路）に乗せる。token 無し・別 token は 404。"""
+    """非公開の文書は共有 URL では読めず、認証付き files 経路だけ見える。"""
     client, orch = _client(tmp_path)
     job = _make_job(tmp_path)
     _write_docs(job, docs={"report.md": "# 秘密\n", "report.pdf": b"%PDF-1.4"})
-    manifest = _publish(job, tmp_path)
-    token = manifest["preview_url"].rstrip("/").rsplit("/", 1)[-1]
+    publisher = ArtifactPublisher(root=tmp_path, preview_base_url=BASE)
+    manifest = publisher.publish(job)
+    assert manifest is not None
+    content_token = publisher.content_token_for(job.id, 1)
+    headers = {"X-Mihari-Token": TOKEN}
 
-    assert client.get("/previews/" + token + "/report.md").status_code == 200
-    assert client.get("/previews/" + token + "/report.md.html").status_code == 200
-    assert client.get("/previews/" + token + "/report.pdf").status_code == 200
-    # token が無い・でたらめな token → 未公開扱いで拒否。
+    # 内容フォルダの token では公開配信できない（publications 表に無い）。
+    assert client.get("/previews/" + content_token + "/report.md").status_code == 404
     assert client.get("/previews/nope/report.md").status_code == 404
     assert client.get("/previews//report.md").status_code == 404
-    # 別ジョブの token からは読めない。
+    # 非公開でも認証付き経路では読める。
+    files = f"/jobs/{job.id}/artifacts/1/files"
+    assert client.get(files + "/report.md", headers=headers).status_code == 200
+    assert client.get(files + "/report.md.html", headers=headers).status_code == 200
+    assert client.get(files + "/report.pdf", headers=headers).status_code == 200
+    assert client.get(files + "/report.md").status_code == 401
+
+    # 公開すると共有 token で読める。別ジョブの token からは読めない。
+    public = publisher.publish_version(job.id, 1)
+    share = public["preview_url"].rstrip("/").rsplit("/", 1)[-1]
+    assert client.get("/previews/" + share + "/report.md").status_code == 200
     other = _make_job(tmp_path)
     _write_docs(other, docs={"other.md": "# x\n"})
-    other_manifest = _publish(other, tmp_path)
-    other_token = other_manifest["preview_url"].rstrip("/").rsplit("/", 1)[-1]
-    assert client.get("/previews/" + other_token + "/report.md").status_code == 404
+    other_manifest = publisher.publish(other)
+    assert other_manifest is not None
+    other_public = publisher.publish_version(other.id, 1)
+    other_share = other_public["preview_url"].rstrip("/").rsplit("/", 1)[-1]
+    assert client.get("/previews/" + other_share + "/report.md").status_code == 404
     _ = orch
 
 
@@ -167,7 +193,8 @@ def test_research_and_secret_documents_are_not_published(tmp_path: Path) -> None
     manifest = _publish(job, tmp_path)
     names = {doc["name"] for doc in manifest["documents"]}
     assert names == {"report.md"}
-    token = manifest["preview_url"].rstrip("/").rsplit("/", 1)[-1]
+    publisher = ArtifactPublisher(root=tmp_path, preview_base_url=BASE)
+    token = publisher.content_token_for(job.id, 1)
     preview_dir = tmp_path / "previews" / token
     assert not (preview_dir / "research").exists()
     assert not (preview_dir / "notes.md").exists()
@@ -182,10 +209,11 @@ def test_markdown_inside_artifact_is_also_a_document(tmp_path: Path) -> None:
     (artifact / "notes.md").write_text("# メモ\n\n本文\n", encoding="utf-8")
     manifest = _publish(job, tmp_path)
     names = {doc["name"] for doc in manifest["documents"]}
-    assert names == {"artifact/notes.md"}
-    token = manifest["preview_url"].rstrip("/").rsplit("/", 1)[-1]
-    assert (tmp_path / "previews" / token / "artifact" / "notes.md").is_file()
-    assert (tmp_path / "previews" / token / "artifact" / "notes.md.html").is_file()
+    assert names == {"notes.md"}
+    publisher = ArtifactPublisher(root=tmp_path, preview_base_url=BASE)
+    token = publisher.content_token_for(job.id, 1)
+    assert (tmp_path / "previews" / token / "notes.md").is_file()
+    assert (tmp_path / "previews" / token / "notes.md.html").is_file()
 
 
 def test_markdown_related_image_rides_same_preview_permission(tmp_path: Path) -> None:
@@ -198,18 +226,24 @@ def test_markdown_related_image_rides_same_preview_permission(tmp_path: Path) ->
             "fig.png": b"\x89PNG\r\n\x1a\nfakepng",
         },
     )
-    manifest = _publish(job, tmp_path)
+    publisher = ArtifactPublisher(root=tmp_path, preview_base_url=BASE)
+    manifest = publisher.publish(job)
+    assert manifest is not None
 
     client, orch = _client(tmp_path)
-    token = manifest["preview_url"].rstrip("/").rsplit("/", 1)[-1]
-    # 画像も文書も同じ token で見える。
-    assert client.get("/previews/" + token + "/fig.png").status_code == 200
-    assert client.get("/previews/" + token + "/report.md.html").status_code == 200
-    assert "fig.png" in (tmp_path / "previews" / token / "report.md.html").read_bytes().decode()
-    # 別 token（未公開扱い）では拒否。
+    content_token = publisher.content_token_for(job.id, 1)
+    # 関連画像は文書と同じ内容フォルダに写る。非公開では共有 URL では読めない。
+    assert (tmp_path / "previews" / content_token / "fig.png").is_file()
+    assert (
+        "fig.png"
+        in (tmp_path / "previews" / content_token / "report.md.html").read_bytes().decode()
+    )
+    assert client.get("/previews/" + content_token + "/fig.png").status_code == 404
+    public = publisher.publish_version(job.id, 1)
+    share = public["preview_url"].rstrip("/").rsplit("/", 1)[-1]
+    assert client.get("/previews/" + share + "/fig.png").status_code == 200
+    assert client.get("/previews/" + share + "/report.md.html").status_code == 200
     assert client.get("/previews/nope/fig.png").status_code == 404
-    # 関連画像は文書と同じ token のファイルとして版に含まれる。
-    assert (tmp_path / "previews" / token / "fig.png").is_file()
     _ = orch
 
 
@@ -222,13 +256,17 @@ def test_rollback_republishes_documents_with_new_urls(tmp_path: Path) -> None:
     rolled = publisher.rollback(job, 1)
     assert rolled is not None
     assert rolled["version"] == 2
-    assert rolled["preview_url"] != first["preview_url"]
+    # 再公開した版も非公開で始まる。文書一覧は引き継ぐ。
+    assert rolled["visibility"] == "private"
+    assert rolled["preview_url"] is None
     documents = rolled["documents"]
     assert {doc["name"] for doc in documents} == {"report.md", "report.pdf"}
-    new_token = rolled["preview_url"].rstrip("/").rsplit("/", 1)[-1]
-    for doc in documents:
-        assert new_token in doc["preview_url"]
-        assert new_token in doc["download_url"]
+    assert publisher.content_token_for(job.id, 1) != publisher.content_token_for(job.id, 2)
+    public = publisher.publish_version(job.id, 2)
+    share = public["preview_url"].rstrip("/").rsplit("/", 1)[-1]
+    for doc in public["documents"]:
+        assert share in doc["preview_url"]
+        assert share in doc["download_url"]
 
 
 def test_publish_skips_when_no_artifact_and_no_documents(tmp_path: Path) -> None:

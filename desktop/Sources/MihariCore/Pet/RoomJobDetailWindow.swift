@@ -14,8 +14,19 @@ public final class RoomJobDetailWindowController {
     public init() {}
 
     /// 詳細パネルを出す。古い仕事の監視は `RoomJobMonitor.focus` 側で止める。
-    public func show(monitor: RoomJobMonitor, jobID: String, onOpenArtifact: @escaping (URL) -> Void) {
-        let content = RoomJobDetailView(monitor: monitor, jobID: jobID, onOpenArtifact: onOpenArtifact)
+    /// `onPreviewAuthenticated` は非公開版のアプリ内プレビュー（認証ヘッダ付き）を開く口。
+    public func show(
+        monitor: RoomJobMonitor,
+        jobID: String,
+        onOpenArtifact: @escaping (URL) -> Void,
+        onPreviewAuthenticated: @escaping (String, String) -> Void = { _, _ in }
+    ) {
+        let content = RoomJobDetailView(
+            monitor: monitor,
+            jobID: jobID,
+            onOpenArtifact: onOpenArtifact,
+            onPreviewAuthenticated: onPreviewAuthenticated
+        )
         if let window {
             window.contentViewController = NSHostingController(rootView: AnyView(content))
             window.title = "仕事の詳細"

@@ -178,6 +178,11 @@ sudo systemctl reload caddy
 - **API ホスト**: `127.0.0.1:8787` へ転送。認証は Room 自身（`X-Mihari-Token`）
 - **プレビュー ホスト**: `/previews/*` だけ Room へ reverse_proxy。他は 404
   （ディスク直出しはしない。CSP と allowlist は Room 側）
+  `/previews/<token>` は **公開中の版の共有 URL** だけを解決する
+  （`registry/publications.json` に載っている token）。非公開の版・停止した
+  URL は配下のどのファイルも 404 になる
+- **認証付きの成果物取得**（非公開版の desktop 内プレビュー）は `GET /jobs/{id}/artifacts/{v}/files/...`。
+  Room トークンはヘッダにだけ載せるため、これは**私的ネットワークの API ホスト**だけに置く
 - SSE は `flush_interval -1` でバッファしない
 - `/previews/*` 以外の静的パス（memory / research / manifests 等）を webroot に
   置かない。`/var/lib/mihari/room/previews` には公開してよい成果物だけ、
@@ -203,6 +208,9 @@ sudo systemctl reload caddy
 - Cloudflare **Temporary Accounts** はバックエンド付きの 60 分動作確認用。
   `wrangler deploy --temporary`（Wrangler 4.102.0+、未ログイン）。
   静的 HTML の恒久 URL は Tunnel のまま。VPS の `mihari` は `wrangler login` しない
+- **Temporary Deploy は外部公開**と明示して扱う。依頼時に `allow_external_publish`
+  を付けた仕事（ペットの依頼窓のチェック）にだけ agent へ道具を渡し、
+  それ以外の仕事には存在しない。版の公開・非公開切替（恒久 URL）の対象外
 
 ## 6. バックアップと復元
 
@@ -245,9 +253,11 @@ sudo systemctl start mihari-room
 注意:
 
 - `tar -xpf` は owner / mode を保存する（root で）
-- **旧 URL の継続性**: プレビュー URL は `<preview_base>/<token>/` で、token は
-  公開時のランダム値。復元は **同じ絶対パス**（`/var/lib/mihari/room/previews`）
-  に戻すこと。原点（`MIHARI_PREVIEW_BASE_URL`）を変えると新規仕事から URL が変わる
+- **旧 URL の継続性**: 共有 URL は `<preview_base>/<共有 token>/`。token は公開時に
+  発行したランダム値で、`registry/`（manifest＋`publications.json`）が token → 版の
+  対応を持つ。復元は **同じ絶対パス**に `room/` 全体（previews/ と registry/ の両方）
+  を戻すこと。`registry/` を戻さないと共有 URL の解決ができず、公開中だった
+  version の判定も巻き戻る。原点（`MIHARI_PREVIEW_BASE_URL`）を変えると新規仕事から URL が変わる
 - messages.db / state.db の owner は mihari:mihari、mode は 600 を保つ
 - WAL の三つ組で戻すときは db / -wal / -shm を**全部同時に**置く
   （`--live-consistent` のスナップショットなら 1 ファイルでよい）
@@ -259,6 +269,10 @@ sudo systemctl start mihari-room
   Tailscale プレビュー URL は通した
 - `--live-consistent` バックアップを 2026-09-07 に撮り、temp 展開で
   DB integrity と preview の sha 一致を確認した。サービス停止しての本番上書き復元は未実施
+- 版の公開・非公開切替はローカルテストで検証（公開 URL・停止後の旧 URL/関連ファイル拒否・
+  再公開の新 URL・旧データ移行・トークン非露出）。
+  実機での公開/停止の往復と、外部ネットワークから公開経路（`/previews/*`）だけが
+  到達し API（`/jobs` ほか）へ届かないことの実機確認は未実施
 - 社外向けプレビュー HTTPS は Tunnel 済み。Temporary Accounts の実機 wrangler は未接続
 
 ## 8. やらないこと

@@ -70,6 +70,7 @@ class FileJobStore:
             "thread_id": request.thread_id,
             "requested_by": request.requested_by,
             "parent_id": request.parent_id,
+            "allow_external_publish": bool(request.allow_external_publish),
             # Job にはないが、机の順番を覚えるための出生時刻
             "created_at": self._next_created_at(),
         }
@@ -87,6 +88,10 @@ class FileJobStore:
     def list_running(self) -> Sequence[Job]:
         """作業中の机。ふつうは 0 か 1 件。古い順。"""
         return tuple(job for _, job in self._iter_jobs_sorted() if job.status is JobStatus.RUNNING)
+
+    def list_all(self) -> Sequence[Job]:
+        """全仕事を新しい順に。待ち・実行中・終端・Discord 作成を全部含む。"""
+        return tuple(job for _, job in reversed(self._iter_jobs_sorted()))
 
     def find_by_thread_id(self, thread_id: int) -> Job | None:
         """Forum スレッドから仕事を探す。無ければ None。"""
@@ -256,4 +261,5 @@ class FileJobStore:
             thread_id=meta.get("thread_id"),
             requested_by=meta.get("requested_by"),
             parent_id=meta.get("parent_id"),
+            allow_external_publish=bool(meta.get("allow_external_publish", False)),
         )

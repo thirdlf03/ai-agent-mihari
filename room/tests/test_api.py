@@ -10,7 +10,14 @@ from fastapi.testclient import TestClient
 
 from mihari_room.app import _job_events_stream, create_app, parse_last_event_id
 from mihari_room.config import TOKEN_HEADER, RoomConfig
-from mihari_room.contracts import Job, JobStatus, ProgressEvent, ProgressKind
+from mihari_room.contracts import (
+    CreateJobRequest,
+    Job,
+    JobSource,
+    JobStatus,
+    ProgressEvent,
+    ProgressKind,
+)
 from mihari_room.orchestrator import RoomOrchestrator
 from mihari_room.queue.file_queue import FileJobQueue
 from mihari_room.store.file_store import FileJobStore
@@ -355,27 +362,42 @@ def test_publish_and_serve_preview_end_to_end(tmp_path: Path) -> None:
         assert len(detail["artifacts"]) == 1
         manifest = detail["artifacts"][0]
         assert manifest["version"] == 1
-        assert manifest["preview_url"].startswith("https://preview.example.com/previews/")
+        # 新しくできた版は非公開。共有 URL は出さない。
+        assert manifest["visibility"] == "private"
+        assert manifest["preview_url"] is None
+        assert manifest["view_url"] == f"/jobs/{job_id}/artifacts/1/files/"
 
-        token = manifest["preview_url"].rsplit("/", 2)[-2]
-        # 未認証で index が見える。秘密は公開されない。
-        resp = client.get(f"/previews/{token}/index.html")
+        # 非公開の内容フォルダは未認証では 404。
+        content_token = orch.publisher.content_token_for(job_id, 1)
+        assert client.get(f"/previews/{content_token}/index.html").status_code == 404
+        # 認証付き取得で index が見える。秘密は公開されない。
+        resp = client.get(f"/jobs/{job_id}/artifacts/1/files/", headers=_auth())
         assert resp.status_code == 200
         assert "できた" in resp.text
         assert resp.headers["X-Content-Type-Options"] == "nosniff"
         assert resp.headers["Referrer-Policy"] == "no-referrer"
         assert "sandbox" in resp.headers["Content-Security-Policy"]
+        assert (
+            client.get(f"/jobs/{job_id}/artifacts/1/files/secret.txt", headers=_auth()).status_code
+            == 404
+        )
+
+        # 公開すると共有 URL を発行し、未認証で見える。トラバーサル・未知 token は 404。
+        published = client.post(f"/jobs/{job_id}/artifacts/1/publish", headers=_auth()).json()
+        token = published["preview_url"].rsplit("/", 2)[-2]
+        public_page = client.get(f"/previews/{token}/index.html")
+        assert public_page.status_code == 200
+        assert "できた" in public_page.text
         assert client.get(f"/previews/{token}/secret.txt").status_code == 404
         assert client.get(f"/previews/{token}/").status_code == 200
-
-        # トラバーサル・未知 token は 404。
         assert client.get(f"/previews/{token}/../jobs").status_code == 404
         assert client.get(f"/previews/{token}/..%2Fjobs").status_code == 404
         assert client.get("/previews/nope/index.html").status_code == 404
 
-        # SSE に preview URL の summary が流れる。
+        # SSE に成果物の summary が流れる（URL は公開操作まで出さない）。
         frames = _read_sse(client, f"/jobs/{job_id}/events", _auth())
-        assert any("preview.example.com" in f["text"] for f in frames if f["kind"] == "summary")
+        summaries = [f["text"] for f in frames if f["kind"] == "summary"]
+        assert any("成果物を置いたよ" in text for text in summaries)
 
 
 def test_artifact_rollback_creates_new_token(tmp_path: Path) -> None:
@@ -407,6 +429,7 @@ def test_artifact_rollback_creates_new_token(tmp_path: Path) -> None:
         _wait_done(client, job_id, store)
         first = client.get(f"/jobs/{job_id}", headers=_auth()).json()["artifacts"][0]
         assert first["id"].endswith("-v1")
+        assert first["visibility"] == "private"
 
         client.post(f"/jobs/{job_id}/followup", json={"body": "直して"}, headers=_auth())
         _wait_done(client, job_id, store)
@@ -416,23 +439,197 @@ def test_artifact_rollback_creates_new_token(tmp_path: Path) -> None:
             f"art-{job_id}-v2",
         ]
 
+        # 「この版を再公開」= 旧版の内容を新しい非公開バージョンとして載せる。
         rolled = client.post(f"/jobs/{job_id}/artifacts/1/rollback", headers=_auth())
         assert rolled.status_code == 200
         body = rolled.json()
         assert body["version"] == 3
         assert body["id"] == f"art-{job_id}-v3"
-        assert body["preview_url"] != first["preview_url"]
-        token = body["preview_url"].rstrip("/").rsplit("/", 1)[-1]
-        page = client.get(f"/previews/{token}/")
+        assert body["sha256"] == first["sha256"]
+        assert body["visibility"] == "private"
+        assert body["preview_url"] is None
+        # 再公開した版の内容は v1 のまま（認証付きで読める）。
+        page = client.get(f"/jobs/{job_id}/artifacts/3/files/", headers=_auth())
         assert page.status_code == 200
         assert "v1" in page.text
-        old_token = first["preview_url"].rstrip("/").rsplit("/", 1)[-1]
-        assert client.get(f"/previews/{old_token}/").status_code == 200
+        # 公開するまで未認証では見えない。
+        content_token = orch.publisher.content_token_for(job_id, 3)
+        assert client.get(f"/previews/{content_token}/").status_code == 404
 
         assert (
             client.post(f"/jobs/{job_id}/artifacts/99/rollback", headers=_auth()).status_code == 404
         )
         assert client.post(f"/jobs/{job_id}/artifacts/1/rollback").status_code == 401
+
+
+def test_fix_from_old_version_uses_restored_work_files(tmp_path: Path) -> None:
+    """古い版から修正すると、その版の作業ファイルが次の実行の土台になる。"""
+    writes = {"round": 0}
+
+    async def on_start(job: Job) -> None:
+        writes["round"] += 1
+        folder = job.directory / "output" / "artifact"
+        folder.mkdir(parents=True, exist_ok=True)
+        index = folder / "index.html"
+        if writes["round"] == 1:
+            index.write_text("<h1>v1 の原稿</h1>", encoding="utf-8")
+        elif writes["round"] == 2:
+            # 追記の仕事は成果物を作り直す。
+            index.write_text("<h1>v2 の原稿</h1>", encoding="utf-8")
+        else:
+            # 修正の仕事は、いま作業フォルダにあるファイル（復元された v1）を直す。
+            current = index.read_text(encoding="utf-8")
+            index.write_text(current + "<!-- v1 から直した -->", encoding="utf-8")
+
+    worker = ScriptedWorker(
+        [ProgressEvent(kind=ProgressKind.SUMMARY, text="やった")], on_start=on_start
+    )
+    client, orch, store, _ = _make_app(
+        tmp_path,
+        start_pump=True,
+        worker=worker,
+        preview_base="https://preview.example.com/previews",
+    )
+    with client:
+        created = client.post(
+            "/jobs", json={"title": "修正", "body": "x", "source": "pet"}, headers=_auth()
+        ).json()
+        job_id = created["job_id"]
+        _wait_done(client, job_id, store)
+        # 続きで v2 を作る。
+        client.post(f"/jobs/{job_id}/followup", json={"body": "作り直して"}, headers=_auth())
+        _wait_done(client, job_id, store)
+        v1_sha = client.get(f"/jobs/{job_id}", headers=_auth()).json()["artifacts"][0]["sha256"]
+        v2_sha = client.get(f"/jobs/{job_id}", headers=_auth()).json()["artifacts"][1]["sha256"]
+        assert v1_sha != v2_sha
+
+        # 古い版（v1）へ「この版から修正」：まず作業ファイルを復元する。
+        restored = client.post(f"/jobs/{job_id}/artifacts/1/restore", headers=_auth())
+        assert restored.status_code == 200
+        # 復元直後の作業フォルダは v1 の内容。
+        artifact = store.get(job_id).directory / "output" / "artifact"
+        assert (artifact / "index.html").read_text(encoding="utf-8") == "<h1>v1 の原稿</h1>"
+
+        # 指摘を送ると、復元済みの作業ファイルを使う次の実行が始まる。
+        client.post(f"/jobs/{job_id}/followup", json={"body": "v1 から直して"}, headers=_auth())
+        _wait_done(client, job_id, store)
+        versions = client.get(f"/jobs/{job_id}", headers=_auth()).json()["artifacts"]
+        assert [a["version"] for a in versions] == [1, 2, 3]
+        # v3 は v2 の内容ではなく、復元された v1 の内容を土台に直したもの。
+        v3 = client.get(f"/jobs/{job_id}/artifacts/3/files/", headers=_auth())
+        assert "v1 の原稿" in v3.text
+        assert "<!-- v1 から直した -->" in v3.text
+        assert versions[2]["sha256"] != v2_sha
+
+
+def test_restore_is_refused_while_running(tmp_path: Path) -> None:
+    release = asyncio.Event()
+
+    async def on_start(job: Job) -> None:
+        folder = job.directory / "output" / "artifact"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "index.html").write_text("<h1>v1</h1>", encoding="utf-8")
+        await release.wait()
+
+    worker = ScriptedWorker(
+        [ProgressEvent(kind=ProgressKind.SUMMARY, text="やった")], on_start=on_start
+    )
+    client, orch, store, _ = _make_app(
+        tmp_path,
+        start_pump=True,
+        worker=worker,
+        preview_base="https://preview.example.com/previews",
+    )
+    with client:
+        created = client.post(
+            "/jobs", json={"title": "復元", "body": "x", "source": "pet"}, headers=_auth()
+        ).json()
+        job_id = created["job_id"]
+        for _ in range(30):
+            if store.get(job_id).status is JobStatus.RUNNING:
+                break
+            import time
+
+            time.sleep(0.01)
+        # 実行中は復元できない。
+        resp = client.post(f"/jobs/{job_id}/artifacts/99/restore", headers=_auth())
+        assert resp.status_code == 409
+        release.set()
+        _wait_done(client, job_id, store)
+        # 完了したら復元できる（未知の版は 404）。
+        assert (
+            client.post(f"/jobs/{job_id}/artifacts/99/restore", headers=_auth()).status_code == 404
+        )
+        restored = client.post(f"/jobs/{job_id}/artifacts/1/restore", headers=_auth())
+        assert restored.status_code == 200
+        assert restored.json()["restored_files"] == 1
+
+
+def test_external_publish_permission_is_stored_per_request(tmp_path: Path) -> None:
+    client, orch, store, _ = _make_app(tmp_path)
+    with client:
+        created = client.post(
+            "/jobs",
+            json={
+                "title": "外部公開を許す",
+                "body": "worker を一時デプロイして",
+                "source": "pet",
+                "allow_external_publish": True,
+            },
+            headers=_auth(),
+        ).json()
+        assert store.get(created["job_id"]).allow_external_publish is True
+        denied = client.post(
+            "/jobs", json={"title": "断り", "body": "x", "source": "pet"}, headers=_auth()
+        ).json()
+        assert store.get(denied["job_id"]).allow_external_publish is False
+
+
+def test_legacy_registry_migrated_and_stoppable_from_ui(tmp_path: Path) -> None:
+    """既存データの移行：旧 URL は公開状態として動き続け、UI（HTTP）から停止できる。"""
+    import json as _json
+
+    store = FileJobStore(tmp_path)
+    job = store.create(CreateJobRequest(title="旧", body="x", source=JobSource.PET))
+    registry = tmp_path / "registry"
+    registry.mkdir(parents=True, exist_ok=True)
+    legacy_url = "https://preview.example.com/previews/legacytok/"
+    (registry / f"{job.id}.json").write_text(
+        _json.dumps(
+            {
+                "artifact_id": f"art-{job.id}",
+                "versions": [
+                    {"id": f"art-{job.id}", "version": 1, "preview_url": legacy_url},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "previews" / "legacytok").mkdir(parents=True)
+    (tmp_path / "previews" / "legacytok" / "index.html").write_text(
+        "<h1>旧式</h1>", encoding="utf-8"
+    )
+
+    board = RecordingBoard()
+    worker = ScriptedWorker([ProgressEvent(kind=ProgressKind.SUMMARY, text="やった")])
+    orch = RoomOrchestrator(store, FileJobQueue(store, owner_id="owner"), board, worker)
+    config = RoomConfig(
+        token=TOKEN,
+        root=tmp_path,
+        owner_id="owner",
+        preview_base_url="https://preview.example.com/previews",
+    )
+    app = create_app(config, orch, start_pump=False)  # 起動時に移行が走る
+    client = TestClient(app)
+
+    detail = client.get(f"/jobs/{job.id}", headers=_auth()).json()
+    assert detail["artifacts"][0]["visibility"] == "public"
+    assert detail["artifacts"][0]["preview_url"] == legacy_url
+    # 旧 URL はそのまま外部から見える。
+    assert client.get("/previews/legacytok/").status_code == 200
+    # UI から停止できる（旧 URL を無効化）。
+    assert client.post(f"/jobs/{job.id}/artifacts/1/unpublish", headers=_auth()).status_code == 200
+    assert client.get("/previews/legacytok/").status_code == 404
 
 
 # --- ヘルパー ----------------------------------------------------------------

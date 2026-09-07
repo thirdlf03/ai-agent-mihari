@@ -64,6 +64,19 @@ public enum RoomEventKind: String, Sendable, Equatable, CaseIterable {
     case tempDeploy = "temp_deploy"
 }
 
+/// 詳細パネルの「履歴」に出す 1 件。監視中に流れたイベントの要約。
+public struct RoomJobHistoryEntry: Equatable, Sendable {
+    public let phase: RoomJobPhase?
+    public let kind: RoomEventKind?
+    public let text: String
+
+    public init(phase: RoomJobPhase?, kind: RoomEventKind?, text: String) {
+        self.phase = phase
+        self.kind = kind
+        self.text = text
+    }
+}
+
 /// ペットに渡す位相の変化。
 ///
 /// 位相を写した固着アニメーションと、1 回だけ挟むアニメーション、吹き出しのセリフ。
@@ -177,8 +190,13 @@ public struct RoomEvent: Decodable, Equatable, Sendable, Identifiable {
 
 /// `/jobs/{id}` の成果物。`preview_url` が開ける URL なら「開く」操作に使う。
 ///
-/// `documents` はこの版に含まれる文書（Markdown / PDF）。プレビュー・
-/// ダウンロードは既存の preview 許可（token 経路）に乗っている。
+/// 版ごとに公開状態を持つ（新規は非公開）。
+/// - 公開中: ``preview_url`` が共有 URL。ブラウザで開ける。
+/// - 非公開: ``preview_url`` は無く、``view_path``（認証付き取得の相対経路）だけがある。
+///   トークンは URL に載らず、desktop がヘッダで渡す。
+///
+/// `documents` はこの版に含まれる文書（Markdown / PDF）。公開中はプレビュー・
+/// ダウンロード URL が共有 token 経路に乗る。非公開は版の認証付きプレビューで見る。
 public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
     public let artifactID: String
     public let jobID: String?
@@ -186,6 +204,10 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
     public let version: String?
     public let kind: String?
     public let previewURL: URL?
+    /// 公開状態（"public" / "private"）。無い古い応答は preview_url の有無で判定する。
+    public let visibility: String?
+    /// 認証付き取得の相対経路。例: "/jobs/<id>/artifacts/3/files/"。URL にトークンは無い。
+    public let viewPath: String?
     public let expiresAt: Date?
     public let sha256: String?
     public let sourceIDs: [String]
@@ -199,6 +221,14 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
         return artifactID
     }
 
+    /// 外部に公開されている版か。古い部屋（公開状態の無い応答）は共有 URL の有無で見る。
+    public var isPublic: Bool {
+        if let visibility {
+            return visibility.lowercased() == "public"
+        }
+        return previewURL != nil
+    }
+
     enum CodingKeys: String, CodingKey {
         case artifactID = "id"
         case jobID = "job_id"
@@ -206,6 +236,8 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
         case version
         case kind
         case previewURL = "preview_url"
+        case visibility
+        case viewPath = "view_url"
         case expiresAt = "expires_at"
         case sha256
         case sourceIDs = "source_ids"
@@ -219,6 +251,8 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
         version: String? = nil,
         kind: String? = nil,
         previewURL: URL? = nil,
+        visibility: String? = nil,
+        viewPath: String? = nil,
         expiresAt: Date? = nil,
         sha256: String? = nil,
         sourceIDs: [String] = [],
@@ -230,6 +264,8 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
         self.version = version
         self.kind = kind
         self.previewURL = previewURL
+        self.visibility = visibility
+        self.viewPath = viewPath
         self.expiresAt = expiresAt
         self.sha256 = sha256
         self.sourceIDs = sourceIDs
@@ -244,6 +280,8 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
         version = try Self.decodeLossyString(container, key: .version)
         kind = try Self.decodeLossyString(container, key: .kind)
         previewURL = try Self.decodeURL(container, key: .previewURL)
+        visibility = try container.decodeIfPresent(String.self, forKey: .visibility)
+        viewPath = try container.decodeIfPresent(String.self, forKey: .viewPath)
         expiresAt = (try container.decodeIfPresent(String.self, forKey: .expiresAt)).flatMap(
             DaemonEvent.parseTimestamp
         )
@@ -430,11 +468,16 @@ public struct RoomJobDetail: Decodable, Equatable, Sendable, Identifiable {
     public let jobID: String
     public let title: String?
     public let status: String?
+    public let source: String?
     public let threadID: Int?
     public let sessionID: String?
     public let artifacts: [RoomArtifact]
     public let tempDeploys: [RoomTempDeploy]
     public let latestEvent: RoomEvent?
+    /// 出生時刻（秒）。一覧の並びに使う。旧バックエンドでは `nil`。
+    public let createdAt: Date?
+    /// 依頼本文。一覧の検索に使う。旧バックエンドでは `nil`。
+    public let body: String?
 
     public var id: String { jobID }
 
@@ -442,31 +485,40 @@ public struct RoomJobDetail: Decodable, Equatable, Sendable, Identifiable {
         case jobID = "job_id"
         case title
         case status
+        case source
         case threadID = "thread_id"
         case sessionID = "session_id"
         case artifacts
         case tempDeploys = "temp_deploys"
         case latestEvent = "latest_event"
+        case createdAt = "created_at"
+        case body
     }
 
     public init(
         jobID: String,
         title: String? = nil,
         status: String? = nil,
+        source: String? = nil,
         threadID: Int? = nil,
         sessionID: String? = nil,
         artifacts: [RoomArtifact] = [],
         tempDeploys: [RoomTempDeploy] = [],
-        latestEvent: RoomEvent? = nil
+        latestEvent: RoomEvent? = nil,
+        createdAt: Date? = nil,
+        body: String? = nil
     ) {
         self.jobID = jobID
         self.title = title
         self.status = status
+        self.source = source
         self.threadID = threadID
         self.sessionID = sessionID
         self.artifacts = artifacts
         self.tempDeploys = tempDeploys
         self.latestEvent = latestEvent
+        self.createdAt = createdAt
+        self.body = body
     }
 
     public init(from decoder: Decoder) throws {
@@ -474,12 +526,21 @@ public struct RoomJobDetail: Decodable, Equatable, Sendable, Identifiable {
         jobID = try container.decodeIfPresent(String.self, forKey: .jobID) ?? ""
         title = try container.decodeIfPresent(String.self, forKey: .title)
         status = try container.decodeIfPresent(String.self, forKey: .status)
+        source = try container.decodeIfPresent(String.self, forKey: .source)
         threadID = try container.decodeIfPresent(Int.self, forKey: .threadID)
         sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID)
         artifacts = try container.decodeIfPresent([RoomArtifact].self, forKey: .artifacts) ?? []
         tempDeploys =
             try container.decodeIfPresent([RoomTempDeploy].self, forKey: .tempDeploys) ?? []
         latestEvent = try container.decodeIfPresent(RoomEvent.self, forKey: .latestEvent)
+        if let raw = try container.decodeIfPresent(Double.self, forKey: .createdAt) {
+            createdAt = Date(timeIntervalSince1970: raw)
+        } else if let raw = try container.decodeIfPresent(Int.self, forKey: .createdAt) {
+            createdAt = Date(timeIntervalSince1970: Double(raw))
+        } else {
+            createdAt = nil
+        }
+        body = try container.decodeIfPresent(String.self, forKey: .body)
     }
 }
 
@@ -589,6 +650,8 @@ public struct RoomJobSummary: Equatable, Sendable {
     public let tempDeploys: [RoomTempDeploy]
     /// 配信が止まっている理由。正常なら `nil`。
     public let lastError: String?
+    /// 直近の中断・承認・公開などの操作の失敗。正常なら `nil`。
+    public let operationError: String?
     /// 直近で取れた記憶の候補。承認待ちの表示と件数に使う。
     public let memoryCandidates: [RoomMemoryCandidate]
     /// 承認待ちの件数。
@@ -603,6 +666,7 @@ public struct RoomJobSummary: Equatable, Sendable {
         artifacts: [RoomArtifact] = [],
         tempDeploys: [RoomTempDeploy] = [],
         lastError: String? = nil,
+        operationError: String? = nil,
         memoryCandidates: [RoomMemoryCandidate] = []
     ) {
         self.jobID = jobID
@@ -613,6 +677,7 @@ public struct RoomJobSummary: Equatable, Sendable {
         self.artifacts = artifacts
         self.tempDeploys = tempDeploys
         self.lastError = lastError
+        self.operationError = operationError
         self.memoryCandidates = memoryCandidates
     }
 }

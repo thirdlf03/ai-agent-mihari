@@ -169,6 +169,55 @@ struct RoomEventClientTests {
         let json = try sentJSON()
         #expect(json["body"] as? String == "もう一度")
         #expect(json["requested_by"] == nil)
+        #expect(json["screenshots"] == nil)
+    }
+
+    @Test("追記にスクショを載せるとバイト列を base64 で送る")
+    func followupWithScreenshots() async throws {
+        let client = makeClient()
+        StubURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data(#"{"job_id":"abc","status":"running"}"#.utf8))
+        }
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 9, 9, 9])
+        let attachment = ScreenshotAttachment(
+            filename: "shot.png",
+            pngData: png,
+            sourceKind: .display,
+            sourceTitle: "Built-in Retina Display (3024×1964)",
+            displayID: 1,
+            pixelWidth: 3024,
+            pixelHeight: 1964,
+            pointWidth: 1512,
+            pointHeight: 982,
+            backingScale: 2.0,
+            frameX: 0,
+            frameY: 0
+        )
+
+        _ = try await client.followup(
+            jobID: "abc",
+            body: "この画面を見て",
+            screenshots: [ScreenshotUploadPayload(attachment: attachment)]
+        )
+
+        let json = try sentJSON()
+        #expect(json["body"] as? String == "この画面を見て")
+        let shots = try #require(json["screenshots"] as? [[String: Any]])
+        #expect(shots.count == 1)
+        let shot = try #require(shots.first)
+        let base64 = try #require(shot["content_base64"] as? String)
+        #expect(Data(base64Encoded: base64) == png)
+        #expect(shot["media_type"] as? String == "image/png")
+        #expect(shot["source"] as? String == "display")
+        #expect(shot["backing_scale"] as? Double == 2.0)
+        #expect(shot["pixel_width"] as? Int == 3024)
+        #expect(shot["display_id"] as? Int == 1)
     }
 
     @Test("POST /jobs/{id}/cancel で中断を送る")

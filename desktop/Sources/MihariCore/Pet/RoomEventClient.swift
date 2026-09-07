@@ -37,6 +37,8 @@ public struct RoomEventByteStream: AsyncSequence {
 public protocol RoomAccess: Sendable {
     /// `GET /jobs/running`。いま走っている仕事の詳細一覧。
     func listRunning() async throws -> [RoomJobDetail]
+    /// `GET /jobs`。待ち・実行中・終端・Discord 作成を含む全仕事（履歴込み、新しい順）。
+    func listJobs() async throws -> [RoomJobDetail]
     /// `GET /jobs/{id}`。仕事の詳細と成果物。
     func detail(jobID: String) async throws -> RoomJobDetail
     /// `POST /jobs/{id}/followup`。仕事へ追記する。
@@ -49,8 +51,14 @@ public protocol RoomAccess: Sendable {
     func approveMemory(jobID: String, candidateID: String) async throws
     /// `POST /jobs/{id}/memory/{candidateID}/reject`。却下する。
     func rejectMemory(jobID: String, candidateID: String) async throws
-    /// `POST /jobs/{id}/artifacts/{version}/rollback`。旧版を新 token で再公開する。
+    /// `POST /jobs/{id}/artifacts/{version}/rollback`。この版を再公開（新規の非公開バージョン）する。
     func rollbackArtifact(jobID: String, version: String) async throws -> RoomArtifact
+    /// `POST /jobs/{id}/artifacts/{version}/publish`。版を公開し共有 URL を発行する。
+    func publishArtifact(jobID: String, version: String) async throws -> RoomArtifact
+    /// `POST /jobs/{id}/artifacts/{version}/unpublish`。版を非公開に戻し発行済み URL を無効化する。
+    func unpublishArtifact(jobID: String, version: String) async throws -> RoomArtifact
+    /// `POST /jobs/{id}/artifacts/{version}/restore`。その版の作業ファイルを作業フォルダへ復元する。
+    func restoreArtifact(jobID: String, version: String) async throws
     /// `GET /jobs/{id}/events`。SSE をつなぎ、バイト列と HTTP 状態を返す。
     ///
     /// `lastEventID` が渡されたら `Last-Event-ID` ヘッダで再開点を伝える。
@@ -118,6 +126,11 @@ public struct RoomEventClient: Sendable, RoomAccess {
         return response.jobs
     }
 
+    public func listJobs() async throws -> [RoomJobDetail] {
+        let response: RoomJobsResponse = try await get("jobs")
+        return response.jobs
+    }
+
     public func detail(jobID: String) async throws -> RoomJobDetail {
         try await get("jobs/\(jobID)")
     }
@@ -127,7 +140,27 @@ public struct RoomEventClient: Sendable, RoomAccess {
         body: String,
         requestedBy: String? = nil
     ) async throws -> JobRequestResponse {
-        try await post("jobs/\(jobID)/followup", body: RoomFollowupBody(body: body, requestedBy: requestedBy))
+        try await post(
+            "jobs/\(jobID)/followup",
+            body: RoomFollowupBody(body: body, requestedBy: requestedBy)
+        )
+    }
+
+    /// 仕事へスクショ付きで追記する（#22）。
+    public func followup(
+        jobID: String,
+        body: String,
+        screenshots: [ScreenshotUploadPayload],
+        requestedBy: String? = nil
+    ) async throws -> JobRequestResponse {
+        try await post(
+            "jobs/\(jobID)/followup",
+            body: RoomFollowupBody(
+                body: body,
+                requestedBy: requestedBy,
+                screenshots: screenshots
+            )
+        )
     }
 
     public func cancel(jobID: String) async throws -> JobRequestResponse {
@@ -157,6 +190,42 @@ public struct RoomEventClient: Sendable, RoomAccess {
         try await post(
             "jobs/\(jobID)/artifacts/\(version)/rollback",
             body: RoomEmptyBody()
+        )
+    }
+
+    /// 版を公開する。非公開へ戻してからの再公開は新しい共有 URL になる。
+    public func publishArtifact(jobID: String, version: String) async throws -> RoomArtifact {
+        try await post(
+            "jobs/\(jobID)/artifacts/\(version)/publish",
+            body: RoomEmptyBody()
+        )
+    }
+
+    /// 版を非公開に戻す。その版の発行済み共有 URL は無効になる。
+    public func unpublishArtifact(jobID: String, version: String) async throws -> RoomArtifact {
+        try await post(
+            "jobs/\(jobID)/artifacts/\(version)/unpublish",
+            body: RoomEmptyBody()
+        )
+    }
+
+    /// その版の作業ファイルを作業フォルダへ復元する（この版から修正の土台）。
+    public func restoreArtifact(jobID: String, version: String) async throws {
+        let _: RoomRestoreAck = try await post(
+            "jobs/\(jobID)/artifacts/\(version)/restore",
+            body: RoomEmptyBody()
+        )
+    }
+
+    /// 非公開版の認証付きプレビュー用フェッチャー。トークンはヘッダだけに載せる。
+    /// 中継先は `jobID` / `version` の files 配下に限る。
+    public func previewFetcher(jobID: String, version: String) -> RoomPreviewFetcher {
+        RoomPreviewFetcher(
+            baseURL: baseURL,
+            token: token,
+            session: session,
+            jobID: jobID,
+            version: version
         )
     }
 
@@ -235,14 +304,35 @@ public struct RoomEventClient: Sendable, RoomAccess {
         return raw.isEmpty ? "詳細なし" : raw
     }
 
-    /// `POST /jobs/{id}/followup` の本文。
+    /// `POST /jobs/{id}/followup` の本文。スクショが無いときは従来どおりの JSON。
     private struct RoomFollowupBody: Encodable {
         let body: String
         let requestedBy: String?
+        let screenshots: [ScreenshotUploadPayload]
+
+        init(
+            body: String,
+            requestedBy: String?,
+            screenshots: [ScreenshotUploadPayload] = []
+        ) {
+            self.body = body
+            self.requestedBy = requestedBy
+            self.screenshots = screenshots
+        }
 
         enum CodingKeys: String, CodingKey {
             case body
             case requestedBy = "requested_by"
+            case screenshots
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(body, forKey: .body)
+            try container.encodeIfPresent(requestedBy, forKey: .requestedBy)
+            if !screenshots.isEmpty {
+                try container.encode(screenshots, forKey: .screenshots)
+            }
         }
     }
 
@@ -254,6 +344,11 @@ public struct RoomEventClient: Sendable, RoomAccess {
 
     /// 記憶の承認・却下の応答。部屋側の形が変わっても落とさないための入れ物。
     private struct RoomMemoryDecisionAck: Decodable {
+        init(from decoder: Decoder) throws { _ = decoder }
+    }
+
+    /// 復元の応答。形は `{job_id, version, restored_files}`。中身は使わない。
+    private struct RoomRestoreAck: Decodable {
         init(from decoder: Decoder) throws { _ = decoder }
     }
 
