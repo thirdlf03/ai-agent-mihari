@@ -40,6 +40,16 @@ public struct JobRequestView: View {
             TextEditor(text: $model.body)
                 .frame(minHeight: 160)
                 .border(Color.secondary.opacity(0.3))
+            if !model.isFollowup {
+                Toggle("一時デプロイ（外部公開）を許す", isOn: $model.allowExternalPublish)
+                    .font(.caption)
+                Text(
+                    "付けると agent が cloudflare_temp_deploy（約 60 分の外部公開）を"
+                        + "使えるようになる。普通の依頼では付けなくてよい"
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
             if let notice = model.notice {
                 Text(notice)
                     .foregroundStyle(model.didSucceed ? .green : .red)
@@ -69,6 +79,8 @@ public struct JobRequestView: View {
 public final class JobRequestViewModel: ObservableObject {
     @Published public var title = ""
     @Published public var body = ""
+    /// 一時デプロイ（外部公開）を許すか。依頼ごとの明示許可。
+    @Published public var allowExternalPublish = false
     @Published public private(set) var isSubmitting = false
     @Published public private(set) var notice: String?
     @Published public private(set) var didSucceed = false
@@ -126,7 +138,11 @@ public final class JobRequestViewModel: ObservableObject {
                 notice = "追記したよ"
                 body = ""
             } else if let submitClient {
-                let response = try await submitClient.submit(title: title, body: body)
+                let response = try await submitClient.submit(
+                    title: title,
+                    body: body,
+                    allowExternalPublish: allowExternalPublish
+                )
                 didSucceed = true
                 if let jobID = response.jobID, !jobID.isEmpty {
                     notice = "頼んだよ(仕事 \(jobID))"
@@ -136,6 +152,7 @@ public final class JobRequestViewModel: ObservableObject {
                 }
                 title = ""
                 body = ""
+                allowExternalPublish = false
             }
         } catch {
             didSucceed = false

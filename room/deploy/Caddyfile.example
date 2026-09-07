@@ -12,6 +12,12 @@
 #   - プレビュー ホスト: /previews/* だけ Room へ reverse_proxy。それ以外は全部 404。
 #     API・管理・ルート一覧には触れさせない。ディスク直出し（file_server）はしない
 #     （CSP / allowlist を Room 側で掛けるため）。
+#     /previews/<token> は「公開中の版」の共有 URL だけを解決する。
+#     非公開の版の内容 token や、非公開へ戻した旧 URL はここで 404 になる
+#     （対応表は Room の registry/publications.json。公開・停止はペットの操作）。
+#   - 認証付きの成果物取得（非公開版の desktop 内プレビュー）は
+#     GET /jobs/{id}/artifacts/{v}/files/... 。Room トークンはヘッダにしか
+#     載らないので、この API 側は私的ネットワーク（Tailscale 等）だけに置く。
 #   - SSE（/jobs/{id}/events）はバッファしない（flush_interval -1）。
 #   - アクセスログにパス・トークンは出さない（下を参照）。
 #   - 社外公開は Cloudflare Tunnel（preview 専用ホスト）を推奨。

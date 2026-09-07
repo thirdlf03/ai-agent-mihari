@@ -70,6 +70,7 @@ class FileJobStore:
             "thread_id": request.thread_id,
             "requested_by": request.requested_by,
             "parent_id": request.parent_id,
+            "allow_external_publish": bool(request.allow_external_publish),
             # Job にはないが、机の順番を覚えるための出生時刻
             "created_at": self._next_created_at(),
         }
@@ -256,4 +257,5 @@ class FileJobStore:
             thread_id=meta.get("thread_id"),
             requested_by=meta.get("requested_by"),
             parent_id=meta.get("parent_id"),
+            allow_external_publish=bool(meta.get("allow_external_publish", False)),
         )

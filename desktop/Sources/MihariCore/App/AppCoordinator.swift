@@ -468,14 +468,28 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     /// 仕事の詳細パネルを開く。記憶の候補はここで本文と承認・却下を見せる。
     public func openRoomJobDetail() {
         guard let jobID = room.jobs.first?.jobID else { return }
+        let title = room.jobs.first?.title ?? "仕事の詳細"
         RoomJobDetailWindowController.shared.show(
             monitor: room,
             jobID: jobID,
-            onOpenArtifact: { [weak self] url in self?.openRoomArtifact(url) }
+            onOpenArtifact: { [weak self] url in self?.openRoomArtifact(url) },
+            onPreviewAuthenticated: { [weak self] jobID, version in
+                self?.openRoomArtifactPreview(jobID: jobID, version: version, title: title)
+            }
         )
         Task { [weak self] in
             await self?.room.refreshMemory(jobID: jobID)
         }
+    }
+
+    /// 非公開版の認証付きアプリ内プレビューを開く。トークンはヘッダだけに載せる。
+    public func openRoomArtifactPreview(jobID: String, version: String, title: String) {
+        RoomArtifactPreviewWindowController.shared.show(
+            client: RoomEventClient.makeFromEnvironment(),
+            jobID: jobID,
+            version: version,
+            title: "プレビュー v\(version) - \(title)"
+        )
     }
 
     /// 走っている仕事を中断する。

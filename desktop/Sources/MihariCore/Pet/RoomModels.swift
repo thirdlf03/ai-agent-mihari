@@ -176,6 +176,11 @@ public struct RoomEvent: Decodable, Equatable, Sendable, Identifiable {
 }
 
 /// `/jobs/{id}` の成果物。`preview_url` が開ける URL なら「開く」操作に使う。
+///
+/// 版ごとに公開状態を持つ（新規は非公開）。
+/// - 公開中: ``preview_url`` が共有 URL。ブラウザで開ける。
+/// - 非公開: ``preview_url`` は無く、``view_path``（認証付き取得の相対経路）だけがある。
+///   トークンは URL に載らず、desktop がヘッダで渡す。
 public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
     public let artifactID: String
     public let jobID: String?
@@ -183,6 +188,10 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
     public let version: String?
     public let kind: String?
     public let previewURL: URL?
+    /// 公開状態（"public" / "private"）。無い古い応答は preview_url の有無で判定する。
+    public let visibility: String?
+    /// 認証付き取得の相対経路。例: "/jobs/<id>/artifacts/3/files/"。URL にトークンは無い。
+    public let viewPath: String?
     public let expiresAt: Date?
     public let sha256: String?
     public let sourceIDs: [String]
@@ -194,6 +203,14 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
         return artifactID
     }
 
+    /// 外部に公開されている版か。古い部屋（公開状態の無い応答）は共有 URL の有無で見る。
+    public var isPublic: Bool {
+        if let visibility {
+            return visibility.lowercased() == "public"
+        }
+        return previewURL != nil
+    }
+
     enum CodingKeys: String, CodingKey {
         case artifactID = "id"
         case jobID = "job_id"
@@ -201,6 +218,8 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
         case version
         case kind
         case previewURL = "preview_url"
+        case visibility
+        case viewPath = "view_url"
         case expiresAt = "expires_at"
         case sha256
         case sourceIDs = "source_ids"
@@ -213,6 +232,8 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
         version: String? = nil,
         kind: String? = nil,
         previewURL: URL? = nil,
+        visibility: String? = nil,
+        viewPath: String? = nil,
         expiresAt: Date? = nil,
         sha256: String? = nil,
         sourceIDs: [String] = []
@@ -223,6 +244,8 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
         self.version = version
         self.kind = kind
         self.previewURL = previewURL
+        self.visibility = visibility
+        self.viewPath = viewPath
         self.expiresAt = expiresAt
         self.sha256 = sha256
         self.sourceIDs = sourceIDs
@@ -236,6 +259,8 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
         version = try Self.decodeLossyString(container, key: .version)
         kind = try Self.decodeLossyString(container, key: .kind)
         previewURL = try Self.decodeURL(container, key: .previewURL)
+        visibility = try container.decodeIfPresent(String.self, forKey: .visibility)
+        viewPath = try container.decodeIfPresent(String.self, forKey: .viewPath)
         expiresAt = (try container.decodeIfPresent(String.self, forKey: .expiresAt)).flatMap(
             DaemonEvent.parseTimestamp
         )

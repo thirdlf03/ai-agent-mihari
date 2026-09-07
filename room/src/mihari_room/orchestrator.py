@@ -426,10 +426,14 @@ class RoomOrchestrator:
                 text="プレビューの公開に失敗したよ（仕事は完了）。",
             )
             return
-        if manifest is None or not manifest.get("preview_url"):
+        if manifest is None or manifest.get("version") is None:
             return
-        url = manifest["preview_url"]
-        message = f"プレビューを置いたよ: {url}"
+        version = manifest["version"]
+        # 新しくできた版は非公開。共有 URL は owner が公開操作するまで出さない。
+        message = (
+            f"成果物を置いたよ（v{version}・非公開）。"
+            "公開したら共有 URL を出せるよ（ペットの詳細から）。"
+        )
         self._journal(job.id).append(
             job_id=job.id,
             phase=EventPhase.DONE,
@@ -439,14 +443,20 @@ class RoomOrchestrator:
         await self._board.post_summary(thread_id, message)
 
     async def _announce_temp_deploy(self, job: Job, thread_id: int) -> None:
-        """workers.dev だけ Forum に出す。claim URL は載せない。"""
+        """workers.dev だけ Forum に出す。claim URL は載せない。
+
+        Temporary Deploy は外部公開と明示したうえで、依頼時に外部公開許可
+        （allow_external_publish）が無い仕事には使わせない。
+        """
+        if not job.allow_external_publish:
+            return
         deploys = temp_deploys_for(job.directory)
         if not deploys:
             return
         url = str(deploys[-1].get("preview_url") or "").strip()
         if not url:
             return
-        message = f"一時デプロイしたよ: {url}"
+        message = f"一時デプロイしたよ（外部公開・約 60 分）: {url}"
         self._journal(job.id).append(
             job_id=job.id,
             phase=EventPhase.DONE,

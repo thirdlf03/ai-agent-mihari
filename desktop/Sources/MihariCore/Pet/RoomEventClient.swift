@@ -49,8 +49,14 @@ public protocol RoomAccess: Sendable {
     func approveMemory(jobID: String, candidateID: String) async throws
     /// `POST /jobs/{id}/memory/{candidateID}/reject`。却下する。
     func rejectMemory(jobID: String, candidateID: String) async throws
-    /// `POST /jobs/{id}/artifacts/{version}/rollback`。旧版を新 token で再公開する。
+    /// `POST /jobs/{id}/artifacts/{version}/rollback`。この版を再公開（新規の非公開バージョン）する。
     func rollbackArtifact(jobID: String, version: String) async throws -> RoomArtifact
+    /// `POST /jobs/{id}/artifacts/{version}/publish`。版を公開し共有 URL を発行する。
+    func publishArtifact(jobID: String, version: String) async throws -> RoomArtifact
+    /// `POST /jobs/{id}/artifacts/{version}/unpublish`。版を非公開に戻し発行済み URL を無効化する。
+    func unpublishArtifact(jobID: String, version: String) async throws -> RoomArtifact
+    /// `POST /jobs/{id}/artifacts/{version}/restore`。その版の作業ファイルを作業フォルダへ復元する。
+    func restoreArtifact(jobID: String, version: String) async throws
     /// `GET /jobs/{id}/events`。SSE をつなぎ、バイト列と HTTP 状態を返す。
     ///
     /// `lastEventID` が渡されたら `Last-Event-ID` ヘッダで再開点を伝える。
@@ -160,6 +166,35 @@ public struct RoomEventClient: Sendable, RoomAccess {
         )
     }
 
+    /// 版を公開する。非公開へ戻してからの再公開は新しい共有 URL になる。
+    public func publishArtifact(jobID: String, version: String) async throws -> RoomArtifact {
+        try await post(
+            "jobs/\(jobID)/artifacts/\(version)/publish",
+            body: RoomEmptyBody()
+        )
+    }
+
+    /// 版を非公開に戻す。その版の発行済み共有 URL は無効になる。
+    public func unpublishArtifact(jobID: String, version: String) async throws -> RoomArtifact {
+        try await post(
+            "jobs/\(jobID)/artifacts/\(version)/unpublish",
+            body: RoomEmptyBody()
+        )
+    }
+
+    /// その版の作業ファイルを作業フォルダへ復元する（この版から修正の土台）。
+    public func restoreArtifact(jobID: String, version: String) async throws {
+        let _: RoomRestoreAck = try await post(
+            "jobs/\(jobID)/artifacts/\(version)/restore",
+            body: RoomEmptyBody()
+        )
+    }
+
+    /// 非公開版の認証付きプレビュー用フェッチャー。トークンはヘッダだけに載せる。
+    public func previewFetcher() -> RoomPreviewFetcher {
+        RoomPreviewFetcher(baseURL: baseURL, token: token, session: session)
+    }
+
     /// SSE をつなぎ、バイト列と応答を返す。
     @MainActor
     public func openEventStream(
@@ -254,6 +289,11 @@ public struct RoomEventClient: Sendable, RoomAccess {
 
     /// 記憶の承認・却下の応答。部屋側の形が変わっても落とさないための入れ物。
     private struct RoomMemoryDecisionAck: Decodable {
+        init(from decoder: Decoder) throws { _ = decoder }
+    }
+
+    /// 復元の応答。形は `{job_id, version, restored_files}`。中身は使わない。
+    private struct RoomRestoreAck: Decodable {
         init(from decoder: Decoder) throws { _ = decoder }
     }
 

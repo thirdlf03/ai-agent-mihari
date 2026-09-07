@@ -973,7 +973,10 @@ class InProcessHermes:
                     try:
                         from mihari_room.worker.wrangler_temp import register_temp_deploy_tool
 
-                        restore_temp_deploy = register_temp_deploy_tool(job)
+                        # Temporary Deploy は外部公開。依頼時の明示許可
+                        # （allow_external_publish）がある仕事にだけ道具を渡す。
+                        if getattr(job, "allow_external_publish", False):
+                            restore_temp_deploy = register_temp_deploy_tool(job)
                     except Exception:
                         logger.debug("temp deploy tool register failed", exc_info=True)
                     try:

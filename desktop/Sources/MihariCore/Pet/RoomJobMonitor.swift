@@ -334,6 +334,29 @@ public final class RoomJobMonitor: ObservableObject {
         return manifest
     }
 
+    /// 版を公開する（共有 URL を発行）。成功したら成果物を引き直す。
+    @discardableResult
+    public func publishArtifact(jobID: String, version: String) async throws -> RoomArtifact {
+        let manifest = try await access.publishArtifact(jobID: jobID, version: version)
+        await refreshArtifacts(jobID: jobID)
+        return manifest
+    }
+
+    /// 版を非公開に戻す（発行済み URL を無効化）。成功したら成果物を引き直す。
+    @discardableResult
+    public func unpublishArtifact(jobID: String, version: String) async throws -> RoomArtifact {
+        let manifest = try await access.unpublishArtifact(jobID: jobID, version: version)
+        await refreshArtifacts(jobID: jobID)
+        return manifest
+    }
+
+    /// その版の作業ファイルを作業フォルダへ復元する。
+    /// 実行中の仕事は部屋側が 409 で断る。成功したら成果物を引き直す。
+    public func restoreArtifact(jobID: String, version: String) async throws {
+        try await access.restoreArtifact(jobID: jobID, version: version)
+        await refreshArtifacts(jobID: jobID)
+    }
+
     // MARK: - 監視の中身
 
     private func startStream(jobID: String) {

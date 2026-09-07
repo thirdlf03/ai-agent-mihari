@@ -49,17 +49,21 @@ Discord (Mihari Bot) ────> forum 入出力（本家 Gateway は使わな
 | Method / Path | 状態 | 説明 |
 | --- | --- | --- |
 | `GET /health` | 実装済み | `{"status":"ok"}` |
-| `POST /jobs` | 実装済み | 仕事を投入。body: `{title?, body, source, requested_by?}` → `{job_id, thread_id, status}`。Forum 作成失敗時は `503`（phantom queued を残さない） |
+| `POST /jobs` | 実装済み | 仕事を投入。body: `{title?, body, source, requested_by?, allow_external_publish?}` → `{job_id, thread_id, status}`。`allow_external_publish` は Temporary Deploy（外部公開）の明示許可。無い限り agent に外部公開の道具を渡さない。Forum 作成失敗時は `503`（phantom queued を残さない） |
 | `POST /jobs/{id}/cancel` | 実装済み | body: `{by?}`。by 無しなら owner。頼んだ人か `MIHARI_OWNER_ID` だけ。`404` / `403`。実行中は worker thread に interrupt を届け、終了を待ってから次へ |
 | `POST /jobs/{id}/followup` | 実装済み | 同じジョブの続き（input/ に追記、空いたら再実行、実行中は終了後に再回し）。cancel 後の中断 thread 生存中は終了後に再開（生存中の再開はしない） |
 | `GET /jobs/running` | 実装済み | `{"jobs": [...]}`。今動いている 1 件 |
-| `GET /jobs/{id}` | 実装済み | 単体。`artifacts`（version ごとの一意 `id`）と `temp_deploys`（claim URL 含む。認証済み）。`404` は無い仕事 |
+| `GET /jobs/{id}` | 実装済み | 単体。`artifacts`（版ごとの一意 `id`・`visibility`・`preview_url`・`view_url`）と `temp_deploys`（claim URL 含む。認証済み）。`404` は無い仕事 |
 | `GET /jobs/{id}/events` | 実装済み | SSE。`Last-Event-ID` で再開。イベント `id` は整数連番（desktop は整数 OR 文字列どちらも decode すること）。未知・壊れた cursor は先頭から全件（取りこぼさない）。完了後 5 秒で閉じるので desktop は張り直して cursor から再開すること |
 | `GET /jobs/{id}/memory` | 実装済み | `{"candidates": [{id, target, content, status, created_at}]}`。`target` は `MEMORY.md` / `USER.md` |
 | `POST /jobs/{id}/memory/{candidate_id}/approve` | 実装済み | 候補を確定（owner 明示承認）。承認者は**サーバ設定の owner**（body の身分は使わない）。`MIHARI_OWNER_ID` 未設定は `403`。冪等（2 回目は同値 200）。済み逆遷移は `409`、未知候補は `404` |
 | `POST /jobs/{id}/memory/{candidate_id}/reject` | 実装済み | 候補を捨てる（home に書かない）。冪等・状態遷移は approve と対称 |
-| `POST /jobs/{id}/artifacts/{version}/rollback` | 実装済み | 旧 version の静的プレビューを新しい token として再公開（owner のみ）。過去 token は残す。`404` は無い仕事・無い version |
-| `GET /previews/{token}/...` | 実装済み | 未認証・安全ヘッダ付きの成果物配信（allowlist 拡張子のみ、symlink/隠しファイル/メタデータ経路は 404） |
+| `POST /jobs/{id}/artifacts/{version}/publish` | 実装済み | 版を公開し共有 URL を発行。非公開へ戻してからの再公開は新しい token の URL。既に公開中は `409` |
+| `POST /jobs/{id}/artifacts/{version}/unpublish` | 実装済み | 版を非公開に戻し、その版の発行済み URL をすべて無効化（どのファイルも 404）。既に非公開なら 200（何もしない） |
+| `POST /jobs/{id}/artifacts/{version}/rollback` | 実装済み | 「この版を再公開」。旧版の内容を新しい**非公開**バージョンとして載せる（公開状態は引き継がない）。`404` は無い仕事・無い version |
+| `POST /jobs/{id}/artifacts/{version}/restore` | 実装済み | 「この版から修正」の土台。その版の作業ファイルを `output/artifact/` へ復元。実行中は `409`。復元したファイルは次の実行がそのまま使う |
+| `GET /jobs/{id}/artifacts/{version}/files/...` | 実装済み | 認証付き（`X-Mihari-Token`）の成果物取得。非公開でも desktop 内プレビューが読める。URL に Room トークンは載らない。`view_url` はこの相対経路 |
+| `GET /previews/{token}/...` | 実装済み | 未認証・安全ヘッダ付きの**公開中**の版だけを配信（publications 表に載っている token のみ。停止した URL とその関連ファイルは全部 404）。allowlist 拡張子のみ、symlink/隠しファイル/メタデータ経路は 404 |
 
 ステータスは `queued / running / done / failed / cancelled`
 （Forum タグ: 待ち / 作業中 / 完了 / 失敗 / 中断）。
@@ -104,16 +108,23 @@ desktop は詳細 refresh 時に `GET .../memory` を引き直すこと。
 
 ## プレビューとアーカイブ
 
-- **プレビュー**: `$MIHARI_ROOM_ROOT/previews/<random-token>/...` を
-  **API とは別ホスト**（`MIHARI_PREVIEW_BASE_URL`）から静的配信する想定だが、
-  MVP の配信実装自体は同一プロセスの `GET /previews/*`（未認証・CSP 付き）
+- **プレビュー**: `$MIHARI_ROOM_ROOT/previews/<内容 token>/...` に不変スナップショットを置き、
+  **API とは別ホスト**（`MIHARI_PREVIEW_BASE_URL`）から静的配信する想定。
+  配信は同一プロセスの `GET /previews/*`（未認証・CSP 付き）
+  - 公開状態は**版ごと**に持つ。新規の版は非公開で、共有 URL は発行されない
+  - 非公開は認証付き `GET /jobs/{id}/artifacts/{version}/files/...` で見られる
+    （desktop 内プレビュー。Room トークンはヘッダだけに載せ、URL・HTML に埋めない）
+  - 公開にすると発行ごとに新しい共有 token の URL になる。非公開へ戻すと
+    その版の発行済み URL（配下の HTML・画像・CSS・PDF すべて）を無効化し、
+    再公開は新しい URL。プレビュー配信は `no-store` でキャッシュに残さない
+  - 旧形式（公開状態なし）の URL は公開状態として移行し、UI（HTTP）から停止できる。
+    新しい版へ公開状態は引き継がない
   - 公開するのは `output/artifact/` の allowlist 拡張子のみ
     （`index.html` 必須、manifest・秘密名・research・非 web は写さない）。
     Forum へ通知するのも安全な成果物だけ
-  - manifest（id/version/preview_url/sha256/source_ids/session_id）は
-    `root/registry/` に置き、HTTP では出さない。sha256 は決定的
-    （相対パス昇順）。version は単調増加、各 version の `id` は
-    `art-<job>-v<n>` で一意（古い registry も読み出し時に付け直す）
+  - manifest（id/version/public/private 状態・sha256/source_ids/session_id）は
+    `root/registry/` に置き、HTTP では出さない。共有 token → 版の対応も
+    `root/registry/publications.json` に置く
   - CSP は `sandbox allow-scripts`（`allow-same-origin` なしの opaque origin）。
     相対 CSS/画像/フォント＋同一フォルダの `.js` のみ。HTML インライン script と
     CDN は `script-src 'self'` で拒否する。`connect-src 'none'` で
@@ -121,7 +132,12 @@ desktop は詳細 refresh 時に `GET .../memory` を引き直すこと。
   - preview ホストは `/previews/*` 以外を 404（API に触れない）
   - webroot に memory / research / manifests は置かない
   - 本番は Tailscale 原点が入っている。社外公開は Cloudflare Tunnel で
-    **プレビュー専用ホスト**だけを出す（`room/deploy/README.md`）
+    **プレビュー専用ホスト**だけを出す（`room/deploy/README.md`）。
+    API（`/jobs` ほか）は私的ネットワークのまま
+- **一時デプロイ（Temporary Deploy）**: `wrangler deploy --temporary`。
+  外部公開と明示したうえで、**依頼ごとの明示許可**（`POST /jobs` の
+  `allow_external_publish: true`）がある仕事にだけ道具を渡す。
+  本番 URL の公開・非公開切替（上）の対象外
 - **アーカイブ**: 既定で Bot が見えるテキスト / スレッド / Forum を全部収録する。
   `MIHARI_ARCHIVE_CHANNEL_IDS` は任意の絞り込み（空なら全チャンネル）。
   起動時に各チャンネルの最終収録以降を history で埋め直す。
@@ -154,6 +170,9 @@ Python は **3.11**（room と Hermes を同じ interpreter で回す。3.14 の
 - [x] bounded Discord 検索ツール（search / recent / channels / message / context /
   export。seeded メッセージ＋PDF、sources.json/summary.md、実 registry 登録検証）
 - [x] 成果物公開（allowlist・sha 決定性・version 増加・session 連続・CSP・symlink 拒否）
+- [x] 版ごとの公開/非公開（新規は非公開・発行/停止/再公開の新 URL・関連ファイル拒否・
+  認証付き取得・旧データ移行・トークン非露出・「この版から修正」の復元/実行中拒否・
+  一時デプロイの依頼時許可）
 - [x] 起動直後の running → queued 復元＋再起動後の memory/candidates 永続
 - [x] ruff lint / format clean
 - [x] 本番 Python pin の文書化（3.11、`room/deploy/README.md`）

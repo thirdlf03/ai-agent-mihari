@@ -59,8 +59,15 @@ public struct JobRequestClient: Sendable {
     }
 
     /// 仕事を 1 件頼む。タイトルが空なら本文の先頭行から作る。
+    ///
+    /// ``allowExternalPublish`` は Temporary Deploy（外部公開）の依頼ごとの明示許可。
+    /// 付けない限り部屋は agent へ外部公開の道具を渡さない。
     @discardableResult
-    public func submit(title: String, body: String) async throws -> JobRequestResponse {
+    public func submit(
+        title: String,
+        body: String,
+        allowExternalPublish: Bool = false
+    ) async throws -> JobRequestResponse {
         guard let url = URL(string: "jobs", relativeTo: baseURL) else {
             throw JobRequestError.invalidURL(path: "jobs")
         }
@@ -69,7 +76,11 @@ public struct JobRequestClient: Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(token, forHTTPHeaderField: DaemonClient.tokenHeader)
         request.httpBody = try JSONEncoder().encode(
-            JobRequestPayload(title: Self.resolveTitle(title: title, body: body), body: body)
+            JobRequestPayload(
+                title: Self.resolveTitle(title: title, body: body),
+                body: body,
+                allowExternalPublish: allowExternalPublish
+            )
         )
 
         let data: Data
@@ -108,11 +119,20 @@ public struct JobRequestClient: Sendable {
         let title: String
         let body: String
         let source: String
+        let allowExternalPublish: Bool
 
-        init(title: String, body: String) {
+        enum CodingKeys: String, CodingKey {
+            case title
+            case body
+            case source
+            case allowExternalPublish = "allow_external_publish"
+        }
+
+        init(title: String, body: String, allowExternalPublish: Bool = false) {
             self.title = title
             self.body = body
             self.source = "pet"
+            self.allowExternalPublish = allowExternalPublish
         }
     }
 

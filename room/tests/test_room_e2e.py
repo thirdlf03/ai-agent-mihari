@@ -171,12 +171,12 @@ def test_room_e2e_fake_agent(tmp_path: Path, monkeypatch) -> None:
     # Session continuity: hermes_session_id persisted.
     session_id = (job.directory / "hermes_session_id").read_text(encoding="utf-8").strip()
     assert session_id == "sess-e2e-1"
-    # Preview URL covers artifact/; Forum にソースを添付しない。
+    # 成果物はできたが共有 URL は出さない（新規は非公開）。
     posted = sorted(p.name for _, p in board.files)
     assert "index.html" not in posted
     assert "app.js" not in posted
     assert "secret-notes.txt" not in posted and "claim_url.txt" not in posted
-    assert any("プレビューを置いたよ:" in text for _, text in board.summaries)
+    assert any("成果物を置いたよ" in text for _, text in board.summaries)
     # Research sources exist (export writes sources.json/summary.md under research/).
     assert (job.directory / "research" / "sources.json").is_file()
     assert (job.directory / "research" / "summary.md").is_file()
@@ -187,7 +187,7 @@ def test_room_e2e_fake_agent(tmp_path: Path, monkeypatch) -> None:
     assert parse_last_event_id("not-a-number") == 0
     assert parse_last_event_id(str(journal.after(0)[0]["id"])) == journal.after(0)[0]["id"]
 
-    # Public URL: followup rerun published v2（id は version ごとに一意）。
+    # 新規バージョンはどちらも非公開（公開状態は引き継がない）。
     publisher = ArtifactPublisher(root=tmp_path, preview_base_url="https://preview.example.test")
     manifests = publisher.manifests_for(job.id)
     assert len(manifests) == 2
@@ -195,23 +195,35 @@ def test_room_e2e_fake_agent(tmp_path: Path, monkeypatch) -> None:
     assert manifests[0]["id"] == f"art-{job.id}-v1"
     assert manifests[1]["id"] == f"art-{job.id}-v2"
     assert manifests[0]["sha256"] == manifests[1]["sha256"]  # identical content: deterministic
-    manifest = manifests[-1]
-    assert manifest["preview_url"].startswith("https://preview.example.test/")
-    assert manifest["session_id"] == "sess-e2e-1"
-    assert "note.txt" in manifest["source_ids"] or "followup-01.txt" in manifest["source_ids"]
-    token = manifest["preview_url"].rstrip("/").rsplit("/", 1)[-1]
+    assert [m["visibility"] for m in manifests] == ["private", "private"]
+    assert all(m["preview_url"] is None for m in manifests)
+    assert manifests[-1]["session_id"] == "sess-e2e-1"
+    assert (
+        "note.txt" in manifests[-1]["source_ids"]
+        or "followup-01.txt" in manifests[-1]["source_ids"]
+    )
 
     client = TestClient(create_app(config, orch, start_pump=False))
     headers = {TOKEN_HEADER: TOKEN}
-    page = client.get(f"/previews/{token}/")
+    # 非公開は認証付きでしか見えず、公開操作で初めて共有 URL が出る。
+    page = client.get(f"/jobs/{job.id}/artifacts/1/files/", headers=headers)
     assert page.status_code == 200
     assert "ごはん" in page.text
     csp = page.headers["content-security-policy"]
     assert "sandbox allow-scripts" in csp and "allow-same-origin" not in csp
-    css = client.get(f"/previews/{token}/style.css")
+    css = client.get(f"/jobs/{job.id}/artifacts/1/files/style.css", headers=headers)
     assert css.status_code == 200
+
+    published = client.post(f"/jobs/{job.id}/artifacts/2/publish", headers=headers)
+    assert published.status_code == 200
+    token = published.json()["preview_url"].rstrip("/").rsplit("/", 1)[-1]
+    public_page = client.get(f"/previews/{token}/")
+    assert public_page.status_code == 200
+    assert "ごはん" in public_page.text
+    assert client.get(f"/previews/{token}/style.css").status_code == 200
     # Tampered non-allowlist file is never served.
-    (tmp_path / "previews" / token / "evil.php").write_text("<?php", encoding="utf-8")
+    content_token = publisher.content_token_for(job.id, 2)
+    (tmp_path / "previews" / content_token / "evil.php").write_text("<?php", encoding="utf-8")
     assert client.get(f"/previews/{token}/evil.php").status_code == 404
 
     # Memory approval contract over HTTP (shared with desktop agent).

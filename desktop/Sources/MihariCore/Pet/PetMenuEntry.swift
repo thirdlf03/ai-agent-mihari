@@ -151,23 +151,35 @@ public enum PetMenuEntries {
                 .item(title: "配信エラー: \(error)", action: {})
             )
         }
-        let openable = job.artifacts.filter {
-            guard let scheme = $0.previewURL?.scheme?.lowercased() else { return false }
-            return scheme == "http" || scheme == "https"
-        }
-        if openable.isEmpty {
+        let artifacts = job.artifacts
+        if artifacts.isEmpty {
             entries.append(.item(title: "成果物なし", action: {}))
         } else {
             entries.append(.separator)
-            for artifact in openable {
-                let url = artifact.previewURL!
-                entries.append(
-                    .item(title: artifactTitle(artifact), action: { actions.openRoomArtifact(url) })
-                )
+            for artifact in artifacts {
+                let label = artifactTitle(artifact)
+                if artifact.isPublic,
+                    let url = artifact.previewURL,
+                    let scheme = url.scheme?.lowercased(),
+                    scheme == "http" || scheme == "https"
+                {
+                    entries.append(.item(title: label, action: { actions.openRoomArtifact(url) }))
+                } else if artifact.isPublic {
+                    // 非 http の URL（旧データ）はメニューに載せない。
+                    continue
+                } else {
+                    // 非公開は認証付きのアプリ内プレビュー（詳細パネルから）。
+                    entries.append(
+                        .item(
+                            title: privateArtifactTitle(artifact),
+                            action: { actions.openRoomJobDetail() }
+                        )
+                    )
+                }
                 if let version = artifact.version, !version.isEmpty {
                     entries.append(
                         .item(
-                            title: "v\(version) に戻す",
+                            title: "v\(version) を再公開",
                             action: { actions.rollbackRoomArtifact(version: version) }
                         )
                     )
@@ -198,6 +210,14 @@ public enum PetMenuEntries {
             return "成果物を開く: \(kind)"
         }
         return "成果物を開く"
+    }
+
+    /// 非公開の版のメニュー名（アプリ内で認証付きプレビューする案内）。
+    private static func privateArtifactTitle(_ artifact: RoomArtifact) -> String {
+        if let version = artifact.version, !version.isEmpty {
+            return "v\(version) をプレビュー（非公開）"
+        }
+        return "成果物をプレビュー（非公開）"
     }
 
     /// メニュー用に本文を 1 行・数十文字に潰す。

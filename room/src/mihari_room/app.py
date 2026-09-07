@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import mimetypes
 import re
 import time
@@ -19,7 +20,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from pydantic import BaseModel
 from starlette.responses import Response, StreamingResponse
 
-from mihari_room.artifacts import PREVIEWS_DIRNAME, ArtifactPublisher
+from mihari_room.artifacts import PREVIEWS_DIRNAME, ArtifactPublisher, read_publication
 from mihari_room.auth import verify_token
 from mihari_room.config import RoomConfig
 from mihari_room.contracts import (
@@ -30,12 +31,14 @@ from mihari_room.contracts import (
     JobStatus,
 )
 from mihari_room.discord.board import MAX_TITLE_LEN
-from mihari_room.events import EventJournal
+from mihari_room.events import EventJournal, EventPhase, JournalKind
 from mihari_room.orchestrator import RoomOrchestrator
 from mihari_room.queue.file_queue import CancelNotAllowed
 from mihari_room.store.file_store import JobNotFound
 from mihari_room.worker.agent import read_session_id
 from mihari_room.worker.wrangler_temp import temp_deploys_for
+
+logger = logging.getLogger("mihari_room")
 
 #: SSE のポーリング間隔。ファイルを読むだけなので短くてよい。
 POLL_INTERVAL_SEC = 0.25
@@ -50,6 +53,9 @@ class JobCreateBody(BaseModel):
     body: str = ""
     source: JobSource = JobSource.PET
     requested_by: str | None = None
+    #: 依頼ごとの明示的な外部公開許可（Temporary Deploy の扉）。
+    #: False なら agent に cloudflare_temp_deploy を渡さない。
+    allow_external_publish: bool = False
 
 
 class JobCreateResponse(BaseModel):
@@ -180,6 +186,7 @@ def _job_detail(orchestrator: RoomOrchestrator, job: Job) -> dict[str, Any]:
         "status": job.status.value,
         "thread_id": job.thread_id,
         "session_id": read_session_id(job),
+        "allow_external_publish": job.allow_external_publish,
         "artifacts": artifacts,
         "temp_deploys": temp_deploys_for(job.directory),
         "latest_event": journal.latest(),
@@ -210,12 +217,13 @@ def _preview_headers() -> dict[str, str]:
     }
 
 
-def _serve_preview(config: RoomConfig, token: str, rest: str) -> Response:
-    """プレビューを未認証で返す。ルートやメタデータは晒さない。
+def _serve_artifact_files(config: RoomConfig, token: str, rest: str) -> Response:
+    """内容フォルダ token から 1 ファイルを返す。ルートやメタデータは晒さない。
 
     - token 自体・token 配下の symlink chain は拒否（FS 改ざん時の他 job 漏洩対策）
     - ``..`` / 絶対パス / 隠しファイル（``.*``）・メタデータ名は 404
     - 公開 allowlist（ArtifactPublisher と同じ拡張子）以外の実ファイルは出さない
+    - 非公開も公開も同じ安全ヘッダ（no-store）で返す（キャッシュで停止を迂回させない）
     """
     from mihari_room.artifacts import _ALLOWED_WEB_EXT
 
@@ -258,6 +266,19 @@ def _serve_preview(config: RoomConfig, token: str, rest: str) -> Response:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     media = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
     return Response(content=resolved.read_bytes(), media_type=media, headers=_preview_headers())
+
+
+def _serve_preview(config: RoomConfig, token: str, rest: str) -> Response:
+    """公開 token → バージョンの内容フォルダを解決して 1 ファイル返す。
+
+    公開 token は publications 表にあるものだけ。非公開へ戻すと表から消えるので、
+    古い URL（HTML・画像・CSS・PDF のどのファイルでも）は 404 になる。
+    """
+    publication = read_publication(config.root, token)
+    if publication is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    content_token = publication.get("content_token") or ""
+    return _serve_artifact_files(config, content_token, rest)
 
 
 #: candidate id は MemoryCandidateStore が振る hex（12 chars）。外からはこの形だけ。
@@ -332,6 +353,41 @@ async def _memory_decide(
     return _candidate_to_dict(candidate)
 
 
+def _artifact_target(request: Request, job_id: str) -> tuple[Any, Any]:
+    """成果物操作の共通前処理。owner と仕事と publisher を確かめる。"""
+    config: RoomConfig = request.app.state.config
+    orchestrator = request.app.state.orchestrator
+    if not config.owner_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="owner が未設定（MIHARI_OWNER_ID）"
+        )
+    try:
+        job = orchestrator.store.get(job_id)
+    except JobNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="仕事がない") from error
+    publisher = orchestrator.publisher
+    if publisher is None or not getattr(publisher, "enabled", False):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="成果物がない")
+    return job, publisher
+
+
+def _journal_artifact(
+    request: Request,
+    job_id: str,
+    phase: Any,
+    kind: Any,
+    *,
+    text: str,
+) -> None:
+    """成果物操作の結果を日誌に残す（SSE と詳細が拾える）。失敗しても握りつぶす。"""
+    try:
+        orchestrator = request.app.state.orchestrator
+        journal = EventJournal.for_job(orchestrator.store.job_dir(job_id))
+        journal.append(job_id=job_id, phase=phase, kind=kind, text=text)
+    except Exception:
+        pass
+
+
 def create_app(
     config: RoomConfig,
     orchestrator: RoomOrchestrator,
@@ -357,6 +413,13 @@ def create_app(
         orchestrator.attach_publisher(
             ArtifactPublisher(root=config.root, preview_base_url=config.preview_base_url)
         )
+    # 旧形式の registry（公開状態なし）を公開状態として移行する。
+    # 既存 URL が動き続け、UI から停止できるようにする。
+    try:
+        if orchestrator.publisher is not None:
+            orchestrator.publisher.migrate()
+    except Exception:
+        logger.exception("成果物 registry の移行に失敗")
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -372,6 +435,7 @@ def create_app(
             body=body.body,
             source=body.source,
             requested_by=body.requested_by,
+            allow_external_publish=body.allow_external_publish,
         )
         try:
             job = await request.app.state.orchestrator.submit(job_request)
@@ -526,21 +590,8 @@ def create_app(
         dependencies=[Depends(verify_token)],
     )
     def job_artifact_rollback(request: Request, job_id: str, version: int) -> dict[str, Any]:
-        orchestrator = request.app.state.orchestrator
-        config: RoomConfig = request.app.state.config
-        if not config.owner_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, detail="owner が未設定（MIHARI_OWNER_ID）"
-            )
-        try:
-            job = orchestrator.store.get(job_id)
-        except JobNotFound as error:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="仕事がない"
-            ) from error
-        publisher = orchestrator.publisher
-        if publisher is None or not getattr(publisher, "enabled", False):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="成果物がない")
+        """「この版を再公開」。旧版の内容を新しい非公開バージョンとして載せる。"""
+        job, publisher = _artifact_target(request, job_id)
         try:
             manifest = publisher.rollback(job, version, read_session_id(job))
         except LookupError as error:
@@ -551,20 +602,136 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)
             ) from error
-        try:
-            journal = EventJournal.for_job(orchestrator.store.job_dir(job_id))
-            from mihari_room.events import EventPhase, JournalKind
-
-            url = manifest.get("preview_url") or ""
-            journal.append(
-                job_id=job_id,
-                phase=EventPhase.DONE,
-                kind=JournalKind.SUMMARY,
-                text=f"プレビューを戻したよ: {url}" if url else "プレビューを戻したよ。",
-            )
-        except Exception:
-            pass
+        _journal_artifact(
+            request,
+            job_id,
+            EventPhase.DONE,
+            JournalKind.SUMMARY,
+            text=(
+                f"v{version} の内容を v{manifest['version']} として再公開したよ"
+                "（非公開・部屋から開ける）。"
+            ),
+        )
         return manifest
+
+    @app.post(
+        "/jobs/{job_id}/artifacts/{version}/publish",
+        dependencies=[Depends(verify_token)],
+    )
+    def job_artifact_publish(request: Request, job_id: str, version: int) -> dict[str, Any]:
+        """版を公開し共有 URL を発行する。非公開へ戻してからの再公開は新 URL。"""
+        job, publisher = _artifact_target(request, job_id)
+        try:
+            manifest = publisher.publish_version(job_id, version)
+        except LookupError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="成果物がない"
+            ) from error
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        url = manifest.get("preview_url") or ""
+        _journal_artifact(
+            request,
+            job_id,
+            EventPhase.DONE,
+            JournalKind.SUMMARY,
+            text=f"v{version} を公開したよ: {url}" if url else f"v{version} を公開したよ。",
+        )
+        return manifest
+
+    @app.post(
+        "/jobs/{job_id}/artifacts/{version}/unpublish",
+        dependencies=[Depends(verify_token)],
+    )
+    def job_artifact_unpublish(request: Request, job_id: str, version: int) -> dict[str, Any]:
+        """版を非公開に戻す。その版の発行済み共有 URL をすべて無効化する。"""
+        job, publisher = _artifact_target(request, job_id)
+        try:
+            manifest = publisher.unpublish_version(job_id, version)
+        except LookupError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="成果物がない"
+            ) from error
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)
+            ) from error
+        _journal_artifact(
+            request,
+            job_id,
+            EventPhase.DONE,
+            JournalKind.SUMMARY,
+            text=f"v{version} の公開を止めたよ（古い URL は無効にした）。",
+        )
+        return manifest
+
+    @app.post(
+        "/jobs/{job_id}/artifacts/{version}/restore",
+        dependencies=[Depends(verify_token)],
+    )
+    def job_artifact_restore(request: Request, job_id: str, version: int) -> dict[str, Any]:
+        """「この版から修正」の土台。その版の作業ファイルを作業フォルダへ復元する。
+
+        実行中の仕事には復元しない（走っているファイルを上書きしない）。
+        復元したファイルは次の実行がそのまま使う。
+        """
+        job, publisher = _artifact_target(request, job_id)
+        latest = request.app.state.orchestrator.store.get(job_id)
+        if latest.status is JobStatus.RUNNING:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="実行中の仕事は復元できない"
+            )
+        try:
+            restored = publisher.restore(job, version)
+        except LookupError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="成果物がない"
+            ) from error
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)
+            ) from error
+        _journal_artifact(
+            request,
+            job_id,
+            EventPhase.QUEUED,
+            JournalKind.LOG,
+            text=f"v{version} の作業ファイルを戻したよ（{restored} ファイル）。",
+        )
+        return {"job_id": job_id, "version": version, "restored_files": restored}
+
+    @app.get(
+        "/jobs/{job_id}/artifacts/{version}/files",
+        dependencies=[Depends(verify_token)],
+    )
+    @app.get(
+        "/jobs/{job_id}/artifacts/{version}/files/{rest:path}",
+        dependencies=[Depends(verify_token)],
+    )
+    def job_artifact_files(
+        request: Request, job_id: str, version: int, rest: str = "index.html"
+    ) -> Response:
+        """認証付きの成果物取得（非公開でも desktop 内プレビューで見られる）。
+
+        URL に Room トークンは載せない。認証はヘッダだけ。
+        """
+        config: RoomConfig = request.app.state.config
+        publisher = request.app.state.orchestrator.publisher
+        if publisher is None or not getattr(publisher, "enabled", False):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="成果物がない")
+        try:
+            request.app.state.orchestrator.store.get(job_id)
+        except JobNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="仕事がない"
+            ) from error
+        try:
+            content_token = publisher.content_token_for(job_id, version)
+        except LookupError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="成果物がない"
+            ) from error
+        return _serve_artifact_files(config, content_token, rest)
 
     # --- プレビュー（未認証・安全ヘッダ付き） --------------------------------
 
