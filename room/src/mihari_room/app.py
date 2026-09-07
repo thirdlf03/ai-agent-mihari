@@ -6,6 +6,8 @@ Phase 2/3: 仕事の詳細・イベントの SSE・成果物プレビューの�
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import mimetypes
 import re
@@ -44,12 +46,29 @@ HEARTBEAT_INTERVAL_SEC = 15.0
 #: 完了してから stream を閉じるまでの余裕。この間に続きが来たら繋ぎ直す。
 TERMINAL_HOLD_SEC = 5.0
 
+#: 依頼に同封できる添付の上限。desktop 側と同じ数値に揃える。
+MAX_ATTACHMENT_COUNT = 10
+#: 1 ファイルの上限 (20MB)。
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+#: 依頼全体の添付合計の上限 (50MB)。
+MAX_ATTACHMENT_TOTAL_BYTES = 50 * 1024 * 1024
+#: 受け付ける添付の拡張子。PNG・JPEG・PDF・Markdown・テキスト。
+ALLOWED_ATTACHMENT_EXT = frozenset({".png", ".jpg", ".jpeg", ".pdf", ".md", ".markdown", ".txt"})
+
+
+class JobAttachmentBody(BaseModel):
+    """JSON で送る添付 1 件。本文は base64。既存 JSON 依頼との互換を保つ。"""
+
+    name: str = ""
+    content_base64: str = ""
+
 
 class JobCreateBody(BaseModel):
     title: str = ""
     body: str = ""
     source: JobSource = JobSource.PET
     requested_by: str | None = None
+    attachments: list[JobAttachmentBody] = []
 
 
 class JobCreateResponse(BaseModel):
@@ -65,6 +84,49 @@ class FollowupBody(BaseModel):
 
 class CancelBody(BaseModel):
     by: str | None = None
+
+
+def _decode_attachments(attachments: list[JobAttachmentBody]) -> list[tuple[str, bytes]]:
+    """base64 の添付を検証・復号する。上限・形式が違えば 400。"""
+    if len(attachments) > MAX_ATTACHMENT_COUNT:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"添付は {MAX_ATTACHMENT_COUNT} 個までだよ",
+        )
+    decoded: list[tuple[str, bytes]] = []
+    total = 0
+    for item in attachments:
+        name = Path(item.name).name.strip()
+        if not name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="添付の名前が空だよ"
+            )
+        ext = Path(name).suffix.lower()
+        if ext not in ALLOWED_ATTACHMENT_EXT:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{name} は添付できない形式だよ（PNG・JPEG・PDF・Markdown・テキスト）",
+            )
+        try:
+            data = base64.b64decode(item.content_base64, validate=True)
+        except (binascii.Error, ValueError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{name} のデータが壊れているよ",
+            ) from error
+        if len(data) > MAX_ATTACHMENT_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{name} が 20MB を超えているよ",
+            )
+        total += len(data)
+        if total > MAX_ATTACHMENT_TOTAL_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="添付の合計が 50MB を超えているよ",
+            )
+        decoded.append((name, data))
+    return decoded
 
 
 def derive_title(title: str, body: str) -> str:
@@ -184,6 +246,28 @@ def _job_detail(orchestrator: RoomOrchestrator, job: Job) -> dict[str, Any]:
         "temp_deploys": temp_deploys_for(job.directory),
         "latest_event": journal.latest(),
     }
+
+
+def _job_list_item(orchestrator: RoomOrchestrator, job: Job) -> dict[str, Any]:
+    """一覧 1 件。検索用に source・出生時刻・本文を足す。"""
+    detail = _job_detail(orchestrator, job)
+    detail["source"] = job.source.value
+    detail["created_at"] = _created_at(orchestrator, job.id)
+    detail["body"] = job.body
+    return detail
+
+
+def _created_at(orchestrator: RoomOrchestrator, job_id: str) -> float | None:
+    """meta.json の出生時刻。読めなければ None。"""
+    try:
+        raw = (orchestrator.store.job_dir(job_id) / "meta.json").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        value = float(json.loads(raw).get("created_at", 0.0))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return value
 
 
 def _preview_headers() -> dict[str, str]:
@@ -367,6 +451,7 @@ def create_app(
     @app.post("/jobs", dependencies=[Depends(verify_token)])
     async def create_job(request: Request, body: JobCreateBody) -> JobCreateResponse:
         title = derive_title(body.title, body.body)
+        attachments = _decode_attachments(body.attachments)
         job_request = CreateJobRequest(
             title=title,
             body=body.body,
@@ -374,7 +459,7 @@ def create_app(
             requested_by=body.requested_by,
         )
         try:
-            job = await request.app.state.orchestrator.submit(job_request)
+            job = await request.app.state.orchestrator.submit(job_request, attachments=attachments)
         except RuntimeError as error:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)
@@ -385,12 +470,29 @@ def create_app(
             status=job.status.value,
         )
 
+    @app.get("/capabilities", dependencies=[Depends(verify_token)])
+    def capabilities() -> dict[str, Any]:
+        """この部屋が実装している機能を返す。旧バックエンドでは未対応操作を出さないため。"""
+        return {
+            "attachment_upload": True,
+            "job_list": True,
+            "job_history": True,
+        }
+
     # 可変ルート `/jobs/{job_id}` より先に定義する（/jobs/running が奪われないように）。
     @app.get("/jobs/running", dependencies=[Depends(verify_token)])
     def list_running(request: Request) -> dict[str, Any]:
         orchestrator = request.app.state.orchestrator
         return {
             "jobs": [_job_detail(orchestrator, job) for job in orchestrator.store.list_running()]
+        }
+
+    # 履歴を含む一覧。待ち・実行中・完了・失敗・中断と Discord 作成を全部返す（新しい順）。
+    @app.get("/jobs", dependencies=[Depends(verify_token)])
+    def list_jobs(request: Request) -> dict[str, Any]:
+        orchestrator = request.app.state.orchestrator
+        return {
+            "jobs": [_job_list_item(orchestrator, job) for job in orchestrator.store.list_all()]
         }
 
     @app.get("/jobs/{job_id}", dependencies=[Depends(verify_token)])
