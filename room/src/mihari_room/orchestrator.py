@@ -144,15 +144,38 @@ class RoomOrchestrator:
         self.wake()
         return self._store.get(job.id)
 
-    async def follow_up(self, thread_id: int, body: str, *, requested_by: str) -> Job:
+    async def follow_up(
+        self,
+        thread_id: int,
+        body: str,
+        *,
+        requested_by: str,
+        attachments: Sequence[tuple[str, bytes]] = (),
+    ) -> Job:
         """同じスレッドの続き。同じフォルダに追記して、空いたらもう一度回す。"""
         job = self._require_by_thread(thread_id)
-        return await self.follow_up_job(job.id, body, requested_by=requested_by)
+        return await self.follow_up_job(
+            job.id,
+            body,
+            requested_by=requested_by,
+            attachments=attachments,
+        )
 
-    async def follow_up_job(self, job_id: str, body: str, *, requested_by: str) -> Job:
-        """同じ仕事の続き。同じセッションへ次のターンとして回す。"""
+    async def follow_up_job(
+        self,
+        job_id: str,
+        body: str,
+        *,
+        requested_by: str,
+        attachments: Sequence[tuple[str, bytes]] = (),
+    ) -> Job:
+        """同じ仕事の続き。同じセッションへ次のターンとして回す。
+
+        ``attachments`` は次の実行に渡す資料として input/ に置く。
+        """
         job = self._store.get(job_id)
         self._write_followup(job.id, body)
+        self._save_attachments(job.id, attachments)
         current = self._store.get(job.id)
         if current.status is JobStatus.RUNNING:
             (self._store.job_dir(job.id) / REQUEUE_FILENAME).write_text("1", encoding="utf-8")

@@ -496,6 +496,8 @@ public struct RoomJobSummary: Equatable, Sendable {
     public let tempDeploys: [RoomTempDeploy]
     /// 配信が止まっている理由。正常なら `nil`。
     public let lastError: String?
+    /// 直近の中断・承認・公開などの操作の失敗。正常なら `nil`。
+    public let operationError: String?
     /// 直近で取れた記憶の候補。承認待ちの表示と件数に使う。
     public let memoryCandidates: [RoomMemoryCandidate]
     /// 承認待ちの件数。
@@ -510,6 +512,7 @@ public struct RoomJobSummary: Equatable, Sendable {
         artifacts: [RoomArtifact] = [],
         tempDeploys: [RoomTempDeploy] = [],
         lastError: String? = nil,
+        operationError: String? = nil,
         memoryCandidates: [RoomMemoryCandidate] = []
     ) {
         self.jobID = jobID
@@ -520,6 +523,7 @@ public struct RoomJobSummary: Equatable, Sendable {
         self.artifacts = artifacts
         self.tempDeploys = tempDeploys
         self.lastError = lastError
+        self.operationError = operationError
         self.memoryCandidates = memoryCandidates
     }
 }
