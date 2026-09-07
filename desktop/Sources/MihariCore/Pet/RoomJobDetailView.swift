@@ -8,23 +8,33 @@ public struct RoomJobDetailView: View {
     @ObservedObject var monitor: RoomJobMonitor
     @StateObject private var model: RoomJobDetailViewModel
     private let onOpenArtifact: (URL) -> Void
+    /// 公開設定の UI フック（#19 の公開 API が入る前は nil のまま = 表示しない）。
+    private let onTogglePublication: ((RoomArtifactPublication) -> Void)?
 
     /// 画面から使う入り口。監視と操作口を差し込む。
     public init(
         monitor: RoomJobMonitor,
         jobID: String,
-        onOpenArtifact: @escaping (URL) -> Void = { _ in }
+        onOpenArtifact: @escaping (URL) -> Void = { _ in },
+        onTogglePublication: ((RoomArtifactPublication) -> Void)? = nil
     ) {
         self.monitor = monitor
         _model = StateObject(wrappedValue: RoomJobDetailViewModel(monitor: monitor, jobID: jobID))
         self.onOpenArtifact = onOpenArtifact
+        self.onTogglePublication = onTogglePublication
     }
 
     /// テストから状態を差し込むための入り口。
-    init(monitor: RoomJobMonitor, model: RoomJobDetailViewModel, onOpenArtifact: @escaping (URL) -> Void = { _ in }) {
+    init(
+        monitor: RoomJobMonitor,
+        model: RoomJobDetailViewModel,
+        onOpenArtifact: @escaping (URL) -> Void = { _ in },
+        onTogglePublication: ((RoomArtifactPublication) -> Void)? = nil
+    ) {
         self.monitor = monitor
         _model = StateObject(wrappedValue: model)
         self.onOpenArtifact = onOpenArtifact
+        self.onTogglePublication = onTogglePublication
     }
 
     private var tracked: RoomJobTrackedJob? {
@@ -169,7 +179,47 @@ public struct RoomJobDetailView: View {
                             .disabled(model.isRollingBack)
                         }
                     }
+                    documentSection(artifact)
                 }
+            }
+        }
+    }
+
+    /// 成果物の版に含まれる文書（Markdown / PDF）の行。プレビュー・ダウンロード・
+    /// 公開設定フックを共通の形で並べる（#19 実装前は公開設定ボタンは出さない）。
+    @ViewBuilder
+    private func documentSection(_ artifact: RoomArtifact) -> some View {
+        if artifact.documents.isEmpty {
+            EmptyView()
+        } else {
+            ForEach(artifact.documents) { document in
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(document.name)
+                            .font(.body)
+                        Text(document.kindLabel)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if let preview = document.previewURL {
+                        Button("プレビュー") { onOpenArtifact(preview) }
+                    }
+                    if let download = document.downloadURL {
+                        Button("ダウンロード") { onOpenArtifact(download) }
+                    }
+                    if let onTogglePublication {
+                        Button("公開設定…") {
+                            onTogglePublication(
+                                RoomArtifactPublication(
+                                    artifactID: artifact.artifactID,
+                                    documentName: document.name
+                                )
+                            )
+                        }
+                    }
+                }
+                .padding(.leading, 8)
             }
         }
     }

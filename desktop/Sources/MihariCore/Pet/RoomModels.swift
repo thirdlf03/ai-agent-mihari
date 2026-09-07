@@ -176,6 +176,9 @@ public struct RoomEvent: Decodable, Equatable, Sendable, Identifiable {
 }
 
 /// `/jobs/{id}` の成果物。`preview_url` が開ける URL なら「開く」操作に使う。
+///
+/// `documents` はこの版に含まれる文書（Markdown / PDF）。プレビュー・
+/// ダウンロードは既存の preview 許可（token 経路）に乗っている。
 public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
     public let artifactID: String
     public let jobID: String?
@@ -186,6 +189,8 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
     public let expiresAt: Date?
     public let sha256: String?
     public let sourceIDs: [String]
+    /// この版の文書（Markdown / PDF）。無い版は空。
+    public let documents: [RoomArtifactDocument]
 
     public var id: String {
         if let version, !version.isEmpty {
@@ -204,6 +209,7 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
         case expiresAt = "expires_at"
         case sha256
         case sourceIDs = "source_ids"
+        case documents
     }
 
     public init(
@@ -215,7 +221,8 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
         previewURL: URL? = nil,
         expiresAt: Date? = nil,
         sha256: String? = nil,
-        sourceIDs: [String] = []
+        sourceIDs: [String] = [],
+        documents: [RoomArtifactDocument] = []
     ) {
         self.artifactID = artifactID
         self.jobID = jobID
@@ -226,6 +233,7 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
         self.expiresAt = expiresAt
         self.sha256 = sha256
         self.sourceIDs = sourceIDs
+        self.documents = documents
     }
 
     public init(from decoder: Decoder) throws {
@@ -241,6 +249,8 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
         )
         sha256 = try container.decodeIfPresent(String.self, forKey: .sha256)
         sourceIDs = try container.decodeIfPresent([String].self, forKey: .sourceIDs) ?? []
+        documents =
+            try container.decodeIfPresent([RoomArtifactDocument].self, forKey: .documents) ?? []
     }
 
     /// 文字列でも数値でも同じに見える。`version` に使う。
@@ -264,6 +274,89 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
     ) throws -> URL? {
         guard let raw = try container.decodeIfPresent(String.self, forKey: key) else { return nil }
         return URL(string: raw)
+    }
+}
+
+/// 成果物の 1 版に含まれる文書（Markdown / PDF）。
+///
+/// プレビュー・ダウンロードとも既存の preview 許可（token 経路）に乗っている。
+/// `kind` は部屋側の値（`markdown` / `pdf`）。未知はそのまま出す。
+public struct RoomArtifactDocument: Decodable, Equatable, Sendable, Identifiable {
+    /// 成果物内の相対パス（例: `report.md`）。
+    public let name: String
+    /// 文書の種別（`markdown` / `pdf` / その他）。
+    public let kind: String
+    /// プレビュー URL（Markdown は Room が描いた HTML、PDF はそのまま）。
+    public let previewURL: URL?
+    /// ダウンロード URL（原稿そのもの）。
+    public let downloadURL: URL?
+
+    public var id: String {
+        "\(name)-\(previewURL?.absoluteString ?? downloadURL?.absoluteString ?? "")"
+    }
+
+    /// 表示用の短いラベル。
+    public var kindLabel: String {
+        switch kind {
+        case "markdown": return "Markdown"
+        case "pdf": return "PDF"
+        case "html": return "HTML"
+        default: return kind.isEmpty ? "文書" : kind
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case kind
+        case previewURL = "preview_url"
+        case downloadURL = "download_url"
+    }
+
+    public init(
+        name: String,
+        kind: String = "document",
+        previewURL: URL? = nil,
+        downloadURL: URL? = nil
+    ) {
+        self.name = name
+        self.kind = kind
+        self.previewURL = previewURL
+        self.downloadURL = downloadURL
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
+        kind = try container.decodeIfPresent(String.self, forKey: .kind) ?? "document"
+        previewURL = try Self.decodeURL(container, key: .previewURL)
+        downloadURL = try Self.decodeURL(container, key: .downloadURL)
+    }
+
+    private static func decodeURL(
+        _ container: KeyedDecodingContainer<CodingKeys>,
+        key: CodingKeys
+    ) throws -> URL? {
+        guard let raw = try container.decodeIfPresent(String.self, forKey: key) else { return nil }
+        return URL(string: raw)
+    }
+}
+
+/// 公開設定のフック用の型（#19 の公開 API が入るまでの置き場）。
+///
+/// 旧バックエンド（`documents` を返さない版）ではフック自体を差し込まないので、
+/// 画面に公開切り替えは出ない。
+public struct RoomArtifactPublication: Equatable, Sendable {
+    /// 対象の成果物（版）の ID。
+    public let artifactID: String
+    /// 文書単位の切り替えを表すときの文書名。版全体なら `nil`。
+    public let documentName: String?
+    /// いま公開状態か（#19 実装後にサーバ値が入る。現状は UI フックのみ）。
+    public let isPublic: Bool
+
+    public init(artifactID: String, documentName: String? = nil, isPublic: Bool = false) {
+        self.artifactID = artifactID
+        self.documentName = documentName
+        self.isPublic = isPublic
     }
 }
 

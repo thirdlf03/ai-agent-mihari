@@ -56,7 +56,9 @@ def test_publish_creates_immutable_version(tmp_path: Path) -> None:
         "expires_at",
         "sha256",
         "source_ids",
+        "documents",
     }
+    assert manifest["documents"] == []
     assert manifest["job_id"] == job.id
     assert manifest["session_id"] == "sess-1"
     assert manifest["version"] == 1

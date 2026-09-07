@@ -8,7 +8,8 @@ desktop 側の対応は別 owner（`desktop/`）が持つ。ここでは backend
 
 - **ローカル**: 偽 Hermes（`room/tests/fixtures/fake_hermes_*.py`＋注入 fake agent）で
   ストア・キュー・Forum・orchestrator・HTTP・memory 承認・プレビュー・
-  終端 E2E（`room/tests/test_room_e2e.py`）を通した。`uv run pytest -q` 230 件、
+  文書ツール（PDF・Markdown）・文書成果物の公開・
+  終端 E2E（`room/tests/test_room_e2e.py`）を通した。`uv run pytest -q` 284 件、
   `ruff check` / `ruff format` clean
 - **実機**: ConoHa で systemd 常駐。Tailscale Serve が API と `/previews` を
   tailnet 内 HTTPS に出している。`MIHARI_PREVIEW_BASE_URL` は Tailscale 原点。
@@ -87,7 +88,8 @@ desktop は詳細 refresh 時に `GET .../memory` を引き直すこと。
   `discord / discord_admin` 送信系は常に OFF。MCP 動的 toolset（`mcp-*`）も有効化しない
 - 残すのは読み・生成系：`file`（write_file/patch 含む）・`search`・`web`・
   `session_search`・`memory`（承認制）・`mihari_room`（discord_search / recent /
-  channels / message / context / export / cloudflare_temp_deploy）
+  channels / message / context / export / cloudflare_temp_deploy / pdf_info /
+  pdf_text / pdf_pages / pdf_ocr / markdown_pdf）
 - Discord 横断検索・PDF 取り込みは shell 不要の in-process bounded ツールで提供する
   （実 Hermes registry に `mihari_room` toolset として登録・検証済み）：
   `discord_search` / `discord_recent` / `discord_channels` / `discord_message` /
@@ -95,6 +97,13 @@ desktop は詳細 refresh 時に `GET .../memory` を引き直すこと。
   `cloudflare_temp_deploy`（`wrangler deploy --temporary`。ジョブ dir と
   `XDG_CONFIG_HOME=<job>/.wrangler-tmp` に閉じる。claim URL は GET /jobs の
   `temp_deploys` だけ。Forum には workers.dev のみ）
+- 文書ツールも同じ `mihari_room` toolset で提供する（固定引数のみ・shell なし）：
+  `pdf_info`（ページ数・暗号化）/ `pdf_text`（pypdf ページ単位テキスト抽出）/
+  `pdf_pages`（Poppler で PNG ページ画像化）/ `pdf_ocr`（Tesseract jpn+eng）/
+  `markdown_pdf`（同梱 IPAexGothic フォントの専用レンダラーで Markdown→PDF）
+  初期上限は最大 100 ページ・処理 120 秒。暗号化・破損・上限超過は
+  `success=false` と `code` で明示し、部分処理は `partial` / `truncated` で
+  全件処理と偽らない
 - 危険ツール名の最終扉として `delegate_task / skill_manage / cronjob_manage / terminal`
   等を agent 表面から名指し除去する（`skills_list / skill_view` の参照は残す）
 - **制限の正直な範囲**: `bash` 完全無制限化（opt-in 時）の書き込み先までは塞げない。
@@ -110,7 +119,12 @@ desktop は詳細 refresh 時に `GET .../memory` を引き直すこと。
   - 公開するのは `output/artifact/` の allowlist 拡張子のみ
     （`index.html` 必須、manifest・秘密名・research・非 web は写さない）。
     Forum へ通知するのも安全な成果物だけ
-  - manifest（id/version/preview_url/sha256/source_ids/session_id）は
+  - **文書成果物**: `output/` 配下（research/ を除く）の `*.md`・`*.pdf` も同じ版に
+    写して成果物一覧の `documents` に載せる。Markdown は同梱 markdown-it-py で
+    プレビュー HTML（`*.md.html`、生 HTML 無効・CDN なし）を作り、プレビュー・
+    ダウンロードとも既存の preview 許可（token 経路）に乗せる。文書だけのジョブは
+    一覧の index.html を自動生成して公開する
+  - manifest（id/version/preview_url/sha256/source_ids/session_id/documents）は
     `root/registry/` に置き、HTTP では出さない。sha256 は決定的
     （相対パス昇順）。version は単調増加、各 version の `id` は
     `art-<job>-v<n>` で一意（古い registry も読み出し時に付け直す）
@@ -142,9 +156,10 @@ Python は **3.11**（room と Hermes を同じ interpreter で回す。3.14 の
 
 ### ローカル（偽 Hermes）— 済み
 
-- [x] `uv run pytest -q`（230 件：store / queue / forum / discord / worker /
+- [x] `uv run pytest -q`（284 件：store / queue / forum / discord / worker /
   orchestrator / app / memory 承認 HTTP / guard hook / bounded discord tools /
-  hardening / cancel-interrupt / preview security / 終端 E2E）
+  文書ツール（PDF・Markdown） / 文書成果物の公開 / hardening /
+  cancel-interrupt / preview security / 終端 E2E）
 - [x] HTTP: `POST /jobs` → queue → 実行 → Forum タグ更新（RecordingBoard で確認）
 - [x] cancel（頼んだ人 / owner / それ以外 403）＋実行中 interrupt・thread 終了待ち
 - [x] followup v2（同 job・同 session resume、実行中は終了後再回し、cursor 消費）
@@ -153,6 +168,13 @@ Python は **3.11**（room と Hermes を同じ interpreter で回す。3.14 の
   承認文の home 永続化と次 session 読み込み、replace/remove 明示拒否）
 - [x] bounded Discord 検索ツール（search / recent / channels / message / context /
   export。seeded メッセージ＋PDF、sources.json/summary.md、実 registry 登録検証）
+- [x] 文書ツール（pdf_info / pdf_text / pdf_pages / pdf_ocr / markdown_pdf）：
+  ページ単位抽出・Poppler 画像化・Tesseract 固定引数・同梱フォントの
+  Markdown→PDF（pypdf で文字化けなしの読み戻し）、暗号化・破損・100 ページ
+  超過・120 秒上限・部分/全件の明示、実 registry 登録検証
+- [x] 文書成果物（HTML・Markdown・PDF を一覧に載せ、プレビュー・ダウンロード・
+  公開設定の型/フック。token 無し・別 token は 404、research/・秘密名は除外、
+  markdown プレビューは生 HTML 無効）
 - [x] 成果物公開（allowlist・sha 決定性・version 増加・session 連続・CSP・symlink 拒否）
 - [x] 起動直後の running → queued 復元＋再起動後の memory/candidates 永続
 - [x] ruff lint / format clean
@@ -169,6 +191,8 @@ Python は **3.11**（room と Hermes を同じ interpreter で回す。3.14 の
   の integrity ok、previews の sha 一致。本番ディレクトリへの上書き復元は未実施
 - [x] 実 Hermes の memory 候補 → approve（200）→ 済みを reject すると 409
 - [x] 実機で `discord_search` 等の `mihari_room` ツールがジョブから使えた
+- [ ] 実機で `pdf_*` / `markdown_pdf` を添付 PDF・Markdown に使う（VPS に
+  poppler-utils と tesseract（jpn+eng）を入れてから）
 
 ### 未着手 / 延期（対象外と明記）
 
