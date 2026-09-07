@@ -62,12 +62,21 @@ public struct JobRequestClient: Sendable {
     ///
     /// ``allowExternalPublish`` は Temporary Deploy（外部公開）の依頼ごとの明示許可。
     /// 付けない限り部屋は agent へ外部公開の道具を渡さない。
+    /// スクショ付きならバイト列（base64）を `screenshots` に載せる。
+    ///
+    /// 添付は上限（10 個・各 20MB・合計 50MB）と形式（PNG/JPEG/PDF/Markdown/テキスト）
+    /// を送る前に検証し、違えば送らずに投げる。
     @discardableResult
     public func submit(
         title: String,
         body: String,
-        allowExternalPublish: Bool = false
+        allowExternalPublish: Bool = false,
+        screenshots: [ScreenshotUploadPayload] = [],
+        attachments: [JobAttachment] = []
     ) async throws -> JobRequestResponse {
+        if let error = JobAttachmentLimit.validate(attachments) {
+            throw error
+        }
         guard let url = URL(string: "jobs", relativeTo: baseURL) else {
             throw JobRequestError.invalidURL(path: "jobs")
         }
@@ -79,7 +88,9 @@ public struct JobRequestClient: Sendable {
             JobRequestPayload(
                 title: Self.resolveTitle(title: title, body: body),
                 body: body,
-                allowExternalPublish: allowExternalPublish
+                allowExternalPublish: allowExternalPublish,
+                screenshots: screenshots,
+                attachments: attachments
             )
         )
 
@@ -104,6 +115,27 @@ public struct JobRequestClient: Sendable {
         }
     }
 
+    /// 部屋が対応している機能を引き、旧バックエンドでは未対応操作を出さない判断に使う。
+    ///
+    /// 旧バックエンドに `/capabilities` が無い（404 など）ときは `nil` を返す。
+    /// 呼び出し側は `nil` を「未対応」とみなして添付 UI などを出さない。
+    public func fetchCapabilities() async -> RoomCapabilities? {
+        guard let url = URL(string: "capabilities", relativeTo: baseURL) else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue(token, forHTTPHeaderField: DaemonClient.tokenHeader)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            return nil
+        }
+        guard (200..<300).contains((response as? HTTPURLResponse)?.statusCode ?? 0) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(RoomCapabilities.self, from: data)
+    }
+
     private static func detail(from data: Data) -> String {
         if let payload = try? JSONDecoder().decode(JobRequestErrorPayload.self, from: data) {
             return payload.detail
@@ -115,25 +147,61 @@ public struct JobRequestClient: Sendable {
     }
 
     /// `POST /jobs` の本文。`source` はつねに `pet`。
+    /// スクショも添付も無いときは従来どおりの JSON のまま（既存互換）。
     private struct JobRequestPayload: Encodable {
         let title: String
         let body: String
         let source: String
         let allowExternalPublish: Bool
+        let screenshots: [ScreenshotUploadPayload]
+        let attachments: [AttachmentPayload]?
+
+        init(
+            title: String,
+            body: String,
+            allowExternalPublish: Bool = false,
+            screenshots: [ScreenshotUploadPayload] = [],
+            attachments: [JobAttachment] = []
+        ) {
+            self.title = title
+            self.body = body
+            self.source = "pet"
+            self.allowExternalPublish = allowExternalPublish
+            self.screenshots = screenshots
+            self.attachments =
+                attachments.isEmpty
+                ? nil
+                : attachments.map {
+                    AttachmentPayload(name: $0.fileName, content: $0.data.base64EncodedString())
+                }
+        }
 
         enum CodingKeys: String, CodingKey {
             case title
             case body
             case source
             case allowExternalPublish = "allow_external_publish"
+            case screenshots
+            case attachments
         }
 
-        init(title: String, body: String, allowExternalPublish: Bool = false) {
-            self.title = title
-            self.body = body
-            self.source = "pet"
-            self.allowExternalPublish = allowExternalPublish
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(title, forKey: .title)
+            try container.encode(body, forKey: .body)
+            try container.encode(source, forKey: .source)
+            try container.encode(allowExternalPublish, forKey: .allowExternalPublish)
+            if !screenshots.isEmpty {
+                try container.encode(screenshots, forKey: .screenshots)
+            }
+            try container.encodeIfPresent(attachments, forKey: .attachments)
         }
+    }
+
+    /// 添付 1 件の JSON 表現。中身は base64 文字列。
+    private struct AttachmentPayload: Encodable {
+        let name: String
+        let content: String
     }
 
     /// 失敗の応答。本文の `detail` だけ読む。
@@ -178,4 +246,127 @@ extension JobRequestError: LocalizedError {
             return status == 0 ? message : "部屋がエラーを返した (\(status)): \(message)"
         }
     }
+}
+
+/// 依頼に同封する添付 1 件。名前と中身だけを持つ。
+public struct JobAttachment: Sendable, Equatable {
+    public let fileName: String
+    public let data: Data
+
+    public init(fileName: String, data: Data) {
+        self.fileName = fileName
+        self.data = data
+    }
+
+    /// 拡張子（小文字）。無ければ `nil`。
+    public var fileExtension: String? {
+        let ext = (fileName as NSString).pathExtension.lowercased()
+        return ext.isEmpty ? nil : ext
+    }
+
+    /// バイト数。
+    public var size: Int { data.count }
+}
+
+/// 添付の初期上限。部屋側の検証と揃える。
+public enum JobAttachmentLimit {
+    /// 添付の最大個数。
+    public static let maxCount = 10
+    /// 1 ファイルの最大バイト数（20MB）。
+    public static let maxFileBytes = 20 * 1024 * 1024
+    /// 依頼全体の添付合計の最大バイト数（50MB）。
+    public static let maxTotalBytes = 50 * 1024 * 1024
+    /// 受け付ける拡張子（小文字）。
+    public static let allowedExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "pdf", "md", "markdown", "txt",
+    ]
+
+    /// 拡張子が受け付けられるか。
+    public static func isAllowedExtension(_ ext: String?) -> Bool {
+        guard let ext else { return false }
+        return allowedExtensions.contains(ext.lowercased())
+    }
+
+    /// 添付の集合を検証する。問題が無ければ `nil`、あれば最初の違反を返す。
+    public static func validate(_ attachments: [JobAttachment]) -> JobAttachmentError? {
+        if attachments.count > maxCount {
+            return .tooManyFiles(maxCount)
+        }
+        var total = 0
+        for attachment in attachments {
+            if !isAllowedExtension(attachment.fileExtension) {
+                return .rejectedExtension(attachment.fileName)
+            }
+            if attachment.size > maxFileBytes {
+                return .fileTooLarge(attachment.fileName)
+            }
+            total += attachment.size
+            if total > maxTotalBytes {
+                return .totalTooLarge
+            }
+        }
+        return nil
+    }
+}
+
+/// 添付の検証で弾いた理由。送る前に呼び出し側へ返す。
+public enum JobAttachmentError: Error, Equatable, Sendable, LocalizedError {
+    /// 受け付けない形式のファイル。
+    case rejectedExtension(String)
+    /// 個数が上限を超えた。
+    case tooManyFiles(Int)
+    /// 1 ファイルが上限を超えた。
+    case fileTooLarge(String)
+    /// 合計が上限を超えた。
+    case totalTooLarge
+
+    public var errorDescription: String? {
+        switch self {
+        case .rejectedExtension(let name):
+            return "\(name) は添付できない形式だよ（PNG・JPEG・PDF・Markdown・テキスト）"
+        case .tooManyFiles(let limit):
+            return "添付は \(limit) 個までだよ"
+        case .fileTooLarge(let name):
+            return "\(name) が 20MB を超えているよ"
+        case .totalTooLarge:
+            return "添付の合計が 50MB を超えているよ"
+        }
+    }
+}
+
+/// 部屋が対応している機能。`/capabilities` の応答。
+///
+/// 未知のフラグは false とみなし、旧バックエンドの応答にも落ちないようにする。
+public struct RoomCapabilities: Decodable, Equatable, Sendable {
+    public let attachmentUpload: Bool
+    public let jobList: Bool
+    public let jobHistory: Bool
+
+    public init(
+        attachmentUpload: Bool = false,
+        jobList: Bool = false,
+        jobHistory: Bool = false
+    ) {
+        self.attachmentUpload = attachmentUpload
+        self.jobList = jobList
+        self.jobHistory = jobHistory
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case attachmentUpload = "attachment_upload"
+        case jobList = "job_list"
+        case jobHistory = "job_history"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        attachmentUpload = try container.decodeIfPresent(Bool.self, forKey: .attachmentUpload) ?? false
+        jobList = try container.decodeIfPresent(Bool.self, forKey: .jobList) ?? false
+        jobHistory = try container.decodeIfPresent(Bool.self, forKey: .jobHistory) ?? false
+    }
+
+    /// 添付が使えるか。
+    public var supportsAttachments: Bool { attachmentUpload }
+    /// 仕事一覧が使えるか。
+    public var supportsJobList: Bool { jobList }
 }

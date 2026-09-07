@@ -49,11 +49,11 @@ Discord (Mihari Bot) ────> forum 入出力（本家 Gateway は使わな
 | Method / Path | 状態 | 説明 |
 | --- | --- | --- |
 | `GET /health` | 実装済み | `{"status":"ok"}` |
-| `POST /jobs` | 実装済み | 仕事を投入。body: `{title?, body, source, requested_by?, allow_external_publish?}` → `{job_id, thread_id, status}`。`allow_external_publish` は Temporary Deploy（外部公開）の明示許可。無い限り agent に外部公開の道具を渡さない。Forum 作成失敗時は `503`（phantom queued を残さない） |
+| `POST /jobs` | 実装済み | 仕事を投入。body: `{title?, body, source, requested_by?, allow_external_publish?, screenshots?, attachments?}` → `{job_id, thread_id, status}`。`allow_external_publish` は Temporary Deploy（外部公開）の明示許可。無い限り agent に外部公開の道具を渡さない。Forum 作成失敗時は `503`（phantom queued を残さない）。`screenshots` は Mac スクショ（#22）の配列: `{filename, media_type, content_base64, source, source_title, display_id, window_id, pixel_width/height, point_width/height, backing_scale, frame_x/y}`。base64 のバイト列を `input/screenshots/` に保存し、Hermes のマルチモーダル入力へそのまま載せる。上限 6 枚・1 枚 30MB。画像非対応モデルでは明示的に失敗する。`attachments` は資料（PNG/JPEG/PDF/Markdown/テキスト、上限 10 個・各 20MB・合計 50MB） |
 | `POST /jobs/{id}/cancel` | 実装済み | body: `{by?}`。by 無しなら owner。頼んだ人か `MIHARI_OWNER_ID` だけ。`404` / `403`。実行中は worker thread に interrupt を届け、終了を待ってから次へ |
-| `POST /jobs/{id}/followup` | 実装済み | 同じジョブの続き（input/ に追記、空いたら再実行、実行中は終了後に再回し）。cancel 後の中断 thread 生存中は終了後に再開（生存中の再開はしない） |
+| `POST /jobs/{id}/followup` | 実装済み | 同じジョブの続き（input/ に追記、空いたら再実行、実行中は終了後に再回し）。cancel 後の中断 thread 生存中は終了後に再開（生存中の再開はしない）。`body` に加えて `screenshots?` を同じ形で受け、追記ターンで画像を渡す。既存の JSON 依頼は互換のまま |
 | `GET /jobs/running` | 実装済み | `{"jobs": [...]}`。今動いている 1 件 |
-| `GET /jobs/{id}` | 実装済み | 単体。`artifacts`（版ごとの一意 `id`・`visibility`・`preview_url`・`view_url`）と `temp_deploys`（claim URL 含む。認証済み）。`404` は無い仕事 |
+| `GET /jobs/{id}` | 実装済み | 単体。`artifacts`（版ごとの一意 `id`・`visibility`・`preview_url`・`view_url`）と `temp_deploys`（claim URL 含む。認証済み）と `screenshots`（保存済みスクショの名前・撮影メタデータ。パスは出さない）。`404` は無い仕事 |
 | `GET /jobs/{id}/events` | 実装済み | SSE。`Last-Event-ID` で再開。イベント `id` は整数連番（desktop は整数 OR 文字列どちらも decode すること）。未知・壊れた cursor は先頭から全件（取りこぼさない）。完了後 5 秒で閉じるので desktop は張り直して cursor から再開すること |
 | `GET /jobs/{id}/memory` | 実装済み | `{"candidates": [{id, target, content, status, created_at}]}`。`target` は `MEMORY.md` / `USER.md` |
 | `POST /jobs/{id}/memory/{candidate_id}/approve` | 実装済み | 候補を確定（owner 明示承認）。承認者は**サーバ設定の owner**（body の身分は使わない）。`MIHARI_OWNER_ID` 未設定は `403`。冪等（2 回目は同値 200）。済み逆遷移は `409`、未知候補は `404` |

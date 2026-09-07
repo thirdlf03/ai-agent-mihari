@@ -6,6 +6,8 @@ Phase 2/3: 仕事の詳細・イベントの SSE・成果物プレビューの�
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import mimetypes
@@ -17,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from starlette.responses import Response, StreamingResponse
 
 from mihari_room.artifacts import PREVIEWS_DIRNAME, ArtifactPublisher, read_publication
@@ -25,10 +27,13 @@ from mihari_room.auth import verify_token
 from mihari_room.config import RoomConfig
 from mihari_room.contracts import (
     DEFAULT_JOB_TITLE,
+    INPUT_DIRNAME,
+    SCREENSHOTS_DIRNAME,
     CreateJobRequest,
     Job,
     JobSource,
     JobStatus,
+    ScreenshotAttachment,
 )
 from mihari_room.discord.board import MAX_TITLE_LEN
 from mihari_room.events import EventJournal, EventPhase, JournalKind
@@ -47,6 +52,85 @@ HEARTBEAT_INTERVAL_SEC = 15.0
 #: 完了してから stream を閉じるまでの余裕。この間に続きが来たら繋ぎ直す。
 TERMINAL_HOLD_SEC = 5.0
 
+#: 依頼に同封できる添付の上限。desktop 側と同じ数値に揃える。
+MAX_ATTACHMENT_COUNT = 10
+#: 1 ファイルの上限 (20MB)。
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+#: 依頼全体の添付合計の上限 (50MB)。
+MAX_ATTACHMENT_TOTAL_BYTES = 50 * 1024 * 1024
+#: 受け付ける添付の拡張子。PNG・JPEG・PDF・Markdown・テキスト。
+ALLOWED_ATTACHMENT_EXT = frozenset({".png", ".jpg", ".jpeg", ".pdf", ".md", ".markdown", ".txt"})
+
+
+class JobAttachmentBody(BaseModel):
+    """JSON で送る添付 1 件。本文は base64。既存 JSON 依頼との互換を保つ。"""
+
+    name: str = ""
+    content_base64: str = ""
+
+
+#: Mac スクショ（#22）の上限。ペットからの依頼窓は 1 枚ずつなので控えめでよい。
+MAX_SCREENSHOTS_PER_REQUEST = 6
+#: 1 枚の画像バイト上限（base64 前）。スクショ PNG は数 MB に収まる想定。
+MAX_SCREENSHOT_BYTES = 30 * 1024 * 1024
+
+_ALLOWED_SCREENSHOT_MEDIA = {
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+}
+_ALLOWED_SCREENSHOT_SOURCES = {"display", "window"}
+
+
+class ScreenshotBody(BaseModel):
+    """依頼 JSON に載るスクショ 1 枚。バイト列は base64 で運ぶ。"""
+
+    filename: str
+    media_type: str = "image/png"
+    content_base64: str
+    #: 撮影メタデータ。Hermes へはバイト列で渡すため、これらは記録と将来の操作(#23)用。
+    source: str = "display"
+    source_title: str = ""
+    display_id: int | None = None
+    window_id: int | None = None
+    pixel_width: int | None = None
+    pixel_height: int | None = None
+    point_width: float | None = None
+    point_height: float | None = None
+    backing_scale: float = 1.0
+    frame_x: float | None = None
+    frame_y: float | None = None
+
+    @field_validator("filename")
+    @classmethod
+    def _plain_filename(cls, value: str) -> str:
+        name = Path(value or "").name
+        if not name or name != value:
+            raise ValueError("filename はファイル名だけ（パスは不可）")
+        return name
+
+    @field_validator("media_type")
+    @classmethod
+    def _image_media_type(cls, value: str) -> str:
+        if value not in _ALLOWED_SCREENSHOT_MEDIA:
+            raise ValueError(f"対応していない画像形式: {value}")
+        return value
+
+    @field_validator("source")
+    @classmethod
+    def _known_source(cls, value: str) -> str:
+        if value not in _ALLOWED_SCREENSHOT_SOURCES:
+            raise ValueError(f"未知の撮影元: {value}")
+        return value
+
+    @field_validator("backing_scale")
+    @classmethod
+    def _positive_scale(cls, value: float) -> float:
+        if value is not None and value <= 0:
+            raise ValueError("backing_scale は正の数")
+        return value
+
 
 class JobCreateBody(BaseModel):
     title: str = ""
@@ -56,6 +140,8 @@ class JobCreateBody(BaseModel):
     #: 依頼ごとの明示的な外部公開許可（Temporary Deploy の扉）。
     #: False なら agent に cloudflare_temp_deploy を渡さない。
     allow_external_publish: bool = False
+    screenshots: list[ScreenshotBody] = []
+    attachments: list[JobAttachmentBody] = []
 
 
 class JobCreateResponse(BaseModel):
@@ -67,10 +153,108 @@ class JobCreateResponse(BaseModel):
 class FollowupBody(BaseModel):
     body: str
     requested_by: str | None = None
+    screenshots: list[ScreenshotBody] = []
 
 
 class CancelBody(BaseModel):
     by: str | None = None
+
+
+def _decode_screenshots(screenshots: list[ScreenshotBody] | None) -> list[ScreenshotAttachment]:
+    """base64 のスクショをバイト列に戻す。上限を超えたら 400。"""
+    if not screenshots:
+        return []
+    if len(screenshots) > MAX_SCREENSHOTS_PER_REQUEST:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"スクショは {MAX_SCREENSHOTS_PER_REQUEST} 枚まで",
+        )
+    decoded: list[ScreenshotAttachment] = []
+    for item in screenshots:
+        try:
+            data = base64.b64decode(item.content_base64, validate=True)
+        except (ValueError, TypeError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"base64 を読めない: {item.filename}",
+            ) from error
+        if not data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"スクショが空: {item.filename}",
+            )
+        if len(data) > MAX_SCREENSHOT_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"スクショが大きすぎる: {item.filename} "
+                    f"({len(data)} bytes > {MAX_SCREENSHOT_BYTES})"
+                ),
+            )
+        decoded.append(
+            ScreenshotAttachment(
+                filename=item.filename,
+                data=data,
+                metadata={
+                    "media_type": item.media_type,
+                    "source": item.source,
+                    "source_title": item.source_title,
+                    "display_id": item.display_id,
+                    "window_id": item.window_id,
+                    "pixel_width": item.pixel_width,
+                    "pixel_height": item.pixel_height,
+                    "point_width": item.point_width,
+                    "point_height": item.point_height,
+                    "backing_scale": item.backing_scale,
+                    "frame_x": item.frame_x,
+                    "frame_y": item.frame_y,
+                },
+            )
+        )
+    return decoded
+
+
+def _decode_attachments(attachments: list[JobAttachmentBody]) -> list[tuple[str, bytes]]:
+    """base64 の添付を検証・復号する。上限・形式が違えば 400。"""
+    if len(attachments) > MAX_ATTACHMENT_COUNT:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"添付は {MAX_ATTACHMENT_COUNT} 個までだよ",
+        )
+    decoded: list[tuple[str, bytes]] = []
+    total = 0
+    for item in attachments:
+        name = Path(item.name).name.strip()
+        if not name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="添付の名前が空だよ"
+            )
+        ext = Path(name).suffix.lower()
+        if ext not in ALLOWED_ATTACHMENT_EXT:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{name} は添付できない形式だよ（PNG・JPEG・PDF・Markdown・テキスト）",
+            )
+        try:
+            data = base64.b64decode(item.content_base64, validate=True)
+        except (binascii.Error, ValueError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{name} のデータが壊れているよ",
+            ) from error
+        if len(data) > MAX_ATTACHMENT_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{name} が 20MB を超えているよ",
+            )
+        total += len(data)
+        if total > MAX_ATTACHMENT_TOTAL_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="添付の合計が 50MB を超えているよ",
+            )
+        decoded.append((name, data))
+    return decoded
 
 
 def derive_title(title: str, body: str) -> str:
@@ -176,7 +360,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def _job_detail(orchestrator: RoomOrchestrator, job: Job) -> dict[str, Any]:
-    """詳細。絶対パスは出さない。session と成果物は置いてあれば。"""
+    """詳細。絶対パスは出さない。session・成果物・スクショは置いてあれば。"""
     journal = EventJournal.for_job(job.directory)
     publisher = orchestrator.publisher
     artifacts = publisher.manifests_for(job.id) if publisher is not None else []
@@ -189,8 +373,75 @@ def _job_detail(orchestrator: RoomOrchestrator, job: Job) -> dict[str, Any]:
         "allow_external_publish": job.allow_external_publish,
         "artifacts": artifacts,
         "temp_deploys": temp_deploys_for(job.directory),
+        "screenshots": _screenshot_details(job),
         "latest_event": journal.latest(),
     }
+
+
+#: スクショの実体として認める拡張子（詳細一覧の表示用）。
+_SCREENSHOT_WEB_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif"})
+
+
+def _screenshot_details(job: Job) -> list[dict[str, Any]]:
+    """保存済みスクショの一覧。パスは出さず、名前と撮影メタデータだけ。"""
+    folder = job.directory / INPUT_DIRNAME / SCREENSHOTS_DIRNAME
+    if not folder.is_dir():
+        return []
+    result: list[dict[str, Any]] = []
+    for path in sorted(folder.glob("*.json")):
+        try:
+            meta = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        image = next(
+            (
+                p
+                for p in folder.glob(path.stem + ".*")
+                if p.is_file() and p.suffix.lower() in _SCREENSHOT_WEB_SUFFIXES
+            ),
+            None,
+        )
+        result.append(
+            {
+                "filename": meta.get("original_filename", path.stem),
+                "stored_name": image.name if image is not None else path.stem + ".png",
+                "media_type": meta.get("media_type"),
+                "source": meta.get("source"),
+                "source_title": meta.get("source_title"),
+                "display_id": meta.get("display_id"),
+                "window_id": meta.get("window_id"),
+                "pixel_width": meta.get("pixel_width"),
+                "pixel_height": meta.get("pixel_height"),
+                "backing_scale": meta.get("backing_scale"),
+                "frame_x": meta.get("frame_x"),
+                "frame_y": meta.get("frame_y"),
+            }
+        )
+    return result
+
+
+def _job_list_item(orchestrator: RoomOrchestrator, job: Job) -> dict[str, Any]:
+    """一覧 1 件。検索用に source・出生時刻・本文を足す。"""
+    detail = _job_detail(orchestrator, job)
+    detail["source"] = job.source.value
+    detail["created_at"] = _created_at(orchestrator, job.id)
+    detail["body"] = job.body
+    return detail
+
+
+def _created_at(orchestrator: RoomOrchestrator, job_id: str) -> float | None:
+    """meta.json の出生時刻。読めなければ None。"""
+    try:
+        raw = (orchestrator.store.job_dir(job_id) / "meta.json").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        value = float(json.loads(raw).get("created_at", 0.0))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return value
 
 
 def _preview_headers() -> dict[str, str]:
@@ -430,6 +681,7 @@ def create_app(
     @app.post("/jobs", dependencies=[Depends(verify_token)])
     async def create_job(request: Request, body: JobCreateBody) -> JobCreateResponse:
         title = derive_title(body.title, body.body)
+        attachments = _decode_attachments(body.attachments)
         job_request = CreateJobRequest(
             title=title,
             body=body.body,
@@ -437,8 +689,11 @@ def create_app(
             requested_by=body.requested_by,
             allow_external_publish=body.allow_external_publish,
         )
+        screenshots = _decode_screenshots(body.screenshots)
         try:
-            job = await request.app.state.orchestrator.submit(job_request)
+            job = await request.app.state.orchestrator.submit(
+                job_request, attachments=attachments, screenshots=screenshots
+            )
         except RuntimeError as error:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)
@@ -449,12 +704,29 @@ def create_app(
             status=job.status.value,
         )
 
+    @app.get("/capabilities", dependencies=[Depends(verify_token)])
+    def capabilities() -> dict[str, Any]:
+        """この部屋が実装している機能を返す。旧バックエンドでは未対応操作を出さないため。"""
+        return {
+            "attachment_upload": True,
+            "job_list": True,
+            "job_history": True,
+        }
+
     # 可変ルート `/jobs/{job_id}` より先に定義する（/jobs/running が奪われないように）。
     @app.get("/jobs/running", dependencies=[Depends(verify_token)])
     def list_running(request: Request) -> dict[str, Any]:
         orchestrator = request.app.state.orchestrator
         return {
             "jobs": [_job_detail(orchestrator, job) for job in orchestrator.store.list_running()]
+        }
+
+    # 履歴を含む一覧。待ち・実行中・完了・失敗・中断と Discord 作成を全部返す（新しい順）。
+    @app.get("/jobs", dependencies=[Depends(verify_token)])
+    def list_jobs(request: Request) -> dict[str, Any]:
+        orchestrator = request.app.state.orchestrator
+        return {
+            "jobs": [_job_list_item(orchestrator, job) for job in orchestrator.store.list_all()]
         }
 
     @app.get("/jobs/{job_id}", dependencies=[Depends(verify_token)])
@@ -473,9 +745,10 @@ def create_app(
         if not body.body.strip():
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="続きを書いて")
         orchestrator = request.app.state.orchestrator
+        screenshots = _decode_screenshots(body.screenshots)
         try:
             job = await orchestrator.follow_up_job(
-                job_id, body.body, requested_by=body.requested_by
+                job_id, body.body, requested_by=body.requested_by, screenshots=screenshots
             )
         except JobNotFound as error:
             raise HTTPException(

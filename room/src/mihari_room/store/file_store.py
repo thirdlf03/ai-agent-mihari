@@ -89,6 +89,10 @@ class FileJobStore:
         """作業中の机。ふつうは 0 か 1 件。古い順。"""
         return tuple(job for _, job in self._iter_jobs_sorted() if job.status is JobStatus.RUNNING)
 
+    def list_all(self) -> Sequence[Job]:
+        """全仕事を新しい順に。待ち・実行中・終端・Discord 作成を全部含む。"""
+        return tuple(job for _, job in reversed(self._iter_jobs_sorted()))
+
     def find_by_thread_id(self, thread_id: int) -> Job | None:
         """Forum スレッドから仕事を探す。無ければ None。"""
         for _, job in self._iter_jobs_sorted():

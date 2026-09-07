@@ -17,12 +17,15 @@ struct JobRequestClientTests {
         nonisolated(unsafe) static var lastRequest: URLRequest?
         /// 最後に受けた本文。
         nonisolated(unsafe) static var lastBody: Data?
+        /// 受けた要求の数。
+        nonisolated(unsafe) static var requestCount = 0
 
         override class func canInit(with request: URLRequest) -> Bool { true }
 
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
         override func startLoading() {
+            Self.requestCount += 1
             Self.lastRequest = request
             // URLSession は Data の本文を httpBodyStream に載せ替えて渡してくるため、両方見る。
             Self.lastBody = request.httpBody ?? Self.drain(stream: request.httpBodyStream)
@@ -65,6 +68,7 @@ struct JobRequestClientTests {
         StubURLProtocol.handler = nil
         StubURLProtocol.lastRequest = nil
         StubURLProtocol.lastBody = nil
+        StubURLProtocol.requestCount = 0
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubURLProtocol.self]
         let session = URLSession(configuration: configuration)
@@ -168,5 +172,187 @@ struct JobRequestClientTests {
         await #expect(throws: JobRequestError.requestFailed(status: 401, message: "合言葉が違う")) {
             try await client.submit(title: "掃除", body: "頼む")
         }
+    }
+
+    // MARK: - スクショ添付（#22）
+
+    @Test("スクショ付きの依頼はバイト列を base64 の screenshots に載せる")
+    func submitsScreenshotsAsEncodedBytes() async throws {
+        let client = makeClient()
+        StubURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data(#"{"job_id":"abc","status":"queued"}"#.utf8))
+        }
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3])
+        let attachment = ScreenshotAttachment(
+            filename: "shot.png",
+            pngData: png,
+            sourceKind: .window,
+            sourceTitle: "Safari: 設定",
+            displayID: 2,
+            windowID: 99,
+            pixelWidth: 1920,
+            pixelHeight: 1080,
+            pointWidth: 960,
+            pointHeight: 540,
+            backingScale: 2.0,
+            frameX: -1920,
+            frameY: 0
+        )
+
+        _ = try await client.submit(
+            title: "見て",
+            body: "この画面",
+            screenshots: [ScreenshotUploadPayload(attachment: attachment)]
+        )
+
+        let json = try sentJSON()
+        let shots = try #require(json["screenshots"] as? [[String: Any]])
+        #expect(shots.count == 1)
+        let shot = try #require(shots.first)
+        // 本文へパスを書くだけではなく、バイト列が JSON に載る。
+        let base64 = try #require(shot["content_base64"] as? String)
+        #expect(Data(base64Encoded: base64) == png)
+        #expect(base64.contains("input/screenshots") == false)
+        #expect(shot["media_type"] as? String == "image/png")
+        #expect(shot["source"] as? String == "window")
+        #expect(shot["source_title"] as? String == "Safari: 設定")
+        #expect(shot["display_id"] as? Int == 2)
+        #expect(shot["window_id"] as? Int == 99)
+        #expect(shot["backing_scale"] as? Double == 2.0)
+        #expect(shot["frame_x"] as? Double == -1920)
+    }
+
+    @Test("スクショが無い依頼は従来どおり screenshots キーを付けない")
+    func plainSubmitKeepsOldShape() async throws {
+        let client = makeClient()
+        StubURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data(#"{"job_id":"abc"}"#.utf8))
+        }
+
+        _ = try await client.submit(title: "掃除", body: "片付けて")
+
+        let json = try sentJSON()
+        #expect(json["screenshots"] == nil)
+        #expect(json["source"] as? String == "pet")
+    }
+
+    // MARK: - 添付
+
+    @Test("添付は base64 で JSON に載せて送る")
+    func sendsAttachmentsAsBase64() async throws {
+        let client = makeClient()
+        StubURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data(#"{"job_id":"abc","status":"queued"}"#.utf8))
+        }
+        let png = Data([0x89, 0x50, 0x4E, 0x47])
+
+        _ = try await client.submit(
+            title: "図を見て",
+            body: "参考にして",
+            attachments: [JobAttachment(fileName: "図.png", data: png)]
+        )
+
+        let json = try sentJSON()
+        let attachments = try #require(json["attachments"] as? [[String: Any]])
+        #expect(attachments.count == 1)
+        #expect(attachments[0]["name"] as? String == "図.png")
+        let content = try #require(attachments[0]["content"] as? String)
+        #expect(Data(base64Encoded: content) == png)
+    }
+
+    @Test("添付が無ければ attachments を送らない（旧形式のまま）")
+    func omitsAttachmentsWhenEmpty() async throws {
+        let client = makeClient()
+        StubURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data(#"{"job_id":"abc","status":"queued"}"#.utf8))
+        }
+
+        _ = try await client.submit(title: "掃除", body: "頼む")
+
+        #expect(try sentJSON()["attachments"] == nil)
+    }
+
+    @Test("形式の違う添付は送らずにエラーにする")
+    func rejectsInvalidAttachmentBeforeSending() async {
+        let client = makeClient()
+        StubURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data(#"{"job_id":"abc","status":"queued"}"#.utf8))
+        }
+
+        await #expect(throws: JobAttachmentError.rejectedExtension("悪意.exe")) {
+            try await client.submit(
+                title: "掃除",
+                body: "頼む",
+                attachments: [JobAttachment(fileName: "悪意.exe", data: Data("MZ".utf8))]
+            )
+        }
+        #expect(StubURLProtocol.requestCount == 0)
+    }
+
+    // MARK: - capabilities
+
+    @Test("対応機能を読める")
+    func readsCapabilities() async throws {
+        let client = makeClient()
+        StubURLProtocol.handler = { request in
+            #expect(request.url?.path == "/capabilities")
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data(#"{"attachment_upload":true,"job_list":true,"job_history":true}"#.utf8))
+        }
+
+        let caps = await client.fetchCapabilities()
+        #expect(caps?.supportsAttachments == true)
+        #expect(caps?.supportsJobList == true)
+    }
+
+    @Test("旧バックエンド（404）では capabilities が nil になる")
+    func oldBackendCapabilitiesAreNil() async {
+        let client = makeClient()
+        StubURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 404,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data(#"{"detail":"ない"}"#.utf8))
+        }
+
+        #expect(await client.fetchCapabilities() == nil)
     }
 }

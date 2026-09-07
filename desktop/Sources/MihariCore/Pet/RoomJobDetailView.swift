@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// 仕事の詳細パネル。進捗・成果物（版ごとの公開/非公開）と、承認待ちの記憶の候補を並べる。
+/// 仕事の詳細パネル。状態と最終結果 → 成果物（版ごとの公開/非公開） → 修正入力 → 折りたたんだ履歴・記憶の順に並べる。
 ///
 /// 成果物の版ごとに:
 /// - 公開中は共有 URL を開く / コピーし、「非公開に戻す」で発行済み URL を無効化できる
@@ -9,8 +9,8 @@ import SwiftUI
 /// - 「この版を再公開」は旧版の内容を新しい非公開バージョンとして載せ直す（rollback の改称）
 /// - 「この版から修正」は作業ファイルを復元してから指摘の実行に使う（実行中は復元不可）
 ///
-/// 記憶の候補は本文そのままを見せ、承認・却下のボタンを持つ。決定は API が成功してから
-/// 一覧を引き直すまで約束しない(成功前に「保存した」とは言わない)。
+/// 開いたときに固定した仕事（`jobID`）を最後まで見る。別ジョブの進捗で表示が切り替わらない。
+/// 長文・多数の成果物でも操作不能にならないよう、全体をスクロールできる可変サイズにする。
 public struct RoomJobDetailView: View {
     @ObservedObject var monitor: RoomJobMonitor
     @StateObject private var model: RoomJobDetailViewModel
@@ -43,58 +43,77 @@ public struct RoomJobDetailView: View {
         self.onPreviewAuthenticated = onPreviewAuthenticated
     }
 
+    /// いま見ている仕事。監視から外れたら `nil`（別の仕事には切り替えない）。
     private var tracked: RoomJobTrackedJob? {
-        monitor.jobs.first { $0.jobID == model.jobID } ?? monitor.jobs.first
+        model.trackedJob
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if let job = tracked {
-                Text(job.title)
-                    .font(.headline)
-                Text("状態: \(job.status.label)\(phaseSuffix(job))")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                if let latest = job.latestText, !latest.isEmpty {
-                    Text("進捗: \(latest)")
-                        .font(.body)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                if let job = tracked {
+                    statusSection(job)
+                    Divider()
+                    artifactSection(job)
+                    tempDeploySection(job)
+                    Divider()
+                    commentSection(job)
+                    Divider()
+                    historySection(job)
+                    memorySection(job)
+                } else {
+                    Text("仕事を追っていない")
+                        .font(.headline)
+                    Text("一覧から選ぶか、依頼窓から頼むとここに表示されるよ")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                if let error = job.lastError {
-                    Text("配信エラー: \(error)")
+                if let opError = tracked?.operationError {
+                    Text("操作エラー: \(opError)")
                         .font(.caption)
                         .foregroundStyle(.red)
                 }
-                Divider()
-                memorySection(job)
-                Divider()
-                artifactSection(job)
-                tempDeploySection(job)
-                Divider()
-                commentSection(job)
-            } else {
-                Text("仕事を追っていない")
-                    .font(.headline)
-                Text("依頼窓から頼むか、再起動後に拾い直すまで待ってね")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if let notice = model.notice {
-                Text(notice)
-                    .font(.caption)
-                    .foregroundStyle(model.didFail ? .red : .green)
-            }
-            HStack {
-                Spacer()
-                Button("更新する") {
-                    Task { await model.refresh() }
+                if let notice = model.notice {
+                    Text(notice)
+                        .font(.caption)
+                        .foregroundStyle(model.didFail ? .red : .green)
                 }
-                .disabled(model.isRefreshing)
+                HStack {
+                    Spacer()
+                    Button("更新する") {
+                        Task { await model.refresh() }
+                    }
+                    .disabled(model.isRefreshing)
+                }
             }
+            .padding()
         }
-        .padding()
-        .frame(width: 480, height: 720)
+        .frame(minWidth: 400, minHeight: 420)
         .task {
             await model.refresh()
+        }
+    }
+
+    // MARK: - 状態と最終結果
+
+    @ViewBuilder
+    private func statusSection(_ job: RoomJobTrackedJob) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(job.title)
+                .font(.headline)
+            Text("状態: \(job.status.label)\(phaseSuffix(job))")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            if let latest = job.latestText, !latest.isEmpty {
+                Text(latest)
+                    .font(.body)
+                    .textSelection(.enabled)
+            }
+            if let error = job.lastError {
+                Text("配信エラー: \(error)")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
         }
     }
 
@@ -103,58 +122,7 @@ public struct RoomJobDetailView: View {
         return " ・ \(phase.label)"
     }
 
-    @ViewBuilder
-    private func memorySection(_ job: RoomJobTrackedJob) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("記憶の候補(\(job.pendingMemoryCount)件待ち)")
-                .font(.headline)
-            if let error = job.memoryError {
-                Text("記憶の一覧エラー: \(error)")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
-            let pending = job.memories.filter(\.isPending)
-            if pending.isEmpty {
-                Text("承認待ちなし")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(pending) { candidate in
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(candidate.target.isEmpty ? "記憶" : candidate.target)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(candidate.content)
-                            .font(.body)
-                            .textSelection(.enabled)
-                        HStack {
-                            Spacer()
-                            if model.busyIDs.contains(candidate.candidateID) {
-                                ProgressView()
-                                    .controlSize(.small)
-                            }
-                            Button("承認する") {
-                                Task { await model.approve(candidateID: candidate.candidateID) }
-                            }
-                            .disabled(model.busyIDs.contains(candidate.candidateID))
-                            Button("却下する") {
-                                Task { await model.reject(candidateID: candidate.candidateID) }
-                            }
-                            .disabled(model.busyIDs.contains(candidate.candidateID))
-                        }
-                    }
-                    .padding(8)
-                    .border(Color.secondary.opacity(0.3))
-                }
-            }
-            let decided = job.memories.filter { !$0.isPending }
-            if !decided.isEmpty {
-                Text("決定済み \(decided.count)件")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
+    // MARK: - 成果物
 
     @ViewBuilder
     private func artifactSection(_ job: RoomJobTrackedJob) -> some View {
@@ -264,10 +232,12 @@ public struct RoomJobDetailView: View {
         }
     }
 
+    // MARK: - 修正入力
+
     @ViewBuilder
     private func commentSection(_ job: RoomJobTrackedJob) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("指摘して直す")
+            Text("修正を伝える")
                 .font(.headline)
             if let pinned = model.selectedFixVersion {
                 Text("修正対象: v\(pinned)（送ると作業ファイルを復元してから実行する）")
@@ -296,6 +266,95 @@ public struct RoomJobDetailView: View {
         }
     }
 
+    // MARK: - 折りたたみ（履歴・記憶）
+
+    @ViewBuilder
+    private func historySection(_ job: RoomJobTrackedJob) -> some View {
+        DisclosureGroup {
+            if job.history.isEmpty {
+                Text("履歴なし")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(job.history.enumerated()), id: \.offset) { _, entry in
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text(entry.kind?.label ?? "出来事")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            if let phase = entry.phase {
+                                Text(phase.label)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Text(entry.text)
+                            .font(.caption)
+                            .textSelection(.enabled)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        } label: {
+            Text("履歴(\(job.history.count))")
+                .font(.headline)
+        }
+    }
+
+    @ViewBuilder
+    private func memorySection(_ job: RoomJobTrackedJob) -> some View {
+        DisclosureGroup {
+            if let error = job.memoryError {
+                Text("記憶の一覧エラー: \(error)")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            let pending = job.memories.filter(\.isPending)
+            if pending.isEmpty {
+                Text("承認待ちなし")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(pending) { candidate in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(candidate.target.isEmpty ? "記憶" : candidate.target)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(candidate.content)
+                            .font(.body)
+                            .textSelection(.enabled)
+                        HStack {
+                            Spacer()
+                            if model.busyIDs.contains(candidate.candidateID) {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                            Button("承認する") {
+                                Task { await model.approve(candidateID: candidate.candidateID) }
+                            }
+                            .disabled(model.busyIDs.contains(candidate.candidateID))
+                            Button("却下する") {
+                                Task { await model.reject(candidateID: candidate.candidateID) }
+                            }
+                            .disabled(model.busyIDs.contains(candidate.candidateID))
+                        }
+                    }
+                    .padding(8)
+                    .border(Color.secondary.opacity(0.3))
+                }
+            }
+            let decided = job.memories.filter { !$0.isPending }
+            if !decided.isEmpty {
+                Text("決定済み \(decided.count)件")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } label: {
+            Text("記憶(\(job.pendingMemoryCount)件待ち)")
+                .font(.headline)
+        }
+    }
+
     private func artifactLabel(_ artifact: RoomArtifact) -> String {
         if let version = artifact.version, !version.isEmpty {
             return "v\(version)"
@@ -313,6 +372,7 @@ public struct RoomJobDetailView: View {
 }
 
 /// 詳細パネルの状態。承認・却下・公開切替の二重押しを抑え、失敗だけを知らせる。
+/// 固定した仕事（`jobID`）へ修正を送るので、別ジョブの進捗で対象は変わらない。
 @MainActor
 public final class RoomJobDetailViewModel: ObservableObject {
     /// 見ている仕事の ID。
@@ -335,17 +395,18 @@ public final class RoomJobDetailViewModel: ObservableObject {
         self.jobID = jobID
     }
 
-    /// いま見ている仕事。監視に無ければ `nil`。
-    private var trackedJob: RoomJobTrackedJob? {
-        monitor.jobs.first { $0.jobID == jobID } ?? monitor.jobs.first
+    /// いま見ている仕事。監視から外れたら `nil`。対象が消えたら別の仕事を
+    /// 代わりに見せない。
+    public var trackedJob: RoomJobTrackedJob? {
+        monitor.jobs.first { $0.jobID == jobID }
     }
 
-    /// 記憶の一覧を引き直す。詳細・候補イベント・決定後の更新口。
+    /// 状態・成果物・記憶の候補をまとめて引き直す。詳細の状態を正とする。
     public func refresh() async {
         guard !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
-        await monitor.refreshMemory(jobID: jobID)
+        await monitor.refreshArtifacts(jobID: jobID)
     }
 
     /// 候補を承認する。API が成功するまで結果を約束しない。
@@ -496,6 +557,21 @@ public final class RoomJobDetailViewModel: ObservableObject {
         } catch {
             didFail = true
             notice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+}
+
+extension RoomEventKind {
+    /// 履歴 1 件の見出し。
+    var label: String {
+        switch self {
+        case .speech: return "発言"
+        case .log: return "記録"
+        case .summary: return "まとめ"
+        case .file: return "成果物"
+        case .cancelled: return "中断"
+        case .memoryCandidate: return "記憶候補"
+        case .tempDeploy: return "一時デプロイ"
         }
     }
 }

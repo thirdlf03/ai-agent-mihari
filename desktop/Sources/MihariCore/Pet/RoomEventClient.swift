@@ -37,6 +37,8 @@ public struct RoomEventByteStream: AsyncSequence {
 public protocol RoomAccess: Sendable {
     /// `GET /jobs/running`。いま走っている仕事の詳細一覧。
     func listRunning() async throws -> [RoomJobDetail]
+    /// `GET /jobs`。待ち・実行中・終端・Discord 作成を含む全仕事（履歴込み、新しい順）。
+    func listJobs() async throws -> [RoomJobDetail]
     /// `GET /jobs/{id}`。仕事の詳細と成果物。
     func detail(jobID: String) async throws -> RoomJobDetail
     /// `POST /jobs/{id}/followup`。仕事へ追記する。
@@ -124,6 +126,11 @@ public struct RoomEventClient: Sendable, RoomAccess {
         return response.jobs
     }
 
+    public func listJobs() async throws -> [RoomJobDetail] {
+        let response: RoomJobsResponse = try await get("jobs")
+        return response.jobs
+    }
+
     public func detail(jobID: String) async throws -> RoomJobDetail {
         try await get("jobs/\(jobID)")
     }
@@ -133,7 +140,27 @@ public struct RoomEventClient: Sendable, RoomAccess {
         body: String,
         requestedBy: String? = nil
     ) async throws -> JobRequestResponse {
-        try await post("jobs/\(jobID)/followup", body: RoomFollowupBody(body: body, requestedBy: requestedBy))
+        try await post(
+            "jobs/\(jobID)/followup",
+            body: RoomFollowupBody(body: body, requestedBy: requestedBy)
+        )
+    }
+
+    /// 仕事へスクショ付きで追記する（#22）。
+    public func followup(
+        jobID: String,
+        body: String,
+        screenshots: [ScreenshotUploadPayload],
+        requestedBy: String? = nil
+    ) async throws -> JobRequestResponse {
+        try await post(
+            "jobs/\(jobID)/followup",
+            body: RoomFollowupBody(
+                body: body,
+                requestedBy: requestedBy,
+                screenshots: screenshots
+            )
+        )
     }
 
     public func cancel(jobID: String) async throws -> JobRequestResponse {
@@ -277,14 +304,35 @@ public struct RoomEventClient: Sendable, RoomAccess {
         return raw.isEmpty ? "詳細なし" : raw
     }
 
-    /// `POST /jobs/{id}/followup` の本文。
+    /// `POST /jobs/{id}/followup` の本文。スクショが無いときは従来どおりの JSON。
     private struct RoomFollowupBody: Encodable {
         let body: String
         let requestedBy: String?
+        let screenshots: [ScreenshotUploadPayload]
+
+        init(
+            body: String,
+            requestedBy: String?,
+            screenshots: [ScreenshotUploadPayload] = []
+        ) {
+            self.body = body
+            self.requestedBy = requestedBy
+            self.screenshots = screenshots
+        }
 
         enum CodingKeys: String, CodingKey {
             case body
             case requestedBy = "requested_by"
+            case screenshots
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(body, forKey: .body)
+            try container.encodeIfPresent(requestedBy, forKey: .requestedBy)
+            if !screenshots.isEmpty {
+                try container.encode(screenshots, forKey: .screenshots)
+            }
         }
     }
 

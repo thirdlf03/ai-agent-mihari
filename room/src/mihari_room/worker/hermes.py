@@ -154,7 +154,14 @@ def build_prompt(job: Job) -> str:
         "記憶に残したいことは memory ツールの action='add' に書いてください"
         "（承認後に保存されます。replace/remove は未対応です）。"
         "MEMORY.md や USER.md を file ツールで書かないでください。\n"
-        "必要な説明は標準出力の最後に 1〜数行で書いてください。"
+        "この部屋の人格（みはり）は SOUL.md にあります。返事とログはその口調で書いてください。\n"
+        "実際にやったこと・確かめたことだけを述べてください。"
+        "できていないこと、確認していないことを「できた」「完了した」と書かないでください。\n"
+        "成果物（HTML・記事・仕様・レポート）の本文は依頼された文体・形式を優先してください。"
+        "キャラクターの口調を成果物の本文に押し付けないでください。\n"
+        "最後の返答はみはりの発話として短く締めてください（読み上げる想定なので 1〜2 文）。\n"
+        "完了報告など長めの説明は、空行を空けて返答の末尾に数行までなら続けて構いません。\n"
+        "説明が長くなる場合は research/ か output/ のファイルに書いてください。\n"
     )
 
 
@@ -253,6 +260,20 @@ class HermesWorker:
     ) -> JobStatus:
         """ジョブフォルダを cwd に Hermes を実行し、進捗を流す。"""
         if self._command is not None:
+            # サブプロセス（偽 CLI）はマルチモーダルを渡せない。スクショがあれば明示失敗。
+            from mihari_room.worker.agent import undelivered_screenshots
+
+            if undelivered_screenshots(job):
+                await on_progress(
+                    ProgressEvent(
+                        kind=ProgressKind.LOG,
+                        text=(
+                            "スクショを添付した依頼はサブプロセス実行では扱えない"
+                            "（in-process で回して）"
+                        ),
+                    )
+                )
+                return JobStatus.FAILED
             return await self._run_subprocess(job, on_progress)
         return await self._run_inprocess(job, on_progress)
 

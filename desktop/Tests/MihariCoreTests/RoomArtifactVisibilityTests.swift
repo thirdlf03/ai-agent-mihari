@@ -25,6 +25,7 @@ struct RoomArtifactVisibilityTests {
         var streamsForOpen: [(RoomEventByteStream, Int)] = []
 
         func listRunning() async throws -> [RoomJobDetail] { listRunningResults }
+        func listJobs() async throws -> [RoomJobDetail] { listRunningResults }
         func detail(jobID: String) async throws -> RoomJobDetail {
             detailResults[jobID] ?? RoomJobDetail(jobID: jobID)
         }

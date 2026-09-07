@@ -5,11 +5,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 
 class JobStatus(StrEnum):
@@ -83,6 +83,20 @@ class CreateJobResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class ScreenshotAttachment:
+    """Mac スクショ 1 枚。バイト列と、Retina/複数画面のためのメタデータを持つ。
+
+    スクショは `input/screenshots/` に保存され、Hermes のマルチモーダル入力に
+    バイト列で載る。本文へファイルパスを書くだけでは済ませない（#22）。
+    """
+
+    filename: str
+    data: bytes
+    #: 撮影元ディスプレイ/ウィンドウの情報（scale・座標など）。任意。
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class ProgressEvent:
     kind: ProgressKind
     text: str
@@ -145,6 +159,8 @@ JOBS_DIRNAME = "jobs"
 INPUT_DIRNAME = "input"
 OUTPUT_DIRNAME = "output"
 META_FILENAME = "meta.json"
+#: Mac スクショ（#22）の置き場。input/ 配下に置き、成果物公開（output/）には入れない。
+SCREENSHOTS_DIRNAME = "screenshots"
 #: ペット依頼の本文。input/ が空に見えるのを防ぐ。
 REQUEST_FILENAME = "request.md"
 #: Discord Forum のスレッド名が空のときの題。
