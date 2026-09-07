@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from mihari_room.contracts import (
+    REQUEST_FILENAME,
     CreateJobRequest,
     ForumBoard,
     Job,
@@ -144,15 +145,38 @@ class RoomOrchestrator:
         self.wake()
         return self._store.get(job.id)
 
-    async def follow_up(self, thread_id: int, body: str, *, requested_by: str) -> Job:
+    async def follow_up(
+        self,
+        thread_id: int,
+        body: str,
+        *,
+        requested_by: str,
+        attachments: Sequence[tuple[str, bytes]] = (),
+    ) -> Job:
         """同じスレッドの続き。同じフォルダに追記して、空いたらもう一度回す。"""
         job = self._require_by_thread(thread_id)
-        return await self.follow_up_job(job.id, body, requested_by=requested_by)
+        return await self.follow_up_job(
+            job.id,
+            body,
+            requested_by=requested_by,
+            attachments=attachments,
+        )
 
-    async def follow_up_job(self, job_id: str, body: str, *, requested_by: str) -> Job:
-        """同じ仕事の続き。同じセッションへ次のターンとして回す。"""
+    async def follow_up_job(
+        self,
+        job_id: str,
+        body: str,
+        *,
+        requested_by: str,
+        attachments: Sequence[tuple[str, bytes]] = (),
+    ) -> Job:
+        """同じ仕事の続き。同じセッションへ次のターンとして回す。
+
+        ``attachments`` は次の実行に渡す資料として input/ に置く。
+        """
         job = self._store.get(job_id)
         self._write_followup(job.id, body)
+        self._save_attachments(job.id, attachments)
         current = self._store.get(job.id)
         if current.status is JobStatus.RUNNING:
             (self._store.job_dir(job.id) / REQUEUE_FILENAME).write_text("1", encoding="utf-8")
@@ -469,10 +493,26 @@ class RoomOrchestrator:
         path.write_text(body, encoding="utf-8")
 
     def _save_attachments(self, job_id: str, attachments: Sequence[tuple[str, bytes]]) -> None:
+        """資料を input/ に置く。依頼本文や追記ファイルは上書きしない。"""
         folder = self._store.input_dir(job_id)
         for name, data in attachments:
-            safe = Path(name).name or "attachment"
-            (folder / safe).write_bytes(data)
+            self._attachment_dest(folder, name).write_bytes(data)
+
+    @staticmethod
+    def _attachment_dest(folder: Path, name: str) -> Path:
+        safe = Path(name).name or "attachment"
+        if safe == REQUEST_FILENAME or safe.startswith("followup-"):
+            safe = f"attached-{safe}"
+        dest = folder / safe
+        if not dest.exists():
+            return dest
+        stem, suffix = dest.stem, dest.suffix
+        n = 2
+        while True:
+            candidate = folder / f"{stem}-{n}{suffix}"
+            if not candidate.exists():
+                return candidate
+            n += 1
 
     def _require_thread(self, job: Job) -> int:
         if job.thread_id is None:
