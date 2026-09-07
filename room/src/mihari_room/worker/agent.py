@@ -50,6 +50,12 @@ from mihari_room.contracts import (
     ProgressEvent,
     ProgressKind,
 )
+from mihari_room.persona import (
+    confirm_alone_line,
+    ensure_room_soul,
+    memory_candidate_line,
+    temp_deploy_posted_line,
+)
 from mihari_room.worker.progress import format_tool_progress
 
 logger = logging.getLogger("mihari_room")
@@ -59,6 +65,10 @@ SESSION_FILENAME = "hermes_session_id"
 
 #: followup の消費カーソル。実行した prompt 分だけ進める。
 FOLLOWUP_CURSOR_FILENAME = "followup_cursor"
+
+#: 失敗理由を残すファイル。FAILED の一言に理由と次の操作を載せるために
+#: orchestrator が読む。成功時は消す（古い理由を拾わないため）。
+FAILURE_REASON_FILENAME = "failure_reason.txt"
 
 #: interrupt 後に thread 終了を待つ猶予。超えても次の job は許さない
 #: （gate を離さず待ち続ける。fail-closed）。
@@ -165,6 +175,25 @@ def _persist_session_best_effort(job: Job, session_id: Any) -> None:
         write_session_id(job, value)
     except Exception:
         logger.debug("session id persist failed", exc_info=True)
+
+
+def clear_failure_reason(job: Job) -> None:
+    """前回の失敗理由を消す。仕事の開始時に呼ぶ。"""
+    try:
+        (job.directory / FAILURE_REASON_FILENAME).unlink(missing_ok=True)
+    except OSError:
+        logger.debug("failure reason clear failed", exc_info=True)
+
+
+def record_failure_reason(job: Job, reason: str | None) -> None:
+    """失敗理由を 1 行で残す（best effort）。空なら何もしない。"""
+    text = (reason or "").strip()
+    if not text:
+        return
+    try:
+        (job.directory / FAILURE_REASON_FILENAME).write_text(text, encoding="utf-8")
+    except OSError:
+        logger.debug("failure reason write failed", exc_info=True)
 
 
 # -- followup cursor ----------------------------------------------------
@@ -601,7 +630,7 @@ def _emit_candidate_event(job: Job, candidate: Any) -> None:
             job_id=job.id,
             phase=EventPhase.WAITING,
             kind=JournalKind.MEMORY_CANDIDATE,
-            text=f"memory 候補を預かったよ（{candidate.target}、承認待ち）。",
+            text=memory_candidate_line(candidate.target),
         )
     except Exception:
         logger.debug("memory candidate journal append failed", exc_info=True)
@@ -622,7 +651,7 @@ def _emit_candidate_event_for_id(job_id: str, candidate_store: Any, candidate: A
             job_id=job_id,
             phase=EventPhase.WAITING,
             kind=JournalKind.MEMORY_CANDIDATE,
-            text=f"memory 候補を預かったよ（{candidate.target}、承認待ち）。",
+            text=memory_candidate_line(candidate.target),
         )
     except Exception:
         logger.debug("memory candidate journal append failed", exc_info=True)
@@ -1080,7 +1109,7 @@ class InProcessHermes:
             emit(
                 ProgressEvent(
                     kind=ProgressKind.LOG,
-                    text=f"確認したいけど、一人で進める: {sanitize_preview(question)}",
+                    text=confirm_alone_line(sanitize_preview(question)),
                 )
             )
             if choices:
@@ -1094,6 +1123,8 @@ class InProcessHermes:
         pending = pending_followups(job) if read_session_id(job) else []
         # 未配信のスクショ（1 ターンの上限まで）。配信成功でカーソルが進む。
         screenshots = undelivered_screenshots(job)[:MAX_SCREENSHOTS_PER_TURN]
+        # 古い失敗理由は次の仕事に持ち越さない。
+        clear_failure_reason(job)
 
         def run_sync() -> tuple[Mapping[str, Any], str | None]:
             from mihari_room.worker.runtime_lock import scoped_hermes_home
@@ -1107,6 +1138,12 @@ class InProcessHermes:
                 _bounded_env(job.directory),
                 scoped_hermes_home(hermes_home),
             ):
+                # Room 専用の人格（SOUL.md）を自分の HERMES_HOME に用意する。
+                # 個人用 ~/.hermes には触れない。既存の SOUL.md は上書きしない。
+                try:
+                    ensure_room_soul(hermes_home)
+                except Exception:
+                    logger.debug("room soul seed failed", exc_info=True)
                 if not self._injected:
                     from mihari_room.worker.bootstrap import bootstrap_hermes
 
@@ -1282,6 +1319,8 @@ class InProcessHermes:
                             _persist_session_best_effort(job, session_id)
                     except Exception:
                         pass
+                    # 時間切れだったことを理由に残す（次の操作は orchestrator の文言に載る）。
+                    record_failure_reason(job, "時間切れ")
                     return JobStatus.FAILED
                 except _ImageInputUnsupported:
                     # モデルが画像を読めない（理由は LOG イベントで流し済み）。
@@ -1326,6 +1365,8 @@ class InProcessHermes:
 
         response = str((result or {}).get("final_response") or "").strip()
         if (result or {}).get("failed"):
+            # モデル自身が失敗を返した。理由を残して Forum/SSE の一言に載せる。
+            record_failure_reason(job, response or None)
             return JobStatus.FAILED
         if not response:
             from mihari_room.worker.wrangler_temp import temp_deploys_for
@@ -1334,8 +1375,17 @@ class InProcessHermes:
             preview = str(deploys[-1].get("preview_url") or "").strip() if deploys else ""
             if not preview:
                 return JobStatus.FAILED
-            response = f"一時デプロイしたよ: {preview}"
-        await on_progress(ProgressEvent(kind=ProgressKind.SPEECH, text=response))
+            response = temp_deploy_posted_line(preview)
+        clear_failure_reason(job)
+        # 返答は「発話（短い読み上げ）」と「説明（長い方）」を空行で分けられる。
+        # 分かれていたら、読み上げ用の短い文と説明用の長い文を別イベントで流す。
+        speech, _separator, explanation = response.partition("\n\n")
+        if not speech.strip():
+            # 空行から始まる変な返しは、まとめて発話として扱う。
+            speech, explanation = response, ""
+        await on_progress(ProgressEvent(kind=ProgressKind.SPEECH, text=speech.strip()))
+        if explanation.strip():
+            await on_progress(ProgressEvent(kind=ProgressKind.SUMMARY, text=explanation.strip()))
         return JobStatus.DONE
 
 

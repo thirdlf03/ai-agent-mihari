@@ -37,6 +37,8 @@ public struct RoomEventByteStream: AsyncSequence {
 public protocol RoomAccess: Sendable {
     /// `GET /jobs/running`。いま走っている仕事の詳細一覧。
     func listRunning() async throws -> [RoomJobDetail]
+    /// `GET /jobs`。待ち・実行中・終端・Discord 作成を含む全仕事（履歴込み、新しい順）。
+    func listJobs() async throws -> [RoomJobDetail]
     /// `GET /jobs/{id}`。仕事の詳細と成果物。
     func detail(jobID: String) async throws -> RoomJobDetail
     /// `POST /jobs/{id}/followup`。仕事へ追記する。
@@ -115,6 +117,11 @@ public struct RoomEventClient: Sendable, RoomAccess {
 
     public func listRunning() async throws -> [RoomJobDetail] {
         let response: RoomJobsResponse = try await get("jobs/running")
+        return response.jobs
+    }
+
+    public func listJobs() async throws -> [RoomJobDetail] {
+        let response: RoomJobsResponse = try await get("jobs")
         return response.jobs
     }
 
