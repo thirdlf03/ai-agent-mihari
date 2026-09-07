@@ -13,6 +13,8 @@ struct RoomJobMonitorTests {
     private final class StubRoomAccess: RoomAccess {
         var listRunningResults: [RoomJobDetail] = []
         private(set) var listRunningCalls = 0
+        var listJobsResults: [RoomJobDetail] = []
+        private(set) var listJobsCalls = 0
         var detailResults: [String: RoomJobDetail] = [:]
         private(set) var followupCalls: [String] = []
         private(set) var cancelCalls: [String] = []
@@ -28,6 +30,11 @@ struct RoomJobMonitorTests {
         func listRunning() async throws -> [RoomJobDetail] {
             listRunningCalls += 1
             return listRunningResults
+        }
+
+        func listJobs() async throws -> [RoomJobDetail] {
+            listJobsCalls += 1
+            return listJobsResults
         }
 
         func detail(jobID: String) async throws -> RoomJobDetail {
@@ -647,5 +654,32 @@ struct RoomJobMonitorTests {
         #expect(first <= .seconds(2))
         #expect(capped >= .seconds(29))
         #expect(capped <= .seconds(31))
+    }
+
+    @Test("流れた出来事を新しい順の履歴に残す")
+    func keepsHistoryNewestFirst() async throws {
+        let access = StubRoomAccess()
+        access.streamsForOpen = [
+            (
+                sse(frames: [
+                    frame(eventJSON(id: "1", jobID: "abc", phase: "queued", kind: "speech", text: "始める")),
+                    frame(eventJSON(id: "2", jobID: "abc", phase: "researching", kind: "log", text: "調べている")),
+                ]),
+                200
+            )
+        ]
+        let monitor = RoomJobMonitor(access: access, cursorStore: makeStore())
+
+        monitor.attach(jobID: "abc", title: "掃除")
+        defer { monitor.stopAll() }
+
+        try await eventually("履歴が 2 件残る") {
+            monitor.jobs.first?.history.count == 2
+        }
+        let history = monitor.jobs.first?.history ?? []
+        // 新しい順。
+        #expect(history.map(\.text) == ["調べている", "始める"])
+        #expect(history.first?.phase == .researching)
+        #expect(history.first?.kind == .log)
     }
 }

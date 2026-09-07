@@ -23,7 +23,17 @@ public enum PetMenuEntries {
         presenter: LivePetPresenter
     ) -> [PetMenuEntry] {
         let pet = presenter.controller
-        return [
+        // 旧バックエンドでは「仕事一覧」を出さない。
+        let jobListEntries: [PetMenuEntry] =
+            actions.supportsRoomJobList
+            ? [
+                .item(
+                    title: "仕事一覧を開く…",
+                    action: { actions.openRoomJobList() }
+                )
+            ]
+            : []
+        let head: [PetMenuEntry] = [
             .item(
                 title: actions.isWatching ? "監視を止める" : "監視を再開する",
                 action: {
@@ -53,6 +63,8 @@ public enum PetMenuEntries {
                 title: "仕事を頼む…",
                 action: { actions.openJobRequest() }
             ),
+        ]
+        let tail: [PetMenuEntry] = [
             roomEntries(actions: actions),
             .item(
                 title: "Discord 設定…",
@@ -94,6 +106,7 @@ public enum PetMenuEntries {
                 entries: PetDebugMenuEntries.make(actions: actions, presenter: presenter)
             ),
         ]
+        return head + jobListEntries + tail
     }
 
     /// 「作業部屋」サブメニュー。いま追っている仕事の状態と、追記・中断・成果物を開く操作を並べる。
