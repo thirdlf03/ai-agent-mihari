@@ -84,10 +84,12 @@ desktop は詳細 refresh 時に `GET .../memory` を引き直すこと。
   （`MIHARI_ROOM_ALLOW_SHELL=1` の明示 opt-in でのみ shell 系を許可）。
   `discord / discord_admin` 送信系は常に OFF。MCP 動的 toolset（`mcp-*`）も有効化しない
 - 残すのは読み・生成系：`file`（write_file/patch 含む）・`search`・`web`・
-  `session_search`・`memory`（承認制）・`mihari_room`（下記 bounded 3 件）
+  `session_search`・`memory`（承認制）・`mihari_room`（discord_search / recent /
+  channels / message / context / export）
 - Discord 横断検索・PDF 取り込みは shell 不要の in-process bounded ツールで提供する
   （実 Hermes registry に `mihari_room` toolset として登録・検証済み）：
-  `discord_search` / `discord_context` / `discord_export`
+  `discord_search` / `discord_recent` / `discord_channels` / `discord_message` /
+  `discord_context` / `discord_export`
   （archive DB 読み取り専用、export は `research/downloads/` 内のみ、結果は件数・字数頭打ち）。
   ジョブ内からサブプロセス CLI を呼ぶ必要は無い
 - 危険ツール名の最終扉として `delegate_task / skill_manage / cronjob_manage / terminal`
@@ -114,8 +116,9 @@ desktop は詳細 refresh 時に `GET .../memory` を引き直すこと。
   - preview ホストは `/previews/*` 以外を 404（API に触れない）
   - webroot に memory / research / manifests は置かない
   - 未実装の間は `MIHARI_PREVIEW_BASE_URL` は空のまま（公開全体が無効）
-- **アーカイブ**: `MIHARI_ARCHIVE_CHANNEL_IDS` の**明示的な許可リスト**だけ収録。
-  空なら archive は一切収録・投稿しない（opt-in）。
+- **アーカイブ**: 既定で Bot が見えるテキスト / スレッド / Forum を全部収録する。
+  `MIHARI_ARCHIVE_CHANNEL_IDS` は任意の絞り込み（空なら全チャンネル）。
+  起動時に各チャンネルの最終収録以降を history で埋め直す。
   検索・文脈・export は `python -m mihari_room.archive`（CLI）でも叩ける
 
 ## 環境変数
@@ -142,8 +145,8 @@ Python は **3.11**（room と Hermes を同じ interpreter で回す。3.14 の
 - [x] SSE（replay・unknown cursor 全件・heartbeat・完了後 close と再開）
 - [x] memory 承認フロー（list → approve/reject、冪等、`409`/`404`、owner のみ、
   承認文の home 永続化と次 session 読み込み、replace/remove 明示拒否）
-- [x] bounded `discord_search / context / export`（seeded メッセージ＋PDF、
-  sources.json/summary.md、実 registry 登録検証）
+- [x] bounded Discord 検索ツール（search / recent / channels / message / context /
+  export。seeded メッセージ＋PDF、sources.json/summary.md、実 registry 登録検証）
 - [x] 成果物公開（allowlist・sha 決定性・version 増加・session 連続・CSP・symlink 拒否）
 - [x] 起動直後の running → queued 復元＋再起動後の memory/candidates 永続
 - [x] ruff lint / format clean

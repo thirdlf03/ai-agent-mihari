@@ -24,6 +24,7 @@ def test_in_memory_store_creates_job_dirs(tmp_path: Path) -> None:
     assert job.status is JobStatus.QUEUED
     assert store.input_dir(job.id).is_dir()
     assert store.output_dir(job.id).is_dir()
+    assert (store.input_dir(job.id) / "request.md").is_file()
     assert store.get(job.id).id == job.id
 
 

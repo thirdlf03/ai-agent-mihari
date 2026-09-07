@@ -155,7 +155,10 @@ struct RoomMemoryJournalTests {
         ]
         access.streamsForOpen = [
             (
-                sse("data: {\"id\":7,\"job_id\":\"abc\",\"phase\":\"waiting\",\"kind\":\"memory_candidate\",\"text\":\"候補が出た\"}\n\n"),
+                sse(
+                    "data: {\"id\":7,\"job_id\":\"abc\",\"phase\":\"waiting\","
+                        + "\"kind\":\"memory_candidate\",\"text\":\"候補が出た\"}\n\n"
+                ),
                 200
             )
         ]
@@ -202,7 +205,9 @@ struct RoomMemoryJournalTests {
     @Test("記憶の一覧の形を読む")
     func decodesMemoryList() throws {
         let data = Data(
-            #"{"candidates":[{"id":"c1","target":"MEMORY.md","content":"深煎りが好き","status":"pending","created_at":1757073600}]}"#.utf8
+            (#"{"candidates":[{"id":"c1","target":"MEMORY.md","#
+                + #"content":"深煎りが好き","status":"pending","created_at":1757073600}]}"#)
+                .utf8
         )
         let response = try JSONDecoder().decode(RoomMemoryCandidatesResponse.self, from: data)
         #expect(response.candidates.count == 1)

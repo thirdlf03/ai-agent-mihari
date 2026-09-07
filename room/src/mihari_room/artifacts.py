@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from mihari_room.contracts import INPUT_DIRNAME, OUTPUT_DIRNAME, Job
+from mihari_room.contracts import INPUT_DIRNAME, OUTPUT_DIRNAME, REQUEST_FILENAME, Job
 
 #: 公開してよい web アセットの拡張子。これ以外は写さない。
 _ALLOWED_WEB_EXT = {
@@ -202,7 +202,7 @@ class ArtifactPublisher:
         inp = job.directory / INPUT_DIRNAME
         if not inp.is_dir():
             return []
-        return sorted(p.name for p in inp.iterdir() if p.is_file())
+        return sorted(p.name for p in inp.iterdir() if p.is_file() and p.name != REQUEST_FILENAME)
 
     def _registry_path(self, job_id: str) -> Path:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", job_id or ""):

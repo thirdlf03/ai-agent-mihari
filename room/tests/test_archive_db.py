@@ -24,6 +24,7 @@ def _message(
     channel_name: str = "main",
     created_at: dt.datetime | None = None,
     author_name: str = "たろー",
+    author_id: int = 42,
     thread_id: int | None = None,
 ) -> StoredMessage:
     return StoredMessage(
@@ -33,7 +34,7 @@ def _message(
         channel_name=channel_name,
         thread_id=thread_id,
         thread_name="スレ名" if thread_id else None,
-        author_id=42,
+        author_id=author_id,
         author_name=author_name,
         content=content,
         created_at=created_at or dt.datetime(2024, 1, 2, 3, 4, 5, tzinfo=dt.UTC),
@@ -299,5 +300,39 @@ def test_parameterized_query_no_injection(tmp_path: Path) -> None:
         hits = db.search(query="' OR 1=1 --")
         assert hits == []
         assert db.search(query="安全")[0].message.message_id == 1
+    finally:
+        db.close()
+
+
+def test_list_and_latest_and_author_filter(tmp_path: Path) -> None:
+    db = ArchiveDatabase(tmp_path / "messages.db")
+    try:
+        db.upsert_message(_message(1, "古い", created_at=dt.datetime(2024, 1, 1, tzinfo=dt.UTC)))
+        db.upsert_message(
+            _message(
+                2,
+                "花子のメモ",
+                author_id=99,
+                author_name="はなこ",
+                created_at=dt.datetime(2024, 1, 3, tzinfo=dt.UTC),
+            )
+        )
+        db.upsert_message(
+            _message(3, "スレ", thread_id=500, created_at=dt.datetime(2024, 1, 4, tzinfo=dt.UTC))
+        )
+        latest_ch = db.latest_created_at_for_scope(channel_id=111)
+        assert latest_ch is not None
+        assert latest_ch.date() == dt.date(2024, 1, 3)
+        latest_th = db.latest_created_at_for_scope(thread_id=500)
+        assert latest_th is not None
+        assert latest_th.date() == dt.date(2024, 1, 4)
+        channels = db.list_channels()
+        assert channels[0]["channel_id"] == 111
+        recent = db.list_messages(limit=2)
+        assert [m.message_id for m in recent] == [3, 2]
+        hits = db.search(query="メモ", author_ids=[99])
+        assert [h.message.message_id for h in hits] == [2]
+        hits = db.search(query="メモ", author_names=["はなこ"])
+        assert [h.message.message_id for h in hits] == [2]
     finally:
         db.close()

@@ -131,14 +131,25 @@ struct JobRequestClientTests {
         #expect((json["title"] as? String)?.count == 100)
     }
 
-    @Test("タイトルが空でも本文が空でも空文字のまま送る")
-    func emptyBodyStaysEmpty() async throws {
+    @Test("タイトルも本文も空なら依頼にする")
+    func emptyBodyUsesDefaultTitle() async throws {
         let client = makeClient()
 
         _ = try await client.submit(title: "", body: "")
 
         let json = try sentJSON()
-        #expect(json["title"] as? String == "")
+        #expect(json["title"] as? String == "依頼")
+    }
+
+    @Test("手入力のタイトルも 100 文字で切る")
+    func truncatesExplicitTitle() async throws {
+        let client = makeClient()
+        let long = String(repeating: "あ", count: 150)
+
+        _ = try await client.submit(title: long, body: "本文")
+
+        let json = try sentJSON()
+        #expect((json["title"] as? String)?.count == 100)
     }
 
     @Test("部屋がエラーを返したらその内容を持って投げる")

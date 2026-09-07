@@ -1,7 +1,7 @@
 """Discord Gateway からメッセージをアーカイブへ流す。
 
 - ``on_message`` は bounded キューに突っ込むだけ。Gateway を塞がない。
-- チャンネル許可リスト（``MIHARI_ARCHIVE_CHANNEL_IDS``）が無ければ何もしない。
+- チャンネル許可リスト（``MIHARI_ARCHIVE_CHANNEL_IDS``）が空なら、見えるチャンネル全部。
 - Bot 投稿は収録しない。編集は上書き、削除は deleted_at。
 - 添付は Discord CDN だけ。サイズ・MIME・拡張子の上限と PDF 本文抽出付き。
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import datetime as dt
+import inspect
 import logging
 from collections.abc import Sequence
 from pathlib import Path
@@ -110,6 +111,9 @@ def _as_datetime(value: Any) -> dt.datetime | None:
 
 
 def _channel_accepts(channel_id: int, config: ArchiveConfig) -> bool:
+    """空の許可リストは『全部』。値が有るときだけそのチャンネルに限る。"""
+    if not config.channel_ids:
+        return True
     return channel_id in config.channel_ids
 
 
@@ -154,18 +158,17 @@ class ArchiveIngester:
     def start(self) -> None:
         """ワーカーを立てる。有効でない設定なら何もしない。ループ内で呼ぶ。"""
         if not self.enabled:
-            logger.info("アーカイブは無効（MIHARI_ARCHIVE_CHANNEL_IDS 未設定）")
             return
         if self._worker is None or self._worker.done():
             if self._db is None:
                 self._db = ArchiveDatabase(self._config.db_path)
             self._queue = asyncio.Queue(maxsize=self._config.queue_size)
             self._worker = asyncio.create_task(self._run(), name="mihari-room-archive-worker")
-            logger.info(
-                "アーカイブ開始: db=%s channels=%s",
-                self._config.db_path,
-                ",".join(str(c) for c in self._config.channel_ids),
-            )
+            if self._config.channel_ids:
+                scope = ",".join(str(c) for c in self._config.channel_ids)
+            else:
+                scope = "all"
+            logger.info("アーカイブ開始: db=%s channels=%s", self._config.db_path, scope)
 
     async def _submit(self, task: _Task) -> None:
         """bounded キューへ突っ込む。一杯なら落とす（Gateway は塞がない）。"""
@@ -283,6 +286,79 @@ class ArchiveIngester:
         await self._fetcher.aclose()
         if self._db is not None:
             self._db.close()
+
+    async def catchup_client(self, client: Any) -> int:
+        """起動・再接続時に、見えているギルドの履歴ギャップを埋める。"""
+        guilds = tuple(getattr(client, "guilds", ()) or ())
+        return await self.catchup_guilds(guilds)
+
+    async def catchup_guilds(self, guilds: Sequence[Any]) -> int:
+        """各チャンネルの最終収録時刻以降を history で埋め直す。"""
+        if self._closed:
+            return 0
+        self._ensure_started()
+        total = 0
+        for guild in guilds:
+            try:
+                total += await self._catchup_guild(guild)
+            except Exception:
+                logger.exception("アーカイブ catchup 失敗 guild=%s", getattr(guild, "id", "?"))
+        logger.info("アーカイブ catchup 完了: %d 件", total)
+        return total
+
+    async def _catchup_guild(self, guild: Any) -> int:
+        inserted = 0
+        for target in await self._history_targets(guild):
+            after = self._latest_for_target(target)
+            history = getattr(target, "history", None)
+            if not callable(history):
+                continue
+            try:
+                async for message in history(after=after, limit=None, oldest_first=True):
+                    if not self._accepts(message):
+                        continue
+                    try:
+                        await self._ingest_message(message)
+                        inserted += 1
+                    except Exception:
+                        logger.exception("catchup 1 件失敗 message=%s", getattr(message, "id", "?"))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if _is_forbidden(exc):
+                    logger.info("catchup 権限なし: %s", getattr(target, "name", target))
+                    continue
+                logger.warning("catchup history 失敗 %s: %s", target, exc)
+                continue
+        return inserted
+
+    async def _history_targets(self, guild: Any) -> list[Any]:
+        """テキストチャンネル・スレッド・Forum スレ（アーカイブ済み含む）。"""
+        targets: list[Any] = []
+        for channel in getattr(guild, "text_channels", ()) or ():
+            channel_id = int(getattr(channel, "id", 0) or 0)
+            if channel_id and not _channel_accepts(channel_id, self._config):
+                continue
+            targets.append(channel)
+            targets.extend(getattr(channel, "threads", ()) or ())
+            await _extend_archived(targets, channel)
+        for forum in getattr(guild, "forums", ()) or ():
+            forum_id = int(getattr(forum, "id", 0) or 0)
+            if forum_id and not _channel_accepts(forum_id, self._config):
+                continue
+            targets.extend(getattr(forum, "threads", ()) or ())
+            await _extend_archived(targets, forum)
+        return targets
+
+    def _latest_for_target(self, target: Any) -> dt.datetime | None:
+        if self._db is None:
+            return None
+        target_id = getattr(target, "id", None)
+        if not isinstance(target_id, int):
+            return self._db.latest_created_at_for_scope()
+        if getattr(target, "parent", None) is not None:
+            return self._db.latest_created_at_for_scope(thread_id=target_id)
+        return self._db.latest_created_at_for_scope(channel_id=target_id)
 
     async def _run(self) -> None:
         try:
@@ -531,6 +607,34 @@ class ArchiveIngester:
                 )
             )
         return out
+
+
+def _is_forbidden(exc: BaseException) -> bool:
+    """discord.Forbidden 相当。テストではクラス名で見る。"""
+    name = type(exc).__name__
+    if name == "Forbidden":
+        return True
+    if name == "HTTPException" and getattr(exc, "status", None) == 403:
+        return True
+    return False
+
+
+async def _extend_archived(targets: list[Any], channel: Any) -> None:
+    archived = getattr(channel, "archived_threads", None)
+    if not callable(archived):
+        return
+    try:
+        result = archived(limit=100)
+        if inspect.isawaitable(result):
+            result = await result
+        async for thread in result:
+            targets.append(thread)
+    except TypeError:
+        return
+    except Exception as exc:
+        if _is_forbidden(exc):
+            return
+        logger.debug("archived_threads を取れない: %s", exc, exc_info=True)
 
 
 def _raw_attachments(raw: list[Any]) -> list[Any]:

@@ -22,9 +22,10 @@ Group=mihari
 EnvironmentFile=/etc/mihari-room/env
 
 # foreground の uvicorn を mihari-room CLI 経由で立てる（cli.py が同プロセスで server.serve()）。
-# ${MIHARI_ROOM_PYTHON} は EnvironmentFile の値が展開される（systemd の ExecStart 展開）。
-ExecStart=${MIHARI_ROOM_PYTHON} -m mihari_room.cli
-WorkingDirectory=${MIHARI_ROOM_ROOT}
+# systemd は EnvironmentFile の ${VAR} を ExecStart / WorkingDirectory では展開しない。
+# 第一引数も WorkingDirectory も絶対パス必須。秘密は env 側、パスはここに直書きする。
+ExecStart=/var/lib/mihari/room-venv/bin/python -m mihari_room.cli
+WorkingDirectory=/var/lib/mihari/room
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30

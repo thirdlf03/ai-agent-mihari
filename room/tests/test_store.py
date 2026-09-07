@@ -32,6 +32,11 @@ def test_create_makes_dirs_and_meta(tmp_path: Path) -> None:
     assert store.job_dir(job.id).is_dir()
     assert store.input_dir(job.id).is_dir()
     assert store.output_dir(job.id).is_dir()
+    request_md = store.input_dir(job.id) / "request.md"
+    assert request_md.is_file()
+    request_text = request_md.read_text(encoding="utf-8")
+    assert "おつかい" in request_text
+    assert "今日の分" in request_text
 
     # 正本の meta.json
     meta_path = job.directory / "meta.json"

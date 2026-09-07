@@ -220,7 +220,9 @@ def build_turn_prompt(job: Job) -> str:
         notes = "\n---\n".join(path.read_text(encoding="utf-8") for path in pending)
         return (
             f"続きの依頼:\n{notes}\n\n"
-            f"`{INPUT_DIRNAME}/` にある入力ファイルを読んで作業し、"
+            "作業内容は上の続きです。"
+            f"`{INPUT_DIRNAME}/followup-*.txt` にも同じ追記があります。"
+            f"`{INPUT_DIRNAME}/` に他の添付が無くても正常です。無いファイルを探さないでください。"
             f"結果は `{OUTPUT_DIRNAME}/` に書き出してください。"
             "必要な説明は標準出力の最後に 1〜数行で書いてください。"
         )

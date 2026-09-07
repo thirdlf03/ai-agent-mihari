@@ -1,28 +1,18 @@
 """Room-bound Discord archive tools (in-process, no shell).
 
-Hermes runs with ``terminal`` class toolsets OFF by default, so the old
-``MIHARI_ROOM_PYTHON -m mihari_room.archive ...`` subprocess path is dead
-inside a job. These three tools call the same archive DB/export code
-in-process, bound to the room root + the running job:
+Hermes は Discord を直接見ない。``messages.db`` を読むだけ。
+参照実装（discord-daily-summary-bot の Search API）に合わせて、
+検索・最近・チャンネル一覧・1件取得・前後・出典コピーを分ける。
 
-- ``discord_search`` — full-text search over the archived Discord history
-- ``discord_context`` — messages around one archived message
-- ``discord_export`` — copy attachments into ``jobs/<id>/research/downloads``
-
-Schemas are registered against the real Hermes ``tools.registry`` so tool
-names / JSON-schema shapes are verified at registration time (not just
-prompt text). All bounds are enforced in code, not in the prompt:
-
-- read-only: ``messages.db`` is opened read-only; no writes except export
-- export stays inside ``jobs/<id>/research/downloads`` (symlink escape rejected)
-- secrets are never echoed (payloads go through ``sanitize_preview``-style
-  redaction at the call site; jump_url citation required by SKILL.md)
-- result sizes are capped (``MAX_HITS`` / ``MAX_SNIPPET_CHARS``)
+- read-only: ``messages.db`` は読み取り専用。書き込みは export だけ
+- export は ``jobs/<id>/research/downloads`` の内側
+- 件数・字数は頭打ち
 """
 
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import logging
 from collections.abc import Callable
@@ -33,10 +23,18 @@ logger = logging.getLogger("mihari_room")
 
 TOOLSET_NAME = "mihari_room"
 
-TOOL_NAMES = ("discord_search", "discord_context", "discord_export")
+TOOL_NAMES = (
+    "discord_search",
+    "discord_recent",
+    "discord_channels",
+    "discord_message",
+    "discord_context",
+    "discord_export",
+)
 
 #: Hard caps so a tool call cannot dump the whole archive into context.
 MAX_HITS = 10
+MAX_LIST = 20
 MAX_SNIPPET_CHARS = 500
 MAX_CONTENT_CHARS = 2000
 
@@ -59,13 +57,51 @@ def _clip(text: Any, limit: int = MAX_SNIPPET_CHARS) -> str:
     return s if len(s) <= limit else s[: limit - 3] + "..."
 
 
-def _hit_payload(hit: Any, db: Any) -> dict[str, Any]:
-    msg = hit.message
+def _parse_dt(raw: str | None) -> dt.datetime | None:
+    token = (raw or "").strip()
+    if not token:
+        return None
+    if "T" in token:
+        parsed = dt.datetime.fromisoformat(token.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.UTC)
+        return parsed
+    day = dt.date.fromisoformat(token)
+    return dt.datetime.combine(day, dt.time.min, tzinfo=dt.datetime.now().astimezone().tzinfo)
+
+
+def _split_tokens(raw: str | None) -> tuple[list[int] | None, list[str] | None]:
+    if not raw:
+        return None, None
+    ids: list[int] = []
+    names: list[str] = []
+    for token in str(raw).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if token.isdigit():
+            ids.append(int(token))
+        else:
+            names.append(token)
+    return (ids or None), (names or None)
+
+
+def _cap_limit(raw: Any, default: int, ceiling: int) -> int:
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        n = default
+    return max(1, min(ceiling, n))
+
+
+def _msg_payload(msg: Any) -> dict[str, Any]:
     return {
-        "rank": getattr(hit, "rank", None),
-        "snippet": _clip(getattr(hit, "snippet", "")),
         "message_id": getattr(msg, "message_id", None),
+        "channel_id": getattr(msg, "channel_id", None),
         "channel_name": getattr(msg, "channel_name", None),
+        "thread_id": getattr(msg, "thread_id", None),
+        "thread_name": getattr(msg, "thread_name", None),
+        "author_id": getattr(msg, "author_id", None),
         "author_name": getattr(msg, "author_name", None),
         "created_at": str(getattr(msg, "created_at", "") or ""),
         "content": _clip(getattr(msg, "content", ""), MAX_CONTENT_CHARS),
@@ -73,62 +109,191 @@ def _hit_payload(hit: Any, db: Any) -> dict[str, Any]:
     }
 
 
-def discord_search_impl(job: Any, query: str, limit: int = 5, channel: str | None = None) -> str:
-    """Bounded in-process archive search. Returns JSON string."""
-    from mihari_room.archive.db import ArchiveDatabase  # noqa: F401 (import check)
+def _hit_payload(hit: Any, _db: Any) -> dict[str, Any]:
+    msg = hit.message
+    payload = _msg_payload(msg)
+    payload["rank"] = getattr(hit, "rank", None)
+    payload["snippet"] = _clip(getattr(hit, "snippet", ""))
+    return payload
 
-    room_root = _room_root_for_job(job)
-    q = (query or "").strip()
-    if not q:
-        return json.dumps({"success": False, "error": "query が空"}, ensure_ascii=False)
+
+def _with_db(job: Any, fn: Callable[[Any], dict[str, Any]]) -> str:
     try:
-        n = int(limit)
-    except (TypeError, ValueError):
-        n = 5
-    n = max(1, min(MAX_HITS, n))
-    channel_ids: list[int] | None = None
-    channel_names: list[str] | None = None
-    if channel:
-        ids: list[int] = []
-        names: list[str] = []
-        for token in str(channel).split(","):
-            token = token.strip()
-            if not token:
-                continue
-            if token.isdigit():
-                ids.append(int(token))
-            else:
-                names.append(token)
-        channel_ids = ids or None
-        channel_names = names or None
-    try:
-        db = _open_ro_db(room_root)
+        db = _open_ro_db(_room_root_for_job(job))
     except FileNotFoundError as exc:
         return json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)
     try:
-        hits = db.search(query=q, channel_ids=channel_ids, channel_names=channel_names, limit=n)
+        return json.dumps(fn(db), ensure_ascii=False)
     except Exception as exc:
-        logger.debug("discord_search failed", exc_info=True)
-        return json.dumps({"success": False, "error": f"search failed: {exc}"}, ensure_ascii=False)
+        logger.debug("discord tool failed", exc_info=True)
+        return json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)
     finally:
         try:
             db.close()
         except Exception:
             pass
-    return json.dumps(
-        {
+
+
+def discord_search_impl(
+    job: Any,
+    query: str,
+    limit: int = 5,
+    channel: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
+    author: str | None = None,
+) -> str:
+    """本文・添付・URL を横断検索する。"""
+    q = (query or "").strip()
+    if not q:
+        return json.dumps({"success": False, "error": "query が空"}, ensure_ascii=False)
+    try:
+        from_dt = _parse_dt(after)
+        to_dt = _parse_dt(before)
+    except ValueError as exc:
+        return json.dumps({"success": False, "error": f"日時が読めない: {exc}"}, ensure_ascii=False)
+    n = _cap_limit(limit, 5, MAX_HITS)
+    channel_ids, channel_names = _split_tokens(channel)
+    author_ids, author_names = _split_tokens(author)
+
+    def _run(db: Any) -> dict[str, Any]:
+        hits = db.search(
+            query=q,
+            channel_ids=channel_ids,
+            channel_names=channel_names,
+            from_dt=from_dt,
+            to_dt=to_dt,
+            author_ids=author_ids,
+            author_names=author_names,
+            limit=n,
+        )
+        attachments = db.search_attachments(
+            query=q,
+            channel_ids=channel_ids,
+            channel_names=channel_names,
+            from_dt=from_dt,
+            to_dt=to_dt,
+            limit=n,
+        )
+        urls = db.search_urls(
+            query=q,
+            channel_ids=channel_ids,
+            channel_names=channel_names,
+            from_dt=from_dt,
+            to_dt=to_dt,
+            limit=n,
+        )
+        return {
             "success": True,
             "query": q,
             "count": len(hits),
             "hits": [_hit_payload(h, db) for h in hits],
-        },
-        ensure_ascii=False,
-    )
+            "attachment_hits": [
+                {
+                    "filename": att.filename,
+                    "snippet": _clip(snippet),
+                    "message_id": msg.message_id,
+                    "jump_url": msg.jump_url,
+                    "channel_name": msg.channel_name,
+                }
+                for att, msg, snippet in attachments
+            ],
+            "url_hits": [
+                {
+                    "url": url.url,
+                    "title": url.title,
+                    "description": _clip(url.description or ""),
+                    "message_id": msg.message_id,
+                    "jump_url": msg.jump_url,
+                }
+                for url, msg in urls
+            ],
+        }
+
+    return _with_db(job, _run)
+
+
+def discord_recent_impl(
+    job: Any,
+    limit: int = 10,
+    channel: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
+    author: str | None = None,
+) -> str:
+    """キーワード無しの最近の発言。"""
+    try:
+        from_dt = _parse_dt(after)
+        to_dt = _parse_dt(before)
+    except ValueError as exc:
+        return json.dumps({"success": False, "error": f"日時が読めない: {exc}"}, ensure_ascii=False)
+    n = _cap_limit(limit, 10, MAX_LIST)
+    channel_ids, _names = _split_tokens(channel)
+    author_ids, _author_names = _split_tokens(author)
+    channel_id = channel_ids[0] if channel_ids else None
+    author_id = author_ids[0] if author_ids else None
+
+    def _run(db: Any) -> dict[str, Any]:
+        rows = db.list_messages(
+            channel_id=channel_id,
+            author_id=author_id,
+            from_dt=from_dt,
+            to_dt=to_dt,
+            limit=n,
+        )
+        return {
+            "success": True,
+            "count": len(rows),
+            "items": [_msg_payload(m) for m in rows],
+        }
+
+    return _with_db(job, _run)
+
+
+def discord_channels_impl(job: Any, limit: int = 50) -> str:
+    n = _cap_limit(limit, 50, 200)
+
+    def _run(db: Any) -> dict[str, Any]:
+        rows = db.list_channels(limit=n)
+        return {"success": True, "count": len(rows), "channels": rows}
+
+    return _with_db(job, _run)
+
+
+def discord_message_impl(job: Any, message_id: int) -> str:
+    try:
+        mid = int(message_id)
+    except (TypeError, ValueError):
+        return json.dumps(
+            {"success": False, "error": "message_id が数字ではない"}, ensure_ascii=False
+        )
+
+    def _run(db: Any) -> dict[str, Any]:
+        msg = db.get_message(mid)
+        if msg is None:
+            return {"success": False, "error": f"メッセージが archive に無い: {mid}"}
+        payload = _msg_payload(msg)
+        payload["attachments"] = [
+            {
+                "attachment_id": a.attachment_id,
+                "filename": a.filename,
+                "status": a.status,
+                "size": a.size,
+            }
+            for a in db.fetch_attachments_for_message(mid)
+        ]
+        payload["urls"] = [
+            {"url": u.url, "title": u.title, "description": _clip(u.description or "")}
+            for u in db.fetch_urls_for_message(mid)
+        ]
+        payload["success"] = True
+        return payload
+
+    return _with_db(job, _run)
 
 
 def discord_context_impl(job: Any, message_id: int, before: int = 3, after: int = 3) -> str:
     """Bounded in-process context fetch. Returns JSON string."""
-    room_root = _room_root_for_job(job)
     try:
         mid = int(message_id)
     except (TypeError, ValueError):
@@ -140,46 +305,20 @@ def discord_context_impl(job: Any, message_id: int, before: int = 3, after: int 
         na = max(0, min(10, int(after)))
     except (TypeError, ValueError):
         nb, na = 3, 3
-    try:
-        db = _open_ro_db(room_root)
-    except FileNotFoundError as exc:
-        return json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)
-    try:
+
+    def _run(db: Any) -> dict[str, Any]:
         try:
             anchor, before_msgs, after_msgs = db.fetch_context(mid, before=nb, after=na)
         except KeyError:
-            return json.dumps(
-                {"success": False, "error": f"メッセージが archive に無い: {mid}"},
-                ensure_ascii=False,
-            )
-        except Exception as exc:
-            return json.dumps(
-                {"success": False, "error": f"context failed: {exc}"}, ensure_ascii=False
-            )
+            return {"success": False, "error": f"メッセージが archive に無い: {mid}"}
+        return {
+            "success": True,
+            "anchor": _msg_payload(anchor),
+            "before": [_msg_payload(m) for m in before_msgs],
+            "after": [_msg_payload(m) for m in after_msgs],
+        }
 
-        def _msg(m: Any) -> dict[str, Any]:
-            return {
-                "message_id": getattr(m, "message_id", None),
-                "author_name": getattr(m, "author_name", None),
-                "created_at": str(getattr(m, "created_at", "") or ""),
-                "content": _clip(getattr(m, "content", ""), MAX_CONTENT_CHARS),
-                "jump_url": getattr(m, "jump_url", None) or "",
-            }
-
-        return json.dumps(
-            {
-                "success": True,
-                "anchor": _msg(anchor),
-                "before": [_msg(m) for m in before_msgs],
-                "after": [_msg(m) for m in after_msgs],
-            },
-            ensure_ascii=False,
-        )
-    finally:
-        try:
-            db.close()
-        except Exception:
-            pass
+    return _with_db(job, _run)
 
 
 def discord_export_impl(job: Any, message_id: int, no_fetch: bool = False) -> str:
@@ -217,9 +356,6 @@ def discord_export_impl(job: Any, message_id: int, no_fetch: bool = False) -> st
         except RuntimeError:
             loop = None
         if loop is not None:
-            # Already inside the agent worker thread without a running loop
-            # for this thread in practice; run a fresh loop via asyncio.run
-            # in a helper thread to avoid nesting.
             import concurrent.futures
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
@@ -246,16 +382,56 @@ def discord_export_impl(job: Any, message_id: int, no_fetch: bool = False) -> st
 
 
 def _make_handlers(job: Any) -> dict[str, Any]:
+    def search(**kwargs: Any) -> str:
+        return discord_search_impl(
+            job,
+            kwargs.get("query", ""),
+            kwargs.get("limit", 5),
+            kwargs.get("channel"),
+            kwargs.get("after"),
+            kwargs.get("before"),
+            kwargs.get("author"),
+        )
+
+    def recent(**kwargs: Any) -> str:
+        return discord_recent_impl(
+            job,
+            kwargs.get("limit", 10),
+            kwargs.get("channel"),
+            kwargs.get("after"),
+            kwargs.get("before"),
+            kwargs.get("author"),
+        )
+
+    def channels(**kwargs: Any) -> str:
+        return discord_channels_impl(job, kwargs.get("limit", 50))
+
+    def message(**kwargs: Any) -> str:
+        return discord_message_impl(job, kwargs.get("message_id", 0))
+
+    def context(**kwargs: Any) -> str:
+        return discord_context_impl(
+            job,
+            kwargs.get("message_id", 0),
+            kwargs.get("before", 3),
+            kwargs.get("after", 3),
+        )
+
+    def export(**kwargs: Any) -> str:
+        no_fetch = kwargs.get("no_fetch", False)
+        return discord_export_impl(
+            job,
+            kwargs.get("message_id", 0),
+            bool(no_fetch) if isinstance(no_fetch, (bool, int)) else False,
+        )
+
     return {
-        "discord_search": lambda query="", limit=5, channel=None, **_kwargs: discord_search_impl(
-            job, query, limit, channel
-        ),
-        "discord_context": lambda message_id=0, before=3, after=3, **_kwargs: discord_context_impl(
-            job, message_id, before, after
-        ),
-        "discord_export": lambda message_id=0, no_fetch=False, **_kwargs: discord_export_impl(
-            job, message_id, bool(no_fetch) if isinstance(no_fetch, (bool, int)) else False
-        ),
+        "discord_search": search,
+        "discord_recent": recent,
+        "discord_channels": channels,
+        "discord_message": message,
+        "discord_context": context,
+        "discord_export": export,
     }
 
 
@@ -265,8 +441,9 @@ _SCHEMAS: dict[str, dict[str, Any]] = {
         "function": {
             "name": "discord_search",
             "description": (
-                "Room アーカイブから Discord 履歴を全文検索する。"
-                "引用には jump_url を添える。messages.db は読み取り専用。"
+                "アーカイブから Discord 履歴を全文検索する。"
+                "本文に加え添付ファイル名・PDF 抽出文・共有 URL も返す。"
+                "日時 (after/before)・チャンネル・作者で絞れる。引用には jump_url を添える。"
             ),
             "parameters": {
                 "type": "object",
@@ -277,8 +454,66 @@ _SCHEMAS: dict[str, dict[str, Any]] = {
                         "type": "string",
                         "description": "チャンネル ID/名のカンマ区切り（省略可）",
                     },
+                    "after": {
+                        "type": "string",
+                        "description": "これ以降（YYYY-MM-DD または ISO 8601）",
+                    },
+                    "before": {
+                        "type": "string",
+                        "description": "これより前（YYYY-MM-DD または ISO 8601）",
+                    },
+                    "author": {
+                        "type": "string",
+                        "description": "作者 ID または表示名",
+                    },
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    "discord_recent": {
+        "type": "function",
+        "function": {
+            "name": "discord_recent",
+            "description": (
+                "キーワード無しで最近の発言を新しい順に返す。『最近何があった』を見るときに使う。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "default": 10, "minimum": 1, "maximum": 20},
+                    "channel": {"type": "string"},
+                    "after": {"type": "string"},
+                    "before": {"type": "string"},
+                    "author": {"type": "string"},
+                },
+            },
+        },
+    },
+    "discord_channels": {
+        "type": "function",
+        "function": {
+            "name": "discord_channels",
+            "description": "アーカイブに入っているチャンネル一覧（件数・最終発言）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "default": 50, "minimum": 1, "maximum": 200},
+                },
+            },
+        },
+    },
+    "discord_message": {
+        "type": "function",
+        "function": {
+            "name": "discord_message",
+            "description": "1 件のアーカイブメッセージと添付・URL を返す。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message_id": {"type": "integer"},
+                },
+                "required": ["message_id"],
             },
         },
     },
@@ -344,7 +579,6 @@ def register_discord_tools(job: Any) -> Callable[[], None] | None:
                 emoji="🔍",
             )
         except TypeError as exc:
-            # Registry signature drift: fail fast, never half-registered.
             logger.error("discord tool register failed for %s: %s", name, exc)
             for done in registered:
                 try:
@@ -353,7 +587,6 @@ def register_discord_tools(job: Any) -> Callable[[], None] | None:
                     pass
             raise
         except Exception:
-            # Already registered (e.g. re-entry): keep going.
             logger.debug("discord tool %s already registered", name, exc_info=True)
             continue
         registered.append(name)

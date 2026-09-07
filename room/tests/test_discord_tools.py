@@ -16,8 +16,11 @@ from mihari_room.fakes import InMemoryJobStore
 from mihari_room.worker.discord_tools import (
     _SCHEMAS,
     TOOL_NAMES,
+    discord_channels_impl,
     discord_context_impl,
     discord_export_impl,
+    discord_message_impl,
+    discord_recent_impl,
     discord_search_impl,
     register_discord_tools,
 )
@@ -84,6 +87,33 @@ def test_search_validates_query_and_missing_db(tmp_path: Path) -> None:
     assert json.loads(discord_search_impl(job, "ごはん", limit=999))["count"] <= 10
 
 
+def test_search_includes_attachments_and_date_filter(tmp_path: Path) -> None:
+    _seed_db(tmp_path)
+    job = _make_job(tmp_path)
+    payload = json.loads(discord_search_impl(job, "report.pdf"))
+    assert payload["success"] is True
+    assert payload["attachment_hits"]
+    dated = json.loads(discord_search_impl(job, "ごはん", after="2099-01-01", before="2099-12-31"))
+    assert dated["success"] is True
+    assert dated["count"] == 0
+
+
+def test_recent_channels_and_message_detail(tmp_path: Path) -> None:
+    _seed_db(tmp_path)
+    job = _make_job(tmp_path)
+    recent = json.loads(discord_recent_impl(job, limit=5))
+    assert recent["success"] is True
+    assert recent["count"] >= 1
+    channels = json.loads(discord_channels_impl(job))
+    assert channels["success"] is True
+    assert channels["count"] >= 1
+    detail = json.loads(discord_message_impl(job, 2))
+    assert detail["success"] is True
+    assert detail["attachments"]
+    missing = json.loads(discord_message_impl(job, 999999))
+    assert missing["success"] is False
+
+
 def test_context_returns_anchor_and_neighbors(tmp_path: Path) -> None:
     _seed_db(tmp_path)
     job = _make_job(tmp_path)
@@ -145,6 +175,9 @@ def test_tool_names_and_schemas_match_registry() -> None:
     assert set(_SCHEMAS) == set(TOOL_NAMES)
     assert set(TOOL_NAMES) == {
         "discord_search",
+        "discord_recent",
+        "discord_channels",
+        "discord_message",
         "discord_context",
         "discord_export",
     }

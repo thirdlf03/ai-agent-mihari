@@ -9,7 +9,11 @@
 Room のジョブ内では **in-process ツール**を使う（shell は既定で無効のため、
 サブプロセスの CLI はジョブ内からは呼ばない）。Hermes の tool として登録済み：
 
-- `discord_search` — 発言の全文検索（`query`, `limit`〜10, `channel` 省略可）
+- `discord_search` — 本文・添付・URL の全文検索（`query`, `limit`, `channel`,
+  `after`, `before`, `author`）
+- `discord_recent` — キーワード無しの最近の発言
+- `discord_channels` — 収録チャンネル一覧
+- `discord_message` — 1 件の詳細（添付・URL 付き）
 - `discord_context` — `message_id` の前後を読む（`before`/`after` 0〜10）
 - `discord_export` — 添付を `jobs/<id>/research/downloads/` にコピーし、
   `sources.json` / `summary.md` を作る（`message_id`, `no_fetch` 省略可）
@@ -116,8 +120,9 @@ python -m mihari_room.archive export \
 
 ## トラブルシューティング
 
-- `アーカイブが無い: …/messages.db` → その root ではまだ収録されていない。
-  `MIHARI_ARCHIVE_CHANNEL_IDS` を設定してデーモンを再起動すると収録が始まる。
+- `アーカイブが無い: …/messages.db` → まだ収録が始まっていない。デーモンを再起動すると
+  見えるチャンネルの履歴キャッチアップが走る。
+  特定チャンネルだけにしたいときだけ `MIHARI_ARCHIVE_CHANNEL_IDS` を書く。
 - 検索結果が 0 件 → 3 文字未満の語でも LIKE で引けるはず。`--channel` が
   間違っていないか確認する。
 - `MIHARI_ROOM_PYTHON` が無く module が見つからない → `cd room && uv sync` を実行。

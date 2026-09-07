@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 from pathlib import Path
 
 import httpx
@@ -54,14 +55,18 @@ def _ingester(
     return ArchiveIngester(config, db, fetcher=fetcher)
 
 
-async def test_disabled_when_no_channel_allowlist(tmp_path: Path) -> None:
+async def test_empty_allowlist_records_all_guild_channels(tmp_path: Path) -> None:
     config = _config(tmp_path, channels=())
     ing = _ingester(config)
     ing.start()
-    await ing.handle_message(fake_message(1, "収録されるべきではない"))
+    await ing.handle_message(fake_message(4, "どのチャンネルでも控える", channel_id=999))
     await ing.aclose()
-    assert not config.enabled
-    assert not (tmp_path / "messages.db").exists()
+    assert config.enabled
+    db = ArchiveDatabase(tmp_path / "messages.db")
+    try:
+        assert db.get_message(4) is not None
+    finally:
+        db.close()
 
 
 async def test_bot_and_dm_are_skipped(tmp_path: Path) -> None:
@@ -339,5 +344,47 @@ async def test_url_metadata_extracted(tmp_path: Path) -> None:
         assert urls[0].fetch_status == "ok"
         assert urls[0].title == "良い記事"
         assert urls[0].description == "素敵な説明"
+    finally:
+        db.close()
+
+
+async def test_catchup_skips_already_stored_and_fills_gap(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    ing = _ingester(_config(tmp_path))
+    ing.start()
+    await ing.handle_message(fake_message(1, "既にある", created_at="2024-01-02T00:00:00+00:00"))
+    assert ing._queue is not None
+    await asyncio.wait_for(ing._queue.join(), timeout=2)
+
+    newer = fake_message(2, "落ちてる間", created_at="2024-01-03T00:00:00+00:00")
+    older = fake_message(1, "もうある", created_at="2024-01-02T00:00:00+00:00")
+
+    class _Channel:
+        def __init__(self) -> None:
+            self.id = 111
+            self.name = "main"
+            self.parent = None
+            self.threads = []
+
+        def history(self, *, after=None, limit=None, oldest_first=True):
+            async def _gen():
+                for msg in (older, newer):
+                    ts = dt.datetime.fromisoformat(str(msg.created_at).replace("Z", "+00:00"))
+                    if after is not None and ts <= after:
+                        continue
+                    yield msg
+
+            return _gen()
+
+    guild = SimpleNamespace(id=777, text_channels=[_Channel()], forums=[])
+    inserted = await ing.catchup_guilds([guild])
+    await ing.aclose()
+    assert inserted == 1
+    db = ArchiveDatabase(tmp_path / "messages.db")
+    try:
+        assert db.get_message(1) is not None
+        assert db.get_message(2) is not None
+        assert db.get_message(2).content == "落ちてる間"
     finally:
         db.close()

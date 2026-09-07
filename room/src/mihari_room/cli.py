@@ -77,6 +77,7 @@ async def _run_with_discord(config: RoomConfig) -> None:
     @client.event
     async def on_ready() -> None:
         archive.start()
+        asyncio.create_task(archive.catchup_client(client), name="mihari-archive-catchup")
         if config.forum_channel_id is None:
             logger.error("MIHARI_FORUM_CHANNEL_ID が無い")
             return
