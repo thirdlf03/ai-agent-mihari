@@ -27,8 +27,26 @@ from mihari_room.events import (
     kind_from_progress,
     sanitize_text,
 )
+from mihari_room.persona import (
+    accepted_line,
+    cancel_accepted_line,
+    cancelled_line,
+    done_line,
+    failure_line,
+    followup_again_line,
+    followup_queued_line,
+    preview_posted_line,
+    publish_failed_line,
+    restart_line,
+    start_line,
+    temp_deploy_posted_line,
+    thread_create_failed_line,
+)
 from mihari_room.store.file_store import JobNotFound
-from mihari_room.worker.agent import read_session_id
+from mihari_room.worker.agent import (
+    FAILURE_REASON_FILENAME,
+    read_session_id,
+)
 from mihari_room.worker.wrangler_temp import temp_deploys_for
 
 logger = logging.getLogger("mihari_room")
@@ -84,7 +102,7 @@ class RoomOrchestrator:
                 job_id=job.id,
                 phase=EventPhase.QUEUED,
                 kind=JournalKind.LOG,
-                text=f"再起動したよ。{job.title} は待ちに戻した。",
+                text=restart_line(job.title),
             )
         # running が無くても、待ちの仕事があれば机は回り出す。
         if restored or self._store.list_queued():
@@ -130,7 +148,7 @@ class RoomOrchestrator:
                     job_id=job.id,
                     phase=EventPhase.FAILED,
                     kind=JournalKind.LOG,
-                    text="スレッドが切れなかったよ。もう一度頼んで。",
+                    text=thread_create_failed_line(),
                 )
                 raise RuntimeError(f"Forum スレッドが切れない: {exc}") from exc
             job = self._store.set_thread_id(job.id, thread_id)
@@ -140,7 +158,7 @@ class RoomOrchestrator:
             job_id=job.id,
             phase=EventPhase.QUEUED,
             kind=JournalKind.LOG,
-            text=f"受け付けたよ。{job.title}",
+            text=accepted_line(job.title),
         )
         self.wake()
         return self._store.get(job.id)
@@ -192,7 +210,7 @@ class RoomOrchestrator:
                 job_id=job.id,
                 phase=EventPhase.QUEUED,
                 kind=JournalKind.LOG,
-                text=f"続きが来た。{job.title} はまた待ちに並んだ。",
+                text=followup_queued_line(job.title),
             )
             await self._board.set_tag(self._require_thread(current), JobStatus.QUEUED)
             self._queue.enqueue(current)
@@ -214,11 +232,11 @@ class RoomOrchestrator:
             job_id=job_id,
             phase=EventPhase.WAITING,
             kind=JournalKind.CANCELLED,
-            text="やめたよ。途中まで残しておくね。",
+            text=cancelled_line(),
         )
         if thread_id is not None:
             await self._board.set_tag(thread_id, JobStatus.CANCELLED)
-            await self._board.post_speech(thread_id, "わかった。途中まで残しておくね。")
+            await self._board.post_speech(thread_id, cancel_accepted_line())
         self.wake()
         return self._store.get(job.id)
 
@@ -367,7 +385,7 @@ class RoomOrchestrator:
             job_id=job.id,
             phase=current_phase,
             kind=JournalKind.LOG,
-            text=f"はじめるね。{job.title}",
+            text=start_line(job.title),
         )
 
         error: str | None = None
@@ -398,7 +416,7 @@ class RoomOrchestrator:
                     job_id=job.id,
                     phase=EventPhase.QUEUED,
                     kind=JournalKind.LOG,
-                    text="続きが来た。もう一度やるね。",
+                    text=followup_again_line(),
                 )
                 await self._board.set_tag(thread_id, JobStatus.QUEUED)
                 self._queue.enqueue(latest)
@@ -411,23 +429,27 @@ class RoomOrchestrator:
                 job_id=job.id,
                 phase=EventPhase.DONE,
                 kind=JournalKind.SUMMARY,
-                text=terminal_text or "やりきったよ。",
+                text=terminal_text or done_line(),
             )
             await self._publish_if_any(job, thread_id)
         elif status is JobStatus.FAILED:
+            # 失敗は Forum にも一言出す。理由（分かれば）と次の操作を伝える。
+            reason = error or _read_failure_reason(job)
+            line = failure_line(reason)
             journal.append(
                 job_id=job.id,
                 phase=EventPhase.FAILED,
                 kind=JournalKind.LOG,
-                text=error or terminal_text or "うまくいかなかったよ。",
+                text=line,
             )
+            await self._board.post_speech(thread_id, line)
         if wants_again:
             latest = self._store.set_status(job.id, JobStatus.QUEUED)
             journal.append(
                 job_id=job.id,
                 phase=EventPhase.QUEUED,
                 kind=JournalKind.LOG,
-                text="続きが来た。もう一度やるね。",
+                text=followup_again_line(),
             )
             await self._board.set_tag(thread_id, JobStatus.QUEUED)
             self._queue.enqueue(latest)
@@ -447,13 +469,13 @@ class RoomOrchestrator:
                 job_id=job.id,
                 phase=EventPhase.DONE,
                 kind=JournalKind.LOG,
-                text="プレビューの公開に失敗したよ（仕事は完了）。",
+                text=publish_failed_line(),
             )
             return
         if manifest is None or not manifest.get("preview_url"):
             return
         url = manifest["preview_url"]
-        message = f"プレビューを置いたよ: {url}"
+        message = preview_posted_line(url)
         self._journal(job.id).append(
             job_id=job.id,
             phase=EventPhase.DONE,
@@ -470,7 +492,7 @@ class RoomOrchestrator:
         url = str(deploys[-1].get("preview_url") or "").strip()
         if not url:
             return
-        message = f"一時デプロイしたよ: {url}"
+        message = temp_deploy_posted_line(url)
         self._journal(job.id).append(
             job_id=job.id,
             phase=EventPhase.DONE,
@@ -524,3 +546,13 @@ class RoomOrchestrator:
         if job is None:
             raise JobNotFound(f"thread {thread_id}")
         return job
+
+
+def _read_failure_reason(job: Job) -> str | None:
+    """worker（Hermes）が失敗理由として残したファイルを読む。無ければ None。"""
+    path = job.directory / FAILURE_REASON_FILENAME
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return text or None

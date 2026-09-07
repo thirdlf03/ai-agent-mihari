@@ -206,6 +206,11 @@ def main() -> None:
     hermes_home.mkdir(parents=True, exist_ok=True)
     os.environ["HERMES_HOME"] = str(hermes_home)
     logger.info("HERMES_HOME=%s", hermes_home)
+    # Room 専用の人格（SOUL.md）を用意する。個人用 ~/.hermes は触らない。
+    # 既に SOUL.md がある場合（運営のカスタム・空ファイルでの無効化）は上書きしない。
+    from mihari_room.persona import ensure_room_soul
+
+    ensure_room_soul(hermes_home)
     try:
         with room_lock(config.root), hermes_home_lock(hermes_home):
             asyncio.run(_run_with_discord(config))

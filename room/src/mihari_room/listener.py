@@ -12,6 +12,7 @@ from mihari_room.discord.inbound import (
     parse_forum_post,
 )
 from mihari_room.orchestrator import RoomOrchestrator
+from mihari_room.persona import cancel_denied_line, cancel_failed_line
 from mihari_room.queue.file_queue import CancelNotAllowed
 from mihari_room.store.file_store import JobNotFound
 
@@ -136,12 +137,12 @@ async def _cancel_or_explain(orchestrator: RoomOrchestrator, thread_id: int, *, 
         await orchestrator.cancel_thread(thread_id, by=by)
     except CancelNotAllowed:
         logger.info("Forum のキャンセルを断った thread=%s by=%s", thread_id, by)
-        await _say_or_log(orchestrator, thread_id, "あなたには止められないよ")
+        await _say_or_log(orchestrator, thread_id, cancel_denied_line())
     except JobNotFound:
         logger.info("止める仕事がない thread=%s", thread_id)
     except Exception:
         logger.exception("Forum のキャンセルに失敗した thread=%s", thread_id)
-        await _say_or_log(orchestrator, thread_id, "止められなかった。あとで見て。")
+        await _say_or_log(orchestrator, thread_id, cancel_failed_line())
 
 
 async def _say_or_log(orchestrator: RoomOrchestrator, thread_id: int, text: str) -> None:
