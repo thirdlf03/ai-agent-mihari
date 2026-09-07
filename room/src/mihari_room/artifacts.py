@@ -69,6 +69,17 @@ REGISTRY_DIRNAME = "registry"
 ARTIFACT_DIRNAME = "artifact"
 
 
+def _version_id(artifact_id: str, version: int) -> str:
+    return f"{artifact_id}-v{version}"
+
+
+def _token_from_preview_url(url: str) -> str | None:
+    token = url.strip().rstrip("/").rsplit("/", 1)[-1]
+    if re.fullmatch(r"[A-Za-z0-9_-]+", token or ""):
+        return token
+    return None
+
+
 def _is_secret_name(name: str) -> bool:
     lower = name.lower()
     if lower in _SECRET_EXACT:
@@ -115,25 +126,62 @@ class ArtifactPublisher:
 
         artifact_id, versions = self._load_registry(job.id)
         version = len(versions) + 1
-        manifest: dict[str, Any] = {
-            "id": artifact_id,
-            "job_id": job.id,
-            "session_id": session_id,
-            "version": version,
-            "kind": "web",
-            "preview_url": f"{self._base}/{token}/",
-            "expires_at": None,
-            "sha256": sha,
-            "source_ids": self._source_ids(job),
-        }
+        manifest = self._manifest(
+            artifact_id=artifact_id,
+            job_id=job.id,
+            session_id=session_id,
+            version=version,
+            token=token,
+            sha=sha,
+            source_ids=self._source_ids(job),
+        )
         versions.append(manifest)
         self._save_registry(job.id, artifact_id, versions)
         return manifest
 
     def manifests_for(self, job_id: str) -> list[dict[str, Any]]:
-        """仕事ごとの公開済みマニフェスト（バージョン順）。"""
-        _, versions = self._load_registry(job_id)
-        return versions
+        """仕事ごとの公開済みマニフェスト（バージョン順）。id は version ごとに一意。"""
+        artifact_id, versions = self._load_registry(job_id)
+        return [self._with_unique_id(artifact_id, item) for item in versions]
+
+    def rollback(self, job: Job, version: int, session_id: str | None = None) -> dict[str, Any]:
+        """旧バージョンのファイルを新しい token として再公開する。過去 token は残す。"""
+        if not self.enabled:
+            raise ValueError("preview が無効")
+        if not isinstance(version, int) or version < 1:
+            raise LookupError(f"unknown version: {version}")
+        artifact_id, versions = self._load_registry(job.id)
+        source = next((item for item in versions if item.get("version") == version), None)
+        if source is None:
+            raise LookupError(f"unknown version: {version}")
+        token = _token_from_preview_url(str(source.get("preview_url") or ""))
+        if not token:
+            raise LookupError(f"unknown version: {version}")
+        src_root = self._previews_root / token
+        if src_root.is_symlink() or not src_root.is_dir():
+            raise LookupError(f"unknown version: {version}")
+        files = self._collect(src_root)
+        if not any(parts[-1].lower() == "index.html" for parts in files):
+            raise LookupError(f"unknown version: {version}")
+
+        new_token = secrets.token_hex(16)
+        dest_root = self._previews_root / new_token
+        for parts in files:
+            self._copy_file(src_root, parts, dest_root)
+        sha = self._digest(src_root, files)
+        new_version = len(versions) + 1
+        manifest = self._manifest(
+            artifact_id=artifact_id,
+            job_id=job.id,
+            session_id=session_id,
+            version=new_version,
+            token=new_token,
+            sha=sha,
+            source_ids=list(source.get("source_ids") or []),
+        )
+        versions.append(manifest)
+        self._save_registry(job.id, artifact_id, versions)
+        return manifest
 
     # --- 内部 ------------------------------------------------------------
 
@@ -197,6 +245,37 @@ class ArtifactPublisher:
             h.update(data)
             h.update(b"\n")
         return h.hexdigest()
+
+    def _manifest(
+        self,
+        *,
+        artifact_id: str,
+        job_id: str,
+        session_id: str | None,
+        version: int,
+        token: str,
+        sha: str,
+        source_ids: list[str],
+    ) -> dict[str, Any]:
+        return {
+            "id": _version_id(artifact_id, version),
+            "job_id": job_id,
+            "session_id": session_id,
+            "version": version,
+            "kind": "web",
+            "preview_url": f"{self._base}/{token}/",
+            "expires_at": None,
+            "sha256": sha,
+            "source_ids": source_ids,
+        }
+
+    def _with_unique_id(self, artifact_id: str, item: dict[str, Any]) -> dict[str, Any]:
+        """古い registry（全 version が同じ id）も HTTP では一意にする。"""
+        out = dict(item)
+        version = out.get("version")
+        if isinstance(version, int) and version >= 1:
+            out["id"] = _version_id(artifact_id, version)
+        return out
 
     def _source_ids(self, job: Job) -> list[str]:
         inp = job.directory / INPUT_DIRNAME

@@ -124,12 +124,22 @@ public enum PetMenuEntries {
             ),
         ]
         if job.pendingMemoryCount > 0 {
-            entries.append(
-                .item(
-                    title: "記憶の候補: \(job.pendingMemoryCount)件待ち — 詳細で承認",
-                    action: { actions.openRoomJobDetail() }
+            entries.append(.separator)
+            for candidate in job.memoryCandidates.filter(\.isPending) {
+                let clip = clipText(candidate.content)
+                entries.append(
+                    .item(
+                        title: "承認: \(clip)",
+                        action: { actions.approveRoomMemory(candidateID: candidate.candidateID) }
+                    )
                 )
-            )
+                entries.append(
+                    .item(
+                        title: "却下: \(clip)",
+                        action: { actions.rejectRoomMemory(candidateID: candidate.candidateID) }
+                    )
+                )
+            }
         }
         if let latestText = job.latestText, !latestText.isEmpty {
             entries.append(
@@ -154,16 +164,46 @@ public enum PetMenuEntries {
                 entries.append(
                     .item(title: artifactTitle(artifact), action: { actions.openRoomArtifact(url) })
                 )
+                if let version = artifact.version, !version.isEmpty {
+                    entries.append(
+                        .item(
+                            title: "v\(version) に戻す",
+                            action: { actions.rollbackRoomArtifact(version: version) }
+                        )
+                    )
+                }
+            }
+        }
+        let tempOpenable = job.tempDeploys.compactMap(\.previewURL).filter { url in
+            let scheme = url.scheme?.lowercased()
+            return scheme == "http" || scheme == "https"
+        }
+        if !tempOpenable.isEmpty {
+            entries.append(.separator)
+            for url in tempOpenable {
+                entries.append(
+                    .item(title: "一時デプロイを開く", action: { actions.openRoomArtifact(url) })
+                )
             }
         }
         return .submenu(title: "作業部屋", entries: entries)
     }
 
-    /// 成果物 1 件のメニュー名。種類が読めれば添える。
+    /// 成果物 1 件のメニュー名。version があれば添える。
     private static func artifactTitle(_ artifact: RoomArtifact) -> String {
+        if let version = artifact.version, !version.isEmpty {
+            return "v\(version) を開く"
+        }
         if let kind = artifact.kind, !kind.isEmpty {
             return "成果物を開く: \(kind)"
         }
         return "成果物を開く"
+    }
+
+    /// メニュー用に本文を 1 行・数十文字に潰す。
+    private static func clipText(_ text: String, limit: Int = 24) -> String {
+        let oneLine = text.split(whereSeparator: \.isNewline).joined(separator: " ")
+        if oneLine.count <= limit { return String(oneLine) }
+        return String(oneLine.prefix(limit - 1)) + "…"
     }
 }

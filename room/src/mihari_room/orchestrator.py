@@ -19,9 +19,16 @@ from mihari_room.contracts import (
     ProgressEvent,
     ProgressKind,
 )
-from mihari_room.events import EventJournal, EventPhase, JournalKind, kind_from_progress
+from mihari_room.events import (
+    EventJournal,
+    EventPhase,
+    JournalKind,
+    kind_from_progress,
+    sanitize_text,
+)
 from mihari_room.store.file_store import JobNotFound
 from mihari_room.worker.agent import read_session_id
+from mihari_room.worker.wrangler_temp import temp_deploys_for
 
 logger = logging.getLogger("mihari_room")
 
@@ -316,20 +323,21 @@ class RoomOrchestrator:
                     kind=JournalKind.LOG,
                     text=event.text,
                 )
-            # Forum への書き出しは従来どおり。
+            # Forum への書き出しは従来どおり。claim URL は伏せる。
+            safe_text = sanitize_text(event.text) or ""
             if event.kind is ProgressKind.SPEECH:
-                last_speech = event.text.strip()
-                await self._board.post_speech(thread_id, event.text)
+                last_speech = safe_text.strip()
+                await self._board.post_speech(thread_id, safe_text)
             elif event.kind is ProgressKind.LOG:
-                await self._board.post_log(thread_id, event.text)
+                await self._board.post_log(thread_id, safe_text)
             elif event.kind is ProgressKind.FILE:
                 if event.path is not None:
                     await self._board.post_file(thread_id, event.path)
             elif event.kind is ProgressKind.SUMMARY:
                 # 最終返答を SPEECH と SUMMARY の両方で流す Worker がある。同じ文面は 1 通。
-                if event.text.strip() == last_speech:
+                if safe_text.strip() == last_speech:
                     return
-                await self._board.post_summary(thread_id, event.text)
+                await self._board.post_summary(thread_id, safe_text)
 
         journal.append(
             job_id=job.id,
@@ -402,7 +410,8 @@ class RoomOrchestrator:
         self.wake()
 
     async def _publish_if_any(self, job: Job, thread_id: int) -> None:
-        """成功した仕事の成果物を公開し、URL を summary と Forum で知らせる。"""
+        """成功した仕事の静的プレビューと一時デプロイを知らせる。"""
+        await self._announce_temp_deploy(job, thread_id)
         publisher = self._publisher
         if publisher is None or not getattr(publisher, "enabled", False):
             return
@@ -421,6 +430,23 @@ class RoomOrchestrator:
             return
         url = manifest["preview_url"]
         message = f"プレビューを置いたよ: {url}"
+        self._journal(job.id).append(
+            job_id=job.id,
+            phase=EventPhase.DONE,
+            kind=JournalKind.SUMMARY,
+            text=message,
+        )
+        await self._board.post_summary(thread_id, message)
+
+    async def _announce_temp_deploy(self, job: Job, thread_id: int) -> None:
+        """workers.dev だけ Forum に出す。claim URL は載せない。"""
+        deploys = temp_deploys_for(job.directory)
+        if not deploys:
+            return
+        url = str(deploys[-1].get("preview_url") or "").strip()
+        if not url:
+            return
+        message = f"一時デプロイしたよ: {url}"
         self._journal(job.id).append(
             job_id=job.id,
             phase=EventPhase.DONE,

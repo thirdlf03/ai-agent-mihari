@@ -246,8 +246,7 @@ struct RoomEventClientTests {
             return (
                 response,
                 Data(
-                    (#"{"candidates":[{"id":"c1","target":"MEMORY.md","#
-                        + #"content":"深煎りが好き","status":"pending","created_at":1757073600}]}"#)
+                    #"{"candidates":[{"id":"c1","target":"MEMORY.md","content":"深煎りが好き","status":"pending","created_at":1757073600}]}"#
                         .utf8
                 )
             )
@@ -284,6 +283,30 @@ struct RoomEventClientTests {
         try await client.rejectMemory(jobID: "abc", candidateID: "c2")
         sent = try #require(StubURLProtocol.lastRequest)
         #expect(sent.url?.path == "/jobs/abc/memory/c2/reject")
+    }
+
+    @Test("POST /jobs/{id}/artifacts/{version}/rollback は空の JSON で送る")
+    func postsRollback() async throws {
+        let client = makeClient()
+        StubURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (
+                response,
+                Data(#"{"id":"art-abc-v3","version":3,"kind":"web"}"#.utf8)
+            )
+        }
+
+        let manifest = try await client.rollbackArtifact(jobID: "abc", version: "1")
+        let sent = try #require(StubURLProtocol.lastRequest)
+        #expect(sent.httpMethod == "POST")
+        #expect(sent.url?.path == "/jobs/abc/artifacts/1/rollback")
+        #expect(sent.value(forHTTPHeaderField: DaemonClient.tokenHeader) == "部屋の合言葉")
+        #expect(manifest.artifactID == "art-abc-v3")
     }
 
     @Test("SSE はカーソルが無ければ Last-Event-ID を載せない")

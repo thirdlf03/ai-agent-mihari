@@ -16,6 +16,7 @@ from mihari_room.fakes import InMemoryJobStore
 from mihari_room.worker.discord_tools import (
     _SCHEMAS,
     TOOL_NAMES,
+    _make_handlers,
     discord_channels_impl,
     discord_context_impl,
     discord_export_impl,
@@ -80,7 +81,13 @@ def test_search_finds_seeded_message(tmp_path: Path) -> None:
     assert payload["count"] <= 10
 
 
-def test_search_validates_query_and_missing_db(tmp_path: Path) -> None:
+def test_handlers_accept_hermes_positional_args_dict(tmp_path: Path) -> None:
+    _seed_db(tmp_path)
+    job = _make_job(tmp_path)
+    search = _make_handlers(job)["discord_search"]
+    payload = json.loads(search({"query": "ごはん"}))
+    assert payload["success"] is True
+    assert payload["count"] >= 1
     job = _make_job(tmp_path)
     assert json.loads(discord_search_impl(job, ""))["success"] is False
     _seed_db(tmp_path)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -72,10 +73,10 @@ def test_publish_creates_immutable_version(tmp_path: Path) -> None:
     preview_dir = tmp_path / "previews" / token
     assert (preview_dir / "index.html").is_file()
     assert (preview_dir / "style.css").is_file()
-    assert manifest["id"] == f"art-{job.id}"
+    assert manifest["id"] == f"art-{job.id}-v1"
 
 
-def test_versions_increment_with_stable_id(tmp_path: Path) -> None:
+def test_versions_increment_with_unique_ids(tmp_path: Path) -> None:
     _store, job = _make_job(tmp_path)
     _write_artifact(job, index="<h1>v1</h1>")
     publisher = ArtifactPublisher(tmp_path, preview_base_url=BASE)
@@ -83,7 +84,9 @@ def test_versions_increment_with_stable_id(tmp_path: Path) -> None:
     first = publisher.publish(job)
     second = publisher.publish(job)  # 続きでまた成功した想定
     assert first is not None and second is not None
-    assert first["id"] == second["id"]
+    assert first["id"] == f"art-{job.id}-v1"
+    assert second["id"] == f"art-{job.id}-v2"
+    assert first["id"] != second["id"]
     assert first["version"] == 1
     assert second["version"] == 2
     assert first["preview_url"] != second["preview_url"]
@@ -93,6 +96,63 @@ def test_versions_increment_with_stable_id(tmp_path: Path) -> None:
 
     manifests = publisher.manifests_for(job.id)
     assert [m["version"] for m in manifests] == [1, 2]
+    assert [m["id"] for m in manifests] == [f"art-{job.id}-v1", f"art-{job.id}-v2"]
+
+
+def test_old_registry_ids_are_unique_on_read(tmp_path: Path) -> None:
+    _store, job = _make_job(tmp_path)
+    publisher = ArtifactPublisher(tmp_path, preview_base_url=BASE)
+    registry = tmp_path / "registry"
+    registry.mkdir()
+    (registry / f"{job.id}.json").write_text(
+        json.dumps(
+            {
+                "artifact_id": f"art-{job.id}",
+                "versions": [
+                    {"id": f"art-{job.id}", "version": 1, "preview_url": f"{BASE}/aaa/"},
+                    {"id": f"art-{job.id}", "version": 2, "preview_url": f"{BASE}/bbb/"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifests = publisher.manifests_for(job.id)
+    assert [m["id"] for m in manifests] == [f"art-{job.id}-v1", f"art-{job.id}-v2"]
+
+
+def test_rollback_republishes_old_files_as_new_token(tmp_path: Path) -> None:
+    _store, job = _make_job(tmp_path)
+    _write_artifact(job, index="<h1>v1</h1>", extra={"style.css": "body{}"})
+    publisher = ArtifactPublisher(tmp_path, preview_base_url=BASE)
+    first = publisher.publish(job)
+    assert first is not None
+    _write_artifact(job, index="<h1>v2</h1>")
+    second = publisher.publish(job)
+    assert second is not None
+
+    rolled = publisher.rollback(job, 1)
+    assert rolled["version"] == 3
+    assert rolled["id"] == f"art-{job.id}-v3"
+    assert rolled["preview_url"] != first["preview_url"]
+    assert rolled["sha256"] == first["sha256"]
+
+    old_token = first["preview_url"].rsplit("/", 2)[-2]
+    new_token = rolled["preview_url"].rsplit("/", 2)[-2]
+    assert (tmp_path / "previews" / old_token / "index.html").is_file()
+    assert (tmp_path / "previews" / new_token / "index.html").read_text(
+        encoding="utf-8"
+    ) == "<h1>v1</h1>"
+    assert (tmp_path / "previews" / new_token / "style.css").is_file()
+    assert [m["version"] for m in publisher.manifests_for(job.id)] == [1, 2, 3]
+
+
+def test_rollback_unknown_version(tmp_path: Path) -> None:
+    _store, job = _make_job(tmp_path)
+    _write_artifact(job)
+    publisher = ArtifactPublisher(tmp_path, preview_base_url=BASE)
+    publisher.publish(job)
+    with pytest.raises(LookupError):
+        publisher.rollback(job, 9)
 
 
 def test_excludes_secrets_symlinks_and_nonweb(tmp_path: Path) -> None:

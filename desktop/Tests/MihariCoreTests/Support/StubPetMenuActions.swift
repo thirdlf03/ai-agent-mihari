@@ -26,6 +26,12 @@ final class StubPetMenuActions: ObservableObject, PetMenuActions {
     private(set) var roomCancels = 0
     /// 「成果物を開く」で渡された URL。
     private(set) var roomArtifactURLs: [URL] = []
+    /// メニューから承認した記憶の候補 ID。
+    private(set) var approvedMemoryIDs: [String] = []
+    /// メニューから却下した記憶の候補 ID。
+    private(set) var rejectedMemoryIDs: [String] = []
+    /// メニューから戻した成果物の version。
+    private(set) var rolledBackVersions: [String] = []
     /// 「実際に進める」で投げられた操作。
     private(set) var detectionSteps: [DetectionDebugStep] = []
 
@@ -40,6 +46,9 @@ final class StubPetMenuActions: ObservableObject, PetMenuActions {
     func followUpRoomJob() { roomFollowUps += 1 }
     func cancelRoomJob() { roomCancels += 1 }
     func openRoomArtifact(_ url: URL) { roomArtifactURLs.append(url) }
+    func approveRoomMemory(candidateID: String) { approvedMemoryIDs.append(candidateID) }
+    func rejectRoomMemory(candidateID: String) { rejectedMemoryIDs.append(candidateID) }
+    func rollbackRoomArtifact(version: String) { rolledBackVersions.append(version) }
     func openPermissions() {}
     func toggleStatusPanel() {}
     func setPhotobombEnabled(_ enabled: Bool) { isPhotobombEnabled = enabled }

@@ -124,8 +124,22 @@ def build_prompt(job: Job) -> str:
         "出典は `research/sources.json`、生データは `research/downloads/` に置いてください。\n"
         f"成果物は `{OUTPUT_DIRNAME}/artifact/index.html` を起点に "
         f"`{OUTPUT_DIRNAME}/` に書き出してください。\n"
+        "プレビュー CSP は `script-src 'self'` です。"
+        "JS は同一フォルダの `.js` に分け、相対パスの `<script src>` だけ使ってください。"
+        "HTML 内の `<script>`・onclick 等のインライン、CDN、外部スクリプトは動きません。\n"
         "公開物に API キー・トークン・個人情報（住所・電話・メール等）を入れないでください。\n"
-        "直接デプロイや外部投稿はしないでください。公開は Room が行います。\n"
+        "静的な HTML/CSS/JS のモックは Room が恒久 URL で公開します。"
+        "直接デプロイや外部投稿はしないでください。\n"
+        "Worker や D1/KV/DO などバックエンド付きの動作確認が必要なときだけ "
+        "`cloudflare_temp_deploy` を使ってください（一時アカウント、約 60 分）。"
+        "その仕事では `output/artifact` にページを置かないでください。"
+        "置くと恒久プレビューになり、CSP で Worker API に繋がりません。"
+        "UI は Worker プロジェクト側に含めてください。"
+        "`cloudflare_temp_deploy` の subdir はこのジョブのフォルダだけを見ます。"
+        "他ジョブの worker/ や temp_deploy.json は使えません。"
+        "このジョブに wrangler.toml が無ければ先に書いてから呼んでください。"
+        "本番 Cloudflare アカウントへの wrangler deploy はしないでください。"
+        "claim URL は Room が owner に渡します。Forum や成果物に書かないでください。\n"
         "過去の会話は組み込みの session_search を先に使ってください。\n"
         "Discord 横断検索が必要なときは組み込みツールを使う:"
         " `discord_search`（本文・添付・URL、日時/チャンネル/作者で絞れる）、"
@@ -136,6 +150,7 @@ def build_prompt(job: Job) -> str:
         "引用には必ず `jump_url` を添えてください。\n"
         "記憶に残したいことは memory ツールの action='add' に書いてください"
         "（承認後に保存されます。replace/remove は未対応です）。"
+        "MEMORY.md や USER.md を file ツールで書かないでください。\n"
         "必要な説明は標準出力の最後に 1〜数行で書いてください。"
     )
 
@@ -187,6 +202,9 @@ def _safe_new_files(job: Job, output_dir: Path, before: set[Path]) -> list[Path]
         if any(part in ("", ".", "..") for part in rel.parts):
             continue
         if any(_is_secret_name(part) for part in rel.parts):
+            continue
+        # 恒久プレビューで出すので Forum にソースを添付しない。
+        if rel.parts and rel.parts[0] == "artifact":
             continue
         if path.suffix.lower() not in _ALLOWED_WEB_EXT:
             continue

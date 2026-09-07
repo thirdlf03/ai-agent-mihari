@@ -55,6 +55,8 @@ class JournalKind(StrEnum):
     #: memory candidate proposed; phase is WAITING. Desktop refreshes the
     #: memory list on detail refresh; the job queue never blocks on it.
     MEMORY_CANDIDATE = "memory_candidate"
+    #: wrangler --temporary の workers.dev。claim URL は本文に載せない。
+    TEMP_DEPLOY = "temp_deploy"
 
 
 def kind_from_progress(kind: ProgressKind) -> JournalKind:
@@ -65,6 +67,11 @@ def kind_from_progress(kind: ProgressKind) -> JournalKind:
 
 #: claim_url = "https://user:pass@host/..." のような形。値ごと伏せる。
 _CLAIM_URL = re.compile(r"(?i)(claim_url\s*[:=]\s*)(['\"]?)[^'\"\s,}]+")
+#: dash の claim-preview（bearer）。URL ごと伏せる。
+_CLAIM_PREVIEW = re.compile(
+    r"https://dash\.cloudflare\.com/claim-preview\?[^\s'\"<>]+",
+    re.IGNORECASE,
+)
 #: URL の userinfo (user:pass@)。
 _URL_USERINFO = re.compile(r"(?i)(https?://)[^/\s:@]+@")
 #: 名前=値 / 名前:値 の割り当て。値だけ伏せる。
@@ -85,6 +92,7 @@ def sanitize_text(text: str | None) -> str | None:
     if not text:
         return text
     out = _CLAIM_URL.sub(lambda m: m.group(1) + m.group(2) + _REDACT, text)
+    out = _CLAIM_PREVIEW.sub(_REDACT, out)
     out = _URL_USERINFO.sub(r"\1" + _REDACT + "@", out)
     out = _ASSIGN.sub(lambda m: m.group(1) + m.group(2) + _REDACT, out)
     out = _APIKEYS.sub(_REDACT, out)
