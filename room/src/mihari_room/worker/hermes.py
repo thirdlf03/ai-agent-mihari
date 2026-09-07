@@ -232,6 +232,17 @@ class HermesWorker:
         self._command = tuple(command) if command is not None else None
         self._timeout = timeout
         self._agent_factory = agent_factory
+        #: Mac 操作の hub。create_app が後付けする（無ければ mac_* ツールは無い）。
+        self._mac_control: Any = None
+        self._runner: Any = None
+
+    def attach_mac_control(self, hub: Any) -> None:
+        """Mac 操作の hub を後付けする。Hermes 実行ごとに mac_* ツールを載せる。"""
+        self._mac_control = hub
+
+    @property
+    def mac_control(self) -> Any:
+        return self._mac_control
 
     @property
     def command(self) -> tuple[str, ...] | None:
@@ -281,8 +292,12 @@ class HermesWorker:
 
         output_dir = job.directory / OUTPUT_DIRNAME
         before = _snapshot_files(output_dir)
-        runner = InProcessHermes(timeout=self._timeout, agent_factory=self._agent_factory)
-        self._runner: Any = runner
+        runner = InProcessHermes(
+            timeout=self._timeout,
+            agent_factory=self._agent_factory,
+            mac_control=self._mac_control,
+        )
+        self._runner = runner
         try:
             status = await runner.run(job, build_turn_prompt(job), on_progress)
         finally:

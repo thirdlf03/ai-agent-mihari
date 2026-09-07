@@ -858,12 +858,15 @@ class InProcessHermes:
         self,
         timeout: float,
         agent_factory: AgentFactory | None = None,
+        mac_control: Any = None,
     ) -> None:
         self._timeout = timeout
         self._injected = agent_factory is not None
         self._agent_factory = agent_factory or default_agent_factory
         self._live: dict[str, Any] = {}
         self._live_lock = threading.Lock()
+        #: Mac 操作の hub。無ければ mac_* ツールを載せない。
+        self._mac_control = mac_control
 
     def request_cancel(self, job_id: str) -> bool:
         """実行中の agent に interrupt を届ける。届けば True。"""
@@ -962,6 +965,8 @@ class InProcessHermes:
                 restore_memory_guard: Callable[[], None] | None = None
                 restore_discord_tools: Callable[[], None] | None = None
                 restore_temp_deploy: Callable[[], None] | None = None
+                restore_mac_tools: Callable[[], None] | None = None
+                mac_run_id: str | None = None
                 try:
                     # Bounded discord_* を registry に先に載せる（agent build が読む）。
                     try:
@@ -976,6 +981,29 @@ class InProcessHermes:
                         restore_temp_deploy = register_temp_deploy_tool(job)
                     except Exception:
                         logger.debug("temp deploy tool register failed", exc_info=True)
+                    # Room 専用の Mac 操作ツール（汎用 Computer Use / shell は使わない）。
+                    # 依頼ごとの許可・端末・操作 ID は hub が検証する。
+                    if self._mac_control is not None:
+                        try:
+                            import uuid as _uuid
+
+                            from mihari_room.mac_control.tools import register_mac_tools
+
+                            mac_run_id = f"{job.id}-{_uuid.uuid4().hex[:8]}"
+                            hub = self._mac_control
+                            hub.begin_run(
+                                job_id=job.id,
+                                run_id=mac_run_id,
+                                job_dir=job.directory,
+                                job_title=job.title,
+                            )
+                            from mihari_room.mac_control import history as _mac_history
+
+                            _mac_history.write_current_run(job.directory, mac_run_id)
+                            restore_mac_tools = register_mac_tools(job, hub, mac_run_id)
+                        except Exception:
+                            logger.debug("mac tools register failed", exc_info=True)
+                            mac_run_id = None
                     try:
                         from mihari_room.worker.hermes import DISABLED_TOOLSETS
 
@@ -1032,6 +1060,18 @@ class InProcessHermes:
                     _persist_session_best_effort(job, getattr(agent, "session_id", None))
                     return result or {}, getattr(agent, "session_id", None)
                 finally:
+                    if restore_mac_tools is not None:
+                        try:
+                            restore_mac_tools()
+                        except Exception:
+                            pass
+                    if mac_run_id is not None and self._mac_control is not None:
+                        try:
+                            self._mac_control.end_run(
+                                job_id=job.id, run_id=mac_run_id, reason="Hermes 実行が終わった"
+                            )
+                        except Exception:
+                            logger.debug("mac run end failed", exc_info=True)
                     if restore_memory_guard is not None:
                         try:
                             restore_memory_guard()

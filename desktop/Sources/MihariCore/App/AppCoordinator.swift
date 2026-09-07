@@ -28,6 +28,10 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     public let questioner = HeadGestureQuestioner()
     /// 作業部屋の仕事の進捗。ペットの右クリック / メニューバーから操作する。
     public let room: RoomJobMonitor
+    /// 依頼単位でこの Mac を撮影・操作する口（#23）。既定はオフで、許可は依頼ごと。
+    public let macControl = MacControlCenter()
+    /// 操作中の常設表示（停止ボタン付き）。macControl に差し込む。
+    private let macControlIndicator = MacControlOperationPanelIndicator()
 
     /// 音楽を止めて聞かせる全画面オーバーレイ。
     ///
@@ -144,6 +148,8 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         self.loginItemRegistrar = loginItemRegistrar
         self.watchdogRegistrar = watchdogRegistrar
         self.lifecycleMarker = lifecycleMarker
+        // 操作中の表示と停止ボタンを結ぶ。
+        macControl.operationIndicator = macControlIndicator
         observeVoiceMode()
     }
 
@@ -250,6 +256,8 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
             detection.start()
             // 起動時に走っている仕事を拾って監視する(依頼窓から頼んだ仕事はその場で監視する)。
             await room.resume()
+            // 依頼から Mac を操作してもらうための接続。認証済みでない限り何も送られない。
+            macControl.start()
 
             // ロック時間は Discord の `/watch lock` で決まる。デーモンに繋がる前に
             // 決め打ちすると設定より短く/長くロックしてしまうので、繋がってから引く。
@@ -269,6 +277,13 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         photobombWatcher.stop()
         daemon.stop()
         room.stopAll()
+        // 部屋へ「アプリが終了する」を伝えてから接続を閉じる（失効は hub 側）。
+        macControl.sendQuit()
+        Task { [weak self] in
+            // 1 フレーム届く猶予を置いてから閉じる。届かなくても TCP 切断で失効する。
+            try? await Task.sleep(for: .milliseconds(300))
+            self?.macControl.stop()
+        }
         sleepPreventer.stop()
         watchdogReassertionTask?.cancel()
         watchdogReassertionTask = nil

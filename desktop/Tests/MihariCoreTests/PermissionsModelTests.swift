@@ -96,7 +96,7 @@ struct PermissionsModelTests {
         satisfied.refresh()
         #expect(satisfied.missingRequired.isEmpty)
         #expect(satisfied.isRequiredSatisfied)
-        #expect(satisfied.pending == [.automation, .motion])
+        #expect(satisfied.pending == [.accessibility, .automation, .motion])
     }
 
     @Test("初回起動のまとめ要求を済ませたかを覚えている")

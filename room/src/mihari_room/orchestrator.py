@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +59,24 @@ class RoomOrchestrator:
         self._publisher = publisher
         self._wake = asyncio.Event()
         self._pump_task: asyncio.Task[None] | None = None
+        #: 依頼の中断を横取りするフック（Mac 操作の失効など）。
+        self._cancel_listeners: list[Callable[[str], None]] = []
+
+    @property
+    def worker(self) -> JobWorker:
+        """背後の Worker。hub などの付加物を後付けするときに使う。"""
+        return self._worker
+
+    def add_cancel_listener(self, listener: Callable[[str], None]) -> None:
+        """cancel 時に呼ばれる listener を足す。例外は握りつぶす。"""
+        self._cancel_listeners.append(listener)
+
+    def _notify_cancel(self, job_id: str) -> None:
+        for listener in list(self._cancel_listeners):
+            try:
+                listener(job_id)
+            except Exception:
+                logger.debug("cancel listener failed job=%s", job_id, exc_info=True)
 
     @property
     def publisher(self) -> Any:
@@ -185,6 +203,8 @@ class RoomOrchestrator:
                 requester(job_id)
         except Exception:
             logger.debug("worker request_cancel failed", exc_info=True)
+        # 付随する状態（Mac 操作の許可・実行中操作）も失効させる。
+        self._notify_cancel(job_id)
         thread_id = job.thread_id
         self._journal(job_id).append(
             job_id=job_id,
