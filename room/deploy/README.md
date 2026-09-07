@@ -112,9 +112,28 @@ sudo -u mihari env UV_PROJECT_ENVIRONMENT=/var/lib/mihari/room-venv \
 ```
 
 `uv sync --locked` が `pyproject.toml` の依存（fastapi / uvicorn / httpx /
-python-dotenv / discord-py、dev は ruff / pytest）を lock どおり入れる。
+python-dotenv / discord-py / pypdf / markdown-it-py / fpdf2、dev は ruff /
+pytest）を lock どおり入れる。
 `UV_PROJECT_ENVIRONMENT` で venv を `/var/lib/mihari/room-venv` に固定し、
 `MIHARI_ROOM_PYTHON=/var/lib/mihari/room-venv/bin/python` を env に入れる。
+
+文中の各依存:
+
+- `pypdf` — PDF のページ単位テキスト抽出（`pdf_info` / `pdf_text`）
+- Poppler（`pdftoppm`）— PDF のページ画像化（`pdf_pages`）
+- Tesseract（日本語+英語の言語データ込み）— ページ画像の OCR（`pdf_ocr`）
+- `markdown-it-py` / 同梱 IPAexGothic フォント — Markdown の表示 HTML・PDF（`markdown_pdf`）
+
+Poppler と Tesseract は OS のパッケージで入れる（in-process ツールが固定引数で
+呼ぶ。shell 権限は不要）。
+
+```sh
+sudo apt-get install -y poppler-utils tesseract-ocr tesseract-ocr-jpn tesseract-ocr-eng
+```
+
+インストール先が標準と違う場合は `MIHARI_POPPLER_BIN` / `MIHARI_TESSERACT_BIN` で
+パスを明示できる。無い間はツールが `missing_poppler` / `missing_tesseract` を
+明示エラーとして返す（ジョブは失敗しない）。
 
 ## 3. 環境変数
 
@@ -159,6 +178,11 @@ sudo systemctl reload caddy
 - **API ホスト**: `127.0.0.1:8787` へ転送。認証は Room 自身（`X-Mihari-Token`）
 - **プレビュー ホスト**: `/previews/*` だけ Room へ reverse_proxy。他は 404
   （ディスク直出しはしない。CSP と allowlist は Room 側）
+  `/previews/<token>` は **公開中の版の共有 URL** だけを解決する
+  （`registry/publications.json` に載っている token）。非公開の版・停止した
+  URL は配下のどのファイルも 404 になる
+- **認証付きの成果物取得**（非公開版の desktop 内プレビュー）は `GET /jobs/{id}/artifacts/{v}/files/...`。
+  Room トークンはヘッダにだけ載せるため、これは**私的ネットワークの API ホスト**だけに置く
 - SSE は `flush_interval -1` でバッファしない
 - `/previews/*` 以外の静的パス（memory / research / manifests 等）を webroot に
   置かない。`/var/lib/mihari/room/previews` には公開してよい成果物だけ、
@@ -184,6 +208,9 @@ sudo systemctl reload caddy
 - Cloudflare **Temporary Accounts** はバックエンド付きの 60 分動作確認用。
   `wrangler deploy --temporary`（Wrangler 4.102.0+、未ログイン）。
   静的 HTML の恒久 URL は Tunnel のまま。VPS の `mihari` は `wrangler login` しない
+- **Temporary Deploy は外部公開**と明示して扱う。依頼時に `allow_external_publish`
+  を付けた仕事（ペットの依頼窓のチェック）にだけ agent へ道具を渡し、
+  それ以外の仕事には存在しない。版の公開・非公開切替（恒久 URL）の対象外
 
 ## 6. バックアップと復元
 
@@ -226,9 +253,11 @@ sudo systemctl start mihari-room
 注意:
 
 - `tar -xpf` は owner / mode を保存する（root で）
-- **旧 URL の継続性**: プレビュー URL は `<preview_base>/<token>/` で、token は
-  公開時のランダム値。復元は **同じ絶対パス**（`/var/lib/mihari/room/previews`）
-  に戻すこと。原点（`MIHARI_PREVIEW_BASE_URL`）を変えると新規仕事から URL が変わる
+- **旧 URL の継続性**: 共有 URL は `<preview_base>/<共有 token>/`。token は公開時に
+  発行したランダム値で、`registry/`（manifest＋`publications.json`）が token → 版の
+  対応を持つ。復元は **同じ絶対パス**に `room/` 全体（previews/ と registry/ の両方）
+  を戻すこと。`registry/` を戻さないと共有 URL の解決ができず、公開中だった
+  version の判定も巻き戻る。原点（`MIHARI_PREVIEW_BASE_URL`）を変えると新規仕事から URL が変わる
 - messages.db / state.db の owner は mihari:mihari、mode は 600 を保つ
 - WAL の三つ組で戻すときは db / -wal / -shm を**全部同時に**置く
   （`--live-consistent` のスナップショットなら 1 ファイルでよい）
@@ -240,6 +269,10 @@ sudo systemctl start mihari-room
   Tailscale プレビュー URL は通した
 - `--live-consistent` バックアップを 2026-09-07 に撮り、temp 展開で
   DB integrity と preview の sha 一致を確認した。サービス停止しての本番上書き復元は未実施
+- 版の公開・非公開切替はローカルテストで検証（公開 URL・停止後の旧 URL/関連ファイル拒否・
+  再公開の新 URL・旧データ移行・トークン非露出）。
+  実機での公開/停止の往復と、外部ネットワークから公開経路（`/previews/*`）だけが
+  到達し API（`/jobs` ほか）へ届かないことの実機確認は未実施
 - 社外向けプレビュー HTTPS は Tunnel 済み。Temporary Accounts の実機 wrangler は未接続
 
 ## 8. やらないこと

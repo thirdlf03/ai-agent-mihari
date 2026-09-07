@@ -644,7 +644,8 @@ def test_capture_and_history_never_auto_published(tmp_path: Path) -> None:
     publisher = ArtifactPublisher(root=tmp_path, preview_base_url="https://p.example.test")
     manifest = publisher.publish(job)
     assert manifest is not None
-    token = manifest["preview_url"].rstrip("/").rsplit("/", 1)[-1]
+    # 新版は非公開。内容フォルダ token で写し先を見る。
+    token = publisher.content_token_for(job.id, manifest["version"])
     published = sorted(
         p.relative_to(tmp_path / "previews" / token).as_posix()
         for p in (tmp_path / "previews" / token).rglob("*")
@@ -652,6 +653,9 @@ def test_capture_and_history_never_auto_published(tmp_path: Path) -> None:
     )
     assert published == ["index.html"]
     assert not (tmp_path / "previews" / token / ".mac").exists()
+    public = publisher.publish_version(job.id, manifest["version"])
+    share = public["preview_url"].rstrip("/").rsplit("/", 1)[-1]
+    assert not (tmp_path / "previews" / share / ".mac").exists()
 
 
 # --------------------------------------------------------------------- tools

@@ -124,14 +124,23 @@ def build_prompt(job: Job) -> str:
         "出典は `research/sources.json`、生データは `research/downloads/` に置いてください。\n"
         f"成果物は `{OUTPUT_DIRNAME}/artifact/index.html` を起点に "
         f"`{OUTPUT_DIRNAME}/` に書き出してください。\n"
+        "Markdown の資料・レポートは `output/` 直下に `*.md` で置いてください"
+        "（Room がプレビュー用 HTML と原稿を公開します）。"
+        "画像を載せるときは `.md` と同じフォルダに置いて、相対パスで参照してください"
+        "（プレビューに同梱され、公開制御も一緒にかかります）。\n"
+        "PDF 文書で渡すときは `markdown_pdf` で `output/` の .md から同じ場所に "
+        ".pdf を作ってください（同梱フォント・表/コード/画像/リンク対応）。\n"
         "プレビュー CSP は `script-src 'self'` です。"
         "JS は同一フォルダの `.js` に分け、相対パスの `<script src>` だけ使ってください。"
         "HTML 内の `<script>`・onclick 等のインライン、CDN、外部スクリプトは動きません。\n"
         "公開物に API キー・トークン・個人情報（住所・電話・メール等）を入れないでください。\n"
-        "静的な HTML/CSS/JS のモックは Room が恒久 URL で公開します。"
+        "静的な HTML/CSS/JS のモックは Room が管理します。"
+        "新しくできた版は非公開で、共有 URL は owner が公開操作してから出ます。"
         "直接デプロイや外部投稿はしないでください。\n"
         "Worker や D1/KV/DO などバックエンド付きの動作確認が必要なときだけ "
-        "`cloudflare_temp_deploy` を使ってください（一時アカウント、約 60 分）。"
+        "`cloudflare_temp_deploy` を使ってください（一時アカウント、約 60 分、外部公開）。"
+        "これは依頼時に外部公開を許可（allow_external_publish）された仕事でだけ使えます。"
+        "許されていない仕事ではこの道具は存在しません。"
         "その仕事では `output/artifact` にページを置かないでください。"
         "置くと恒久プレビューになり、CSP で Worker API に繋がりません。"
         "UI は Worker プロジェクト側に含めてください。"
@@ -148,10 +157,23 @@ def build_prompt(job: Job) -> str:
         " 添付の取り込みは `discord_export`。"
         "いずれも in-process で messages.db を読むだけ。shell は要らない。"
         "引用には必ず `jump_url` を添えてください。\n"
+        "資料の PDF は組み込みツールで読む: `pdf_info`（ページ数・暗号化）・"
+        "`pdf_text`（ページ単位テキスト抽出、100 ページ・120 秒が初期上限）・"
+        "`pdf_pages`（Poppler でページ画像化）・`pdf_ocr`（日本語+英語 OCR、"
+        "画像化してから呼ぶ）。全部 in-process の固定引数呼び出しで shell は要りません。"
+        "暗号化・破損・上限超過は success=false と code 付きで返るので、"
+        "解決策（ページ範囲の指定・別経路）と一緒に報告してください。\n"
         "記憶に残したいことは memory ツールの action='add' に書いてください"
         "（承認後に保存されます。replace/remove は未対応です）。"
         "MEMORY.md や USER.md を file ツールで書かないでください。\n"
-        "必要な説明は標準出力の最後に 1〜数行で書いてください。"
+        "この部屋の人格（みはり）は SOUL.md にあります。返事とログはその口調で書いてください。\n"
+        "実際にやったこと・確かめたことだけを述べてください。"
+        "できていないこと、確認していないことを「できた」「完了した」と書かないでください。\n"
+        "成果物（HTML・記事・仕様・レポート）の本文は依頼された文体・形式を優先してください。"
+        "キャラクターの口調を成果物の本文に押し付けないでください。\n"
+        "最後の返答はみはりの発話として短く締めてください（読み上げる想定なので 1〜2 文）。\n"
+        "完了報告など長めの説明は、空行を空けて返答の末尾に数行までなら続けて構いません。\n"
+        "説明が長くなる場合は research/ か output/ のファイルに書いてください。\n"
     )
 
 
@@ -261,6 +283,20 @@ class HermesWorker:
     ) -> JobStatus:
         """ジョブフォルダを cwd に Hermes を実行し、進捗を流す。"""
         if self._command is not None:
+            # サブプロセス（偽 CLI）はマルチモーダルを渡せない。スクショがあれば明示失敗。
+            from mihari_room.worker.agent import undelivered_screenshots
+
+            if undelivered_screenshots(job):
+                await on_progress(
+                    ProgressEvent(
+                        kind=ProgressKind.LOG,
+                        text=(
+                            "スクショを添付した依頼はサブプロセス実行では扱えない"
+                            "（in-process で回して）"
+                        ),
+                    )
+                )
+                return JobStatus.FAILED
             return await self._run_subprocess(job, on_progress)
         return await self._run_inprocess(job, on_progress)
 
