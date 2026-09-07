@@ -59,6 +59,7 @@ public struct JobRequestClient: Sendable {
     }
 
     /// 仕事を 1 件頼む。タイトルが空なら本文の先頭行から作る。
+    /// スクショ付きならバイト列（base64）を `screenshots` に載せる。
     ///
     /// 添付は上限（10 個・各 20MB・合計 50MB）と形式（PNG/JPEG/PDF/Markdown/テキスト）
     /// を送る前に検証し、違えば送らずに投げる。
@@ -66,6 +67,7 @@ public struct JobRequestClient: Sendable {
     public func submit(
         title: String,
         body: String,
+        screenshots: [ScreenshotUploadPayload] = [],
         attachments: [JobAttachment] = []
     ) async throws -> JobRequestResponse {
         if let error = JobAttachmentLimit.validate(attachments) {
@@ -82,6 +84,7 @@ public struct JobRequestClient: Sendable {
             JobRequestPayload(
                 title: Self.resolveTitle(title: title, body: body),
                 body: body,
+                screenshots: screenshots,
                 attachments: attachments
             )
         )
@@ -139,22 +142,49 @@ public struct JobRequestClient: Sendable {
     }
 
     /// `POST /jobs` の本文。`source` はつねに `pet`。
+    /// スクショも添付も無いときは従来どおりの JSON のまま（既存互換）。
     private struct JobRequestPayload: Encodable {
         let title: String
         let body: String
         let source: String
+        let screenshots: [ScreenshotUploadPayload]
         let attachments: [AttachmentPayload]?
 
-        init(title: String, body: String, attachments: [JobAttachment]) {
+        init(
+            title: String,
+            body: String,
+            screenshots: [ScreenshotUploadPayload] = [],
+            attachments: [JobAttachment] = []
+        ) {
             self.title = title
             self.body = body
             self.source = "pet"
+            self.screenshots = screenshots
             self.attachments =
                 attachments.isEmpty
                 ? nil
                 : attachments.map {
                     AttachmentPayload(name: $0.fileName, content: $0.data.base64EncodedString())
                 }
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case title
+            case body
+            case source
+            case screenshots
+            case attachments
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(title, forKey: .title)
+            try container.encode(body, forKey: .body)
+            try container.encode(source, forKey: .source)
+            if !screenshots.isEmpty {
+                try container.encode(screenshots, forKey: .screenshots)
+            }
+            try container.encodeIfPresent(attachments, forKey: .attachments)
         }
     }
 

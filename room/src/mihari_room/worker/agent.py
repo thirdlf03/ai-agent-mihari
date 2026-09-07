@@ -29,6 +29,7 @@ Safety (Phase 0/5):
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import os
 import queue
@@ -43,6 +44,7 @@ from typing import Any
 from mihari_room.contracts import (
     INPUT_DIRNAME,
     OUTPUT_DIRNAME,
+    SCREENSHOTS_DIRNAME,
     Job,
     JobStatus,
     ProgressEvent,
@@ -235,6 +237,163 @@ def advance_followup_cursor(job: Job, executed: list[Path] | None = None) -> Non
         (job.directory / FOLLOWUP_CURSOR_FILENAME).write_text(latest + "\n", encoding="utf-8")
     except OSError:
         logger.debug("followup cursor write failed", exc_info=True)
+
+
+# -- Mac スクショ（#22） ------------------------------------------------------
+
+#: 1 ターンに Hermes へ渡すスクショの上限。文脈を過剰に広げない。
+MAX_SCREENSHOTS_PER_TURN = 6
+
+#: スクショ配信のカーソル。何枚目まで Hermes へ渡し済みかを覚える。
+SCREENSHOT_CURSOR_FILENAME = "screenshot_cursor"
+
+#: 画像拡張子→data URI の media type。
+_SCREENSHOT_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+
+def _screenshot_folder(job: Job) -> Path:
+    return job.directory / INPUT_DIRNAME / SCREENSHOTS_DIRNAME
+
+
+def list_screenshot_files(job: Job) -> list[Path]:
+    """input/screenshots/ の画像一覧をファイル名順で返す（0001.png, 0002.png…）。"""
+    folder = _screenshot_folder(job)
+    if not folder.is_dir():
+        return []
+    return sorted(
+        (
+            path
+            for path in folder.iterdir()
+            if path.is_file() and path.suffix.lower() in _SCREENSHOT_MEDIA_TYPES
+        ),
+        key=lambda path: path.name,
+    )
+
+
+def _read_screenshot_delivered(job: Job) -> int:
+    path = job.directory / SCREENSHOT_CURSOR_FILENAME
+    if not path.is_file():
+        return 0
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+        return max(0, int(value))
+    except (OSError, ValueError):
+        return 0
+
+
+def _write_screenshot_delivered(job: Job, count: int) -> None:
+    try:
+        (job.directory / SCREENSHOT_CURSOR_FILENAME).write_text(
+            f"{max(0, count)}\n", encoding="utf-8"
+        )
+    except OSError:
+        logger.debug("screenshot cursor write failed", exc_info=True)
+
+
+def undelivered_screenshots(job: Job) -> list[Path]:
+    """まだ Hermes へ渡していないスクショ一覧。配信済みカーソルより後ろだけ。"""
+    files = list_screenshot_files(job)
+    delivered = _read_screenshot_delivered(job)
+    return files[delivered:]
+
+
+def advance_screenshot_cursor(job: Job, delivered: list[Path] | None = None) -> None:
+    """実行で実際に渡したスクショ分だけ配信カーソルを進める。失敗時は呼ばない。
+
+    `delivered` 未指定なら全ファイル（上限なしで全部渡したときと同じ）。
+    """
+    if delivered is None:
+        files = list_screenshot_files(job)
+        count = len(files)
+    else:
+        count = _read_screenshot_delivered(job) + len(delivered)
+    if count > 0:
+        _write_screenshot_delivered(job, count)
+
+
+def _media_type_for(path: Path) -> str:
+    return _SCREENSHOT_MEDIA_TYPES.get(path.suffix.lower(), "image/png")
+
+
+def data_uri_for(path: Path) -> str:
+    """スクショを data URI にする。本文へパスを書くだけで済ませないための実体。"""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        raise
+    encoded = base64.b64encode(raw).decode("ascii")
+    return f"data:{_media_type_for(path)};base64,{encoded}"
+
+
+def build_multimodal_message(text: str, screenshots: list[Path]) -> list[dict[str, Any]]:
+    """テキスト＋画像のマルチモーダル user message を作る。
+
+    OpenAI 互換の content リスト（Hermes が各 provider へ変換する）。
+    ``[{"type": "text", ...}, {"type": "image_url", "image_url": {"url": data-uri}}, ...]``。
+    画像は必ずバイト列（data URI）で載せる。
+    """
+    hint_lines = [f"[Image attached at: {path.name}]".replace("\\", "/") for path in screenshots]
+    combined = (text or "").rstrip()
+    if combined and hint_lines:
+        combined += "\n\n" + "\n".join(hint_lines)
+    elif hint_lines:
+        combined = "What do you see in this screenshot?\n" + "\n".join(hint_lines)
+    parts: list[dict[str, Any]] = [{"type": "text", "text": combined}]
+    for path in screenshots:
+        parts.append({"type": "image_url", "image_url": {"url": data_uri_for(path)}})
+    return parts
+
+
+class _ImageInputUnsupported(Exception):
+    """現在のモデルが画像をネイティブに読めないときに投げる。"""
+
+
+def resolve_image_native_mode() -> tuple[bool, str]:
+    """Hermes の設定から、現在のモデルが画像をネイティブに読めるかを決める。
+
+    Room は in-process で ``run_conversation`` を回すため、gateway が行う
+    補助 vision による画像→テキスト化は使えない。画像はネイティブに読める
+    モデルへだけバイト列で渡し、それ以外は明示的に失敗する（#22 受け入れ）。
+    判定できないときも失敗扱い（推測で画像を黙って捨てない）。
+
+    Returns (True, "") なら渡してよい。(False, reason) なら理由を返す。
+    """
+    try:
+        from agent.image_routing import decide_image_input_mode  # type: ignore[import-not-found]
+        from hermes_cli.config import load_config  # type: ignore[import-not-found]
+    except Exception as exc:
+        return False, f"Hermes の画像能力を判定できないため添付をやめた: {exc}"
+    try:
+        model, resolved = _resolve_runtime()
+        runtime = resolved.get("runtime") or {}
+        provider = str(runtime.get("provider") or "").strip().lower()
+        requested = str(runtime.get("requested_provider") or "").strip()
+        cfg = load_config() or {}
+    except Exception as exc:
+        return False, f"モデル設定を読めないため添付をやめた: {exc}"
+    if not provider or not model:
+        return False, "モデルが未設定のため画像を添付できない"
+    try:
+        mode = decide_image_input_mode(provider, model, cfg, requested_provider=requested)
+    except Exception as exc:
+        return False, f"画像入力モードを判定できないため添付をやめた: {exc}"
+    if mode == "native":
+        return True, ""
+    return False, (
+        "今のモデルは画像を読めない設定です（Hermes の判定: "
+        f"{mode}）。画像対応モデルを設定するか、Hermes プロファイルの config.yaml で "
+        "`model.supports_vision: true` を明示してください。"
+    )
+
+
+#: 画像を送る前に確かめる判定関数。テストでは monkeypatch して差し替える。
+image_native_check = resolve_image_native_mode
 
 
 def build_turn_prompt(job: Job) -> str:
@@ -962,6 +1121,8 @@ class InProcessHermes:
             return "[unattended room: make the most reasonable assumption and continue.]"
 
         pending = pending_followups(job) if read_session_id(job) else []
+        # 未配信のスクショ（1 ターンの上限まで）。配信成功でカーソルが進む。
+        screenshots = undelivered_screenshots(job)[:MAX_SCREENSHOTS_PER_TURN]
         # 古い失敗理由は次の仕事に持ち越さない。
         clear_failure_reason(job)
 
@@ -1061,8 +1222,20 @@ class InProcessHermes:
                         logger.debug("approved memory load failed", exc_info=True)
                     agent.suppress_status_output = True
                     agent._end_session_on_close = False
+                    user_message: Any = prompt
+                    if screenshots:
+                        native, reason = image_native_check()
+                        if not native:
+                            emit(
+                                ProgressEvent(
+                                    kind=ProgressKind.LOG,
+                                    text=f"スクショを添付できない: {reason}",
+                                )
+                            )
+                            raise _ImageInputUnsupported(reason)
+                        user_message = build_multimodal_message(prompt, screenshots)
                     result = agent.run_conversation(
-                        prompt,
+                        user_message,
                         conversation_history=history,
                     )
                     # 中断後に拾えるよう、完了時の ID も残す。
@@ -1149,6 +1322,14 @@ class InProcessHermes:
                     # 時間切れだったことを理由に残す（次の操作は orchestrator の文言に載る）。
                     record_failure_reason(job, "時間切れ")
                     return JobStatus.FAILED
+                except _ImageInputUnsupported:
+                    # モデルが画像を読めない（理由は LOG イベントで流し済み）。
+                    # thread は終了済みか終了に向かっている。回収して失敗扱いにする。
+                    try:
+                        await future
+                    except Exception:
+                        pass
+                    return JobStatus.FAILED
                 except Exception:
                     logger.exception("Hermes AIAgent が転んだ")
                     # thread は終了済みか終了に向かっている。lease 解放前に回収する。
@@ -1175,6 +1356,12 @@ class InProcessHermes:
                 advance_followup_cursor(job, pending)
         except Exception:
             logger.debug("followup cursor advance failed", exc_info=True)
+        # 配信したスクショも同様にカーソルを進める。
+        try:
+            if screenshots:
+                advance_screenshot_cursor(job, screenshots)
+        except Exception:
+            logger.debug("screenshot cursor advance failed", exc_info=True)
 
         response = str((result or {}).get("final_response") or "").strip()
         if (result or {}).get("failed"):

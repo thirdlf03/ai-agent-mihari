@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -37,8 +38,11 @@ public enum JobRequestExample: String, CaseIterable, Sendable, Identifiable {
 
 /// 依頼窓の中身。主入力は「何をしてほしい？」。タイトルは本文から自動生成しつつ任意編集できる。
 ///
+/// 走っている仕事への「追記」にも同じ窓を使う(タイトル欄を隠して「追記する」になる)。
 /// 添付は送信前のプレビューと削除ができ、上限・形式は追加時に検証する。本文・添付・設定は
 /// 下書きとしてローカル保存し、失敗時は保持、成功時は消して当該ジョブの詳細を開く。
+/// ディスプレイ・ウィンドウを選んでスクショを撮り、添付確認・削除を経て送る（#22）。
+/// スクショはバイト列（base64）で部屋へ送られ、成果物の公開対象にはならない。
 public struct JobRequestView: View {
     @StateObject private var model: JobRequestViewModel
     @State private var showFileImporter = false
@@ -47,21 +51,43 @@ public struct JobRequestView: View {
     public init(
         client: JobRequestClient,
         onSubmitted: @escaping @MainActor (String, String) -> Void = { _, _ in },
-        draftStore: (any JobRequestDraftStoring)? = DiskJobRequestDraftStore()
+        draftStore: (any JobRequestDraftStoring)? = DiskJobRequestDraftStore(),
+        listTargets: @escaping @Sendable () async throws -> [ScreenshotTarget] = {
+            try await ScreenshotCaptureService.availableTargets()
+        },
+        capture: @escaping @Sendable (ScreenshotTarget) async throws -> ScreenshotCapture = {
+            try await ScreenshotCaptureService.capturePNG(of: $0)
+        }
     ) {
         _model = StateObject(
             wrappedValue: JobRequestViewModel(
                 client: client,
                 onSubmitted: onSubmitted,
-                draftStore: draftStore
+                draftStore: draftStore,
+                listTargets: listTargets,
+                capture: capture
             )
         )
     }
 
     /// すでに走っている仕事へ追記する窓。
-    public init(followupClient: RoomEventClient, jobID: String) {
+    public init(
+        followupClient: RoomEventClient,
+        jobID: String,
+        listTargets: @escaping @Sendable () async throws -> [ScreenshotTarget] = {
+            try await ScreenshotCaptureService.availableTargets()
+        },
+        capture: @escaping @Sendable (ScreenshotTarget) async throws -> ScreenshotCapture = {
+            try await ScreenshotCaptureService.capturePNG(of: $0)
+        }
+    ) {
         _model = StateObject(
-            wrappedValue: JobRequestViewModel(followupClient: followupClient, jobID: jobID)
+            wrappedValue: JobRequestViewModel(
+                followupClient: followupClient,
+                jobID: jobID,
+                listTargets: listTargets,
+                capture: capture
+            )
         )
     }
 
@@ -85,6 +111,7 @@ public struct JobRequestView: View {
                 } else {
                     newJobInput
                 }
+                screenshotSection
                 if let notice = model.notice {
                     Text(notice)
                         .foregroundStyle(model.didSucceed ? .green : .red)
@@ -156,6 +183,90 @@ public struct JobRequestView: View {
             if model.supportsAttachments {
                 attachmentsSection
             }
+        }
+    }
+
+    /// スクショの添付欄。撮影対象を選ぶメニューと、撮った分の確認・削除。
+    @ViewBuilder
+    private var screenshotSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("スクショ")
+                    .font(.headline)
+                Spacer()
+                if model.isLoadingTargets {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Menu {
+                    if model.screenshotTargets.isEmpty {
+                        Text("対象が見つからない")
+                    } else {
+                        ForEach(model.screenshotTargets) { target in
+                            Button(target.title) {
+                                Task {
+                                    await model.captureScreenshot(target: target)
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Label("スクショを撮る", systemImage: "camera.viewfinder")
+                }
+                .disabled(model.isLoadingTargets || model.isCapturingScreenshot)
+            }
+
+            if model.isCapturingScreenshot {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("撮影中…")
+                        .font(.caption)
+                }
+            }
+
+            if let message = model.captureErrorMessage {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                    if model.messageMentionsPermission {
+                        Button("画面収録の設定を開く") {
+                            PrivacyPane.screenCapture.open()
+                        }
+                        .font(.caption)
+                    }
+                }
+            }
+
+            if !model.screenshots.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(model.screenshots) { shot in
+                            VStack(spacing: 2) {
+                                Image(nsImage: NSImage(data: shot.pngData) ?? NSImage())
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(width: 96, height: 60)
+                                    .background(Color.black.opacity(0.05))
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                                Text(shot.sourceTitle)
+                                    .font(.caption2)
+                                    .lineLimit(1)
+                                Button("削除") {
+                                    model.removeScreenshot(shot)
+                                }
+                                .buttonStyle(.borderless)
+                                .font(.caption)
+                            }
+                            .frame(width: 108)
+                        }
+                    }
+                }
+            }
+        }
+        .task {
+            await model.loadScreenshotTargets()
         }
     }
 
@@ -273,11 +384,20 @@ public final class JobRequestViewModel: ObservableObject {
     /// 部屋が添付に対応しているか。旧バックエンドでは添付 UI を出さない。
     @Published public private(set) var supportsAttachments = true
 
+    // スクショ（#22）
+    @Published public private(set) var screenshots: [ScreenshotAttachment] = []
+    @Published public private(set) var screenshotTargets: [ScreenshotTarget] = []
+    @Published public private(set) var isLoadingTargets = false
+    @Published public private(set) var isCapturingScreenshot = false
+    @Published public var captureErrorMessage: String?
+
     private let submitClient: JobRequestClient?
     private let followupClient: RoomEventClient?
     private let followupJobID: String?
     private let draftStore: (any JobRequestDraftStoring)?
     private let onSubmitted: @MainActor (String, String) -> Void
+    private let listTargets: @Sendable () async throws -> [ScreenshotTarget]
+    private let capture: @Sendable (ScreenshotTarget) async throws -> ScreenshotCapture
     /// 添付それぞれの元パス。下書きの復元に使う（in-memory の添付は nil）。
     private var attachmentPaths: [URL?] = []
 
@@ -285,24 +405,44 @@ public final class JobRequestViewModel: ObservableObject {
     public init(
         client: JobRequestClient,
         onSubmitted: @escaping @MainActor (String, String) -> Void = { _, _ in },
-        draftStore: (any JobRequestDraftStoring)? = nil
+        draftStore: (any JobRequestDraftStoring)? = nil,
+        listTargets: @escaping @Sendable () async throws -> [ScreenshotTarget] = {
+            try await ScreenshotCaptureService.availableTargets()
+        },
+        capture: @escaping @Sendable (ScreenshotTarget) async throws -> ScreenshotCapture = {
+            try await ScreenshotCaptureService.capturePNG(of: $0)
+        }
     ) {
         self.submitClient = client
         self.followupClient = nil
         self.followupJobID = nil
         self.draftStore = draftStore
         self.onSubmitted = onSubmitted
+        self.listTargets = listTargets
+        self.capture = capture
         restoreDraft()
         refreshCapabilities()
     }
 
-    /// 走っている仕事へ追記する。添付は追記側（別 Issue）の責務なのでここでは扱わない。
-    public init(followupClient: RoomEventClient, jobID: String) {
+    /// 走っている仕事へ追記する。ファイル添付は追記側（別 Issue）の責務なのでここでは扱わない。
+    /// スクショは追記でも撮って送れる（#22）。
+    public init(
+        followupClient: RoomEventClient,
+        jobID: String,
+        listTargets: @escaping @Sendable () async throws -> [ScreenshotTarget] = {
+            try await ScreenshotCaptureService.availableTargets()
+        },
+        capture: @escaping @Sendable (ScreenshotTarget) async throws -> ScreenshotCapture = {
+            try await ScreenshotCaptureService.capturePNG(of: $0)
+        }
+    ) {
         self.submitClient = nil
         self.followupClient = followupClient
         self.followupJobID = jobID
         self.draftStore = nil
         self.onSubmitted = { _, _ in }
+        self.listTargets = listTargets
+        self.capture = capture
     }
 
     /// 追記窓か。タイトル欄を隠し、ボタンの文言も変える。
@@ -315,9 +455,48 @@ public final class JobRequestViewModel: ObservableObject {
         followupJobID ?? ""
     }
 
-    /// 本文が空のまま送らせない。タイトルは空でよい。
+    /// 本文が空のまま送らせない。タイトルは空でよい。スクショだけでは送らせない。
     public var canSubmit: Bool {
         !isSubmitting && !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// エラー文言が権限まわりかを示す。設定を開くボタンの表示条件。
+    public var messageMentionsPermission: Bool {
+        (captureErrorMessage ?? "").contains("権限")
+    }
+
+    /// 撮影対象の一覧を読み込む。権限が無ければ理由を表示するだけ。
+    public func loadScreenshotTargets() async {
+        guard !isLoadingTargets, screenshotTargets.isEmpty else { return }
+        isLoadingTargets = true
+        defer { isLoadingTargets = false }
+        do {
+            screenshotTargets = try await listTargets()
+            captureErrorMessage = nil
+        } catch {
+            captureErrorMessage =
+                (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// 選んだ対象を 1 枚撮ってスクショへ足す。失敗は落とさず理由を表示する。
+    public func captureScreenshot(target: ScreenshotTarget) async {
+        guard !isCapturingScreenshot else { return }
+        isCapturingScreenshot = true
+        captureErrorMessage = nil
+        defer { isCapturingScreenshot = false }
+        do {
+            let shot = try await capture(target)
+            screenshots.append(ScreenshotAttachment(capture: shot))
+        } catch {
+            captureErrorMessage =
+                (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// スクショを外す。送信前なら何度でも戻せる。
+    public func removeScreenshot(_ screenshot: ScreenshotAttachment) {
+        screenshots.removeAll { $0.id == screenshot.id }
     }
 
     // MARK: - 入力の更新
@@ -410,6 +589,7 @@ public final class JobRequestViewModel: ObservableObject {
 
     /// 部屋へ投げる。成功したら下書きを消して、もう 1 件頼めるようにする。
     /// 失敗したら下書きは保持する。二重押しは `isSubmitting` で防ぐ。
+    /// 送信に失敗したときはスクショも残す（撮り直させない）。
     public func submit() async {
         guard canSubmit else { return }
         if !isFollowup, let error = JobAttachmentLimit.validate(attachments) {
@@ -422,29 +602,43 @@ public final class JobRequestViewModel: ObservableObject {
         notice = nil
         didSucceed = false
         defer { isSubmitting = false }
+        let payloads = screenshots.map { ScreenshotUploadPayload(attachment: $0) }
         do {
             if let followupJobID, let followupClient {
-                _ = try await followupClient.followup(jobID: followupJobID, body: body)
+                _ = try await followupClient.followup(
+                    jobID: followupJobID,
+                    body: body,
+                    screenshots: payloads
+                )
                 didSucceed = true
-                notice = "追記したよ"
+                notice =
+                    payloads.isEmpty
+                    ? "追記したよ"
+                    : "追記したよ(スクショ \(payloads.count) 枚)"
                 resetAfterSubmit(clearDraft: false)
             } else if let submitClient {
                 let response = try await submitClient.submit(
                     title: title,
                     body: body,
+                    screenshots: payloads,
                     attachments: attachments
                 )
                 didSucceed = true
                 if let jobID = response.jobID, !jobID.isEmpty {
-                    notice = "頼んだよ(仕事 \(jobID))"
+                    notice =
+                        payloads.isEmpty
+                        ? "頼んだよ(仕事 \(jobID))"
+                        : "頼んだよ(仕事 \(jobID)、スクショ \(payloads.count) 枚)"
                     onSubmitted(jobID, Self.resolvedTitle(title: title, body: body))
                 } else {
-                    notice = "頼んだよ"
+                    notice =
+                        payloads.isEmpty ? "頼んだよ" : "頼んだよ(スクショ \(payloads.count) 枚)"
                 }
                 resetAfterSubmit(clearDraft: true)
             }
         } catch {
             didSucceed = false
+            // 送信に失敗したときは添付を残す（本文も残る）。撮り直させない。
             notice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             // 失敗時は下書きを保持して、次に開き直しても続きから書けるようにする。
             persistDraft()
@@ -456,6 +650,7 @@ public final class JobRequestViewModel: ObservableObject {
         body = ""
         attachments = []
         attachmentPaths = []
+        screenshots = []
         if clearDraft {
             draftStore?.clear()
         } else {

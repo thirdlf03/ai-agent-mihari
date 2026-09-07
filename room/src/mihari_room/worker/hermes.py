@@ -257,6 +257,20 @@ class HermesWorker:
     ) -> JobStatus:
         """ジョブフォルダを cwd に Hermes を実行し、進捗を流す。"""
         if self._command is not None:
+            # サブプロセス（偽 CLI）はマルチモーダルを渡せない。スクショがあれば明示失敗。
+            from mihari_room.worker.agent import undelivered_screenshots
+
+            if undelivered_screenshots(job):
+                await on_progress(
+                    ProgressEvent(
+                        kind=ProgressKind.LOG,
+                        text=(
+                            "スクショを添付した依頼はサブプロセス実行では扱えない"
+                            "（in-process で回して）"
+                        ),
+                    )
+                )
+                return JobStatus.FAILED
             return await self._run_subprocess(job, on_progress)
         return await self._run_inprocess(job, on_progress)
 
