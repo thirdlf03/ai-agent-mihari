@@ -25,8 +25,9 @@ public final class AlertMacControlPermissionDecider: MacControlPermissionDecidin
                 + "依頼の中断・Mac のロック・アプリ終了で失効します。",
             "操作のたびに許可するわけではありません（依頼ごとに一度）。",
         ].joined(separator: "\n\n")
-        alert.addButton(withTitle: "この依頼の間だけ許可")
+        // 第1ボタンが Return の既定なので、拒否を先に置く。
         alert.addButton(withTitle: "拒否")
+        alert.addButton(withTitle: "この依頼の間だけ許可")
         alert.alertStyle = .warning
         alert.window.level = .floating
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -38,7 +39,7 @@ public final class AlertMacControlPermissionDecider: MacControlPermissionDecidin
             // 何もウィンドウが無い極端な状態。シートに乗せられないので、その場でモーダルを回す。
             response = alert.runModal()
         }
-        return response == .alertFirstButtonReturn ? .allow : .deny
+        return response == .alertSecondButtonReturn ? .allow : .deny
     }
 }
 
