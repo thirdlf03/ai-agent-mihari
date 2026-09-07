@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from mihari_room.contracts import (
+    SCREENSHOTS_DIRNAME,
     CreateJobRequest,
     ForumBoard,
     Job,
@@ -18,6 +21,7 @@ from mihari_room.contracts import (
     JobWorker,
     ProgressEvent,
     ProgressKind,
+    ScreenshotAttachment,
 )
 from mihari_room.events import (
     EventJournal,
@@ -112,11 +116,13 @@ class RoomOrchestrator:
         self,
         request: CreateJobRequest,
         *,
-        attachments: Sequence[tuple[str, bytes]] = (),
+        attachments: Sequence[tuple[str, bytes]] = (),  # noqa: A002 -- Discord 等の添付
+        screenshots: Sequence[ScreenshotAttachment] = (),
     ) -> Job:
         """新しい仕事。ペット経由ならスレッドを切る。Forum 直なら thread_id 済み。"""
         job = self._store.create(request)
         self._save_attachments(job.id, attachments)
+        self._save_screenshots(job.id, screenshots)
         if job.thread_id is None:
             try:
                 thread_id = await self._board.create_thread(job)
@@ -149,10 +155,18 @@ class RoomOrchestrator:
         job = self._require_by_thread(thread_id)
         return await self.follow_up_job(job.id, body, requested_by=requested_by)
 
-    async def follow_up_job(self, job_id: str, body: str, *, requested_by: str) -> Job:
+    async def follow_up_job(
+        self,
+        job_id: str,
+        body: str,
+        *,
+        requested_by: str,
+        screenshots: Sequence[ScreenshotAttachment] = (),
+    ) -> Job:
         """同じ仕事の続き。同じセッションへ次のターンとして回す。"""
         job = self._store.get(job_id)
         self._write_followup(job.id, body)
+        self._save_screenshots(job.id, screenshots)
         current = self._store.get(job.id)
         if current.status is JobStatus.RUNNING:
             (self._store.job_dir(job.id) / REQUEUE_FILENAME).write_text("1", encoding="utf-8")
@@ -473,6 +487,56 @@ class RoomOrchestrator:
         for name, data in attachments:
             safe = Path(name).name or "attachment"
             (folder / safe).write_bytes(data)
+
+    # -- Mac スクショ（#22） --------------------------------------------------
+
+    #: 認める拡張子。PNG/JPEG 系はそのまま画像として Hermes に載せられる。
+    _SCREENSHOT_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+    def _save_screenshots(self, job_id: str, screenshots: Sequence[ScreenshotAttachment]) -> None:
+        """スクショを input/screenshots/<seq>.<ext> に保存する。
+
+        撮影メタデータ（scale・座標など）は <seq>.json に置く。成果物公開の対象は
+        output/ だけなので、ここに置いた限り自動で公開されない。
+        """
+        if not screenshots:
+            return
+        folder = self._store.input_dir(job_id) / SCREENSHOTS_DIRNAME
+        folder.mkdir(parents=True, exist_ok=True)
+        for upload in screenshots:
+            if not upload.data:
+                continue
+            seq = self._next_screenshot_seq(folder)
+            suffix = self._suffix_for(upload.filename)
+            target = folder / f"{seq:04d}{suffix}"
+            target.write_bytes(upload.data)
+            meta = dict(upload.metadata or {})
+            meta["original_filename"] = Path(upload.filename).name
+            (folder / f"{seq:04d}.json").write_text(
+                json.dumps(meta, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8"
+            )
+
+    def _next_screenshot_seq(self, folder: Path) -> int:
+        """置き場にある画像の次の連番。並行で同じ番号を引かないよう冪等に数える。"""
+        highest = 0
+        try:
+            for path in folder.iterdir():
+                if not path.is_file():
+                    continue
+                match = re.match(r"^(\d{4,})\.(?:png|jpe?g|webp|gif)$", path.name, re.IGNORECASE)
+                if match:
+                    highest = max(highest, int(match.group(1)))
+        except OSError:
+            pass
+        return highest + 1
+
+    @staticmethod
+    def _suffix_for(filename: str) -> str:
+        suffix = Path(filename or "").suffix.lower()
+        if suffix in RoomOrchestrator._SCREENSHOT_SUFFIXES:
+            return suffix
+        # 未知の拡張子は Hermes が読みやすい PNG として置く。
+        return ".png"
 
     def _require_thread(self, job: Job) -> int:
         if job.thread_id is None:
