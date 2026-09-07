@@ -19,6 +19,8 @@ public enum PermissionChecker {
             return PermissionStateMapper.fromScreenRecording(preflight: CGPreflightScreenCaptureAccess())
         case .inputMonitoring:
             return PermissionStateMapper.from(hidAccess: IOHIDCheckAccess(kIOHIDRequestTypeListenEvent))
+        case .accessibility:
+            return PermissionStateMapper.fromAccessibility(trusted: AXIsProcessTrusted())
         case .automation:
             return AutomationProbe.status()
         case .motion:

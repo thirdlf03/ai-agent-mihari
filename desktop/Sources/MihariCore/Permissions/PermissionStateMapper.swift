@@ -33,6 +33,14 @@ public enum PermissionStateMapper {
             : PermissionState(grant: .undetermined, detail: "false (未許可。未決定か拒否かは判別できない)")
     }
 
+    /// アクセシビリティ。`AXIsProcessTrusted()` も Bool しか返さないため、
+    /// 画面収録と同じ扱いにする。
+    public static func fromAccessibility(trusted: Bool) -> PermissionState {
+        trusted
+            ? PermissionState(grant: .granted, detail: "trusted (許可済み)")
+            : PermissionState(grant: .undetermined, detail: "not trusted (未許可。未決定か拒否かは判別できない)")
+    }
+
     /// 入力監視の `IOHIDCheckAccess`。
     public static func from(hidAccess access: IOHIDAccessType) -> PermissionState {
         switch access {

@@ -6,6 +6,7 @@ public enum PermissionKind: String, Sendable, CaseIterable, Identifiable {
     case microphone
     case screenRecording
     case inputMonitoring
+    case accessibility
     case automation
     case motion
 
@@ -24,7 +25,7 @@ public enum PermissionKind: String, Sendable, CaseIterable, Identifiable {
     public var isRequired: Bool {
         switch self {
         case .camera, .microphone, .screenRecording, .inputMonitoring: return true
-        case .automation, .motion: return false
+        case .accessibility, .automation, .motion: return false
         }
     }
 
@@ -37,6 +38,7 @@ public enum PermissionKind: String, Sendable, CaseIterable, Identifiable {
         case .microphone: return "マイク"
         case .screenRecording: return "画面収録"
         case .inputMonitoring: return "入力監視"
+        case .accessibility: return "アクセシビリティ"
         case .automation: return "オートメーション"
         case .motion: return "モーション(AirPods)"
         }
@@ -49,6 +51,7 @@ public enum PermissionKind: String, Sendable, CaseIterable, Identifiable {
         case .microphone: return "在席状況の判定に使う(音声は保存しない)"
         case .screenRecording: return "サボり検知時に画面のスクショを撮る"
         case .inputMonitoring: return "キーやマウスの操作有無からアイドルを判定する"
+        case .accessibility: return "依頼されたクリックや入力の合成イベントを送る"
         case .automation: return "説教中に再生中の音楽を止める"
         case .motion: return "AirPods の首振りを はい/いいえ として受け取る"
         }
@@ -61,6 +64,7 @@ public enum PermissionKind: String, Sendable, CaseIterable, Identifiable {
         case .microphone: return "AVCaptureDevice.authorizationStatus(for: .audio)"
         case .screenRecording: return "CGPreflightScreenCaptureAccess()"
         case .inputMonitoring: return "IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)"
+        case .accessibility: return "AXIsProcessTrusted()"
         case .automation: return "AEDeterminePermissionToAutomateTarget(com.apple.Music)"
         case .motion: return "CMHeadphoneMotionManager.authorizationStatus()"
         }
@@ -72,6 +76,7 @@ public enum PermissionKind: String, Sendable, CaseIterable, Identifiable {
         case .microphone: return .microphone
         case .screenRecording: return .screenCapture
         case .inputMonitoring: return .listenEvent
+        case .accessibility: return .accessibility
         case .automation: return .automation
         case .motion: return .motion
         }
@@ -84,6 +89,7 @@ public enum PermissionKind: String, Sendable, CaseIterable, Identifiable {
         case .camera, .microphone: return "許可を求める"
         case .screenRecording: return "許可を求める"
         case .inputMonitoring: return "許可を求める"
+        case .accessibility: return "許可を求める"
         case .motion: return "許可を求める"
         case .automation: return nil
         }
@@ -96,6 +102,7 @@ public enum PermissionKind: String, Sendable, CaseIterable, Identifiable {
         case .microphone: return "音による在席判定が使えない"
         case .screenRecording: return "Mac の画面を晒せない"
         case .inputMonitoring: return "アイドル判定の精度が落ちる"
+        case .accessibility: return "依頼のクリック・入力・キー操作ができない"
         case .automation: return "音楽を止められない(オーバーレイは出る)"
         case .motion: return "首振りで答えられない"
         }

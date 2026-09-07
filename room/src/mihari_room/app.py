@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hmac
 import json
 import logging
 import mimetypes
@@ -18,13 +19,22 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from pydantic import BaseModel, field_validator
 from starlette.responses import Response, StreamingResponse
 
 from mihari_room.artifacts import PREVIEWS_DIRNAME, ArtifactPublisher, read_publication
 from mihari_room.auth import verify_token
-from mihari_room.config import RoomConfig
+from mihari_room.config import TOKEN_HEADER, RoomConfig
 from mihari_room.contracts import (
     DEFAULT_JOB_TITLE,
     INPUT_DIRNAME,
@@ -344,6 +354,13 @@ async def _job_events_stream(
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     orchestrator: RoomOrchestrator = app.state.orchestrator
+    # Mac 操作 hub をこのループに載せる。Hermes ツールは同期待ちで hub を叩く。
+    hub = getattr(app.state, "mac_control", None)
+    if hub is not None:
+        try:
+            hub.attach_loop(asyncio.get_running_loop())
+        except Exception:
+            pass
     orchestrator.restore()
     if app.state.start_pump:
         orchestrator.start_pump()
@@ -672,6 +689,98 @@ def create_app(
     except Exception:
         logger.exception("成果物 registry の移行に失敗")
 
+    # --- Mac 操作（依頼単位の許可・端末・操作 ID を hub が検証） ------------
+    from mihari_room.mac_control.hub import MacControlHub
+    from mihari_room.mac_control.protocol import PROTOCOL_VERSION
+
+    hub = MacControlHub()
+    app.state.mac_control = hub
+    try:
+        worker = orchestrator.worker
+        attach = getattr(worker, "attach_mac_control", None)
+        if callable(attach):
+            attach(hub)
+    except Exception:
+        pass
+    try:
+        orchestrator.add_cancel_listener(hub.cancel_job)
+    except Exception:
+        pass
+
+    @app.get("/capabilities", dependencies=[Depends(verify_token)])
+    def capabilities() -> dict[str, Any]:
+        """旧バックエンドと見分けるための対応機能一覧。desktop はこれを見て UI を出す。"""
+        return {
+            "attachment_upload": True,
+            "job_list": True,
+            "job_history": True,
+            "mac_control": True,
+            "mac_control_protocol": PROTOCOL_VERSION,
+            "tools": [
+                "mac_capture",
+                "mac_click",
+                "mac_double_click",
+                "mac_drag",
+                "mac_scroll",
+                "mac_type_text",
+                "mac_key",
+                "mac_activate_app",
+            ],
+        }
+
+    @app.get("/mac/devices", dependencies=[Depends(verify_token)])
+    def mac_devices(request: Request) -> dict[str, Any]:
+        """今繋がっている Mac の一覧（デバッグ・認証確認用）。"""
+        return {"devices": request.app.state.mac_control.device_states()}
+
+    class _WebSocketDeviceLink:
+        """hub が送るフレームを WebSocket へ書く。"""
+
+        def __init__(self, websocket: WebSocket) -> None:
+            self._websocket = websocket
+
+        async def send(self, frame: dict[str, Any]) -> None:
+            await self._websocket.send_text(json.dumps(frame, ensure_ascii=False))
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            try:
+                await self._websocket.close(code=code, reason=reason)
+            except Exception:
+                pass
+
+    @app.websocket("/ws/mac-control")
+    async def mac_control_socket(websocket: WebSocket) -> None:
+        """Mac が張る認証付き WebSocket。トークンはヘッダか query の token。"""
+        raw_header = websocket.headers.get(TOKEN_HEADER.lower()) or ""
+        raw_query = websocket.query_params.get("token") or ""
+        candidate = raw_header or raw_query
+        if not candidate or not hmac.compare_digest(candidate, config.token):
+            await websocket.close(code=4401)
+            return
+        await websocket.accept()
+        hub_local = hub
+        link = _WebSocketDeviceLink(websocket)
+        hub_local.register_link(link)
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                try:
+                    frame = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(frame, dict):
+                    continue
+                await hub_local.handle_frame(link, frame)
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            pass
+        finally:
+            try:
+                await hub_local.close_link(link, reason="websocket closed")
+            except Exception:
+                pass
+
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -703,15 +812,6 @@ def create_app(
             thread_id=job.thread_id,
             status=job.status.value,
         )
-
-    @app.get("/capabilities", dependencies=[Depends(verify_token)])
-    def capabilities() -> dict[str, Any]:
-        """この部屋が実装している機能を返す。旧バックエンドでは未対応操作を出さないため。"""
-        return {
-            "attachment_upload": True,
-            "job_list": True,
-            "job_history": True,
-        }
 
     # 可変ルート `/jobs/{job_id}` より先に定義する（/jobs/running が奪われないように）。
     @app.get("/jobs/running", dependencies=[Depends(verify_token)])

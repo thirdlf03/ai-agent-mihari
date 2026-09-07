@@ -36,10 +36,13 @@ struct PermissionKindTests {
 @Suite("必須と任意の切り分け")
 struct RequiredPermissionTests {
 
-    @Test("必須は 4 つ、任意は 2 つ")
+    @Test("必須は 4 つ、任意は 3 つ")
     func requiredCount() {
         #expect(PermissionKind.required == [.camera, .microphone, .screenRecording, .inputMonitoring])
-        #expect(PermissionKind.allCases.filter { !$0.isRequired } == [.automation, .motion])
+        #expect(
+            PermissionKind.allCases.filter { !$0.isRequired }
+                == [.accessibility, .automation, .motion]
+        )
     }
 
     @Test("必須の権限はアプリからプロンプトを出せる")

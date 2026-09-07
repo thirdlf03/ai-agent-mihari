@@ -1,3 +1,4 @@
+import ApplicationServices
 import AVFoundation
 import CoreGraphics
 import CoreMotion
@@ -9,6 +10,10 @@ import os
 public enum PermissionRequester {
 
     private static let logger = Logger(subsystem: "com.thirdlf03.mihari", category: "permission")
+
+    /// `kAXTrustedCheckOptionPrompt` は Swift では concurrency-unsafe な var として import されるため、
+    /// 文字列へ写しておく。値は Apple の公開定数（"AXTrustedCheckOptionPrompt"）。
+    private static let axTrustedCheckOptionPromptKey = "AXTrustedCheckOptionPrompt"
 
     /// 要求の結果を人に見せるための文言。要求できない権限は理由を返す。
     public static func request(_ kind: PermissionKind) async -> String {
@@ -30,6 +35,15 @@ public enum PermissionRequester {
             return granted
                 ? "画面収録: 許可された"
                 : "画面収録: プロンプトが出なければ、システム設定から許可してアプリを再起動する"
+
+        case .accessibility:
+            // 初回だけプロンプトを出せる。2 回目以降はシステム設定から許可するしかない。
+            let options = [Self.axTrustedCheckOptionPromptKey: true] as CFDictionary
+            let trusted = AXIsProcessTrustedWithOptions(options)
+            logger.info("AXIsProcessTrustedWithOptions -> \(trusted, privacy: .public)")
+            return trusted
+                ? "アクセシビリティ: 許可された"
+                : "アクセシビリティ: プロンプトが出なければ、システム設定から許可してアプリを再起動する"
 
         case .inputMonitoring:
             let granted = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
