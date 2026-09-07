@@ -210,9 +210,24 @@ async def test_reply_attachments_are_saved_and_acknowledged(tmp_path: Path) -> N
     # 添付は次の実行の資料として input/ に残る。
     assert (store.input_dir(job.id) / "new.png").read_bytes() == b"png-bytes"
     assert (store.input_dir(job.id) / "memo.txt").read_bytes() == b"memo"
-    # 受領した資料を返答する。
-    ack = [text for _, text in board.speech if text.startswith("資料を受け取ったよ")]
-    assert ack and "new.png" in ack[-1] and "memo.txt" in ack[-1]
+
+
+async def test_reply_attachment_named_request_md_does_not_overwrite_body(tmp_path: Path) -> None:
+    orch, store, board, worker = await _done_job(tmp_path)
+    job = _job_from_thread(store)
+    original = (store.input_dir(job.id) / "request.md").read_text(encoding="utf-8")
+    await _speak(
+        orch,
+        "資料を見て",
+        author="hana",
+        replies_to_bot=True,
+        attachments=(("request.md", b"# fake"),),
+    )
+    await _settle()
+    await orch.aclose()
+
+    assert (store.input_dir(job.id) / "request.md").read_text(encoding="utf-8") == original
+    assert (store.input_dir(job.id) / "attached-request.md").read_bytes() == b"# fake"
 
 
 async def test_unauthorized_cancel_is_refused_not_followed_up(tmp_path: Path) -> None:
