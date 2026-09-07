@@ -213,10 +213,7 @@ def run_temp_deploy(
     if code != 0 or not parsed["preview_url"]:
         detail = " ".join((stderr or stdout or "").split())
         detail = _CLAIM_URL.sub("[claim omitted]", detail)[:240]
-        raise TempDeployError(
-            "一時デプロイに失敗した"
-            + (f": {detail}" if detail else "")
-        )
+        raise TempDeployError("一時デプロイに失敗した" + (f": {detail}" if detail else ""))
     expires = datetime.now(UTC) + timedelta(minutes=CLAIM_WINDOW_MINUTES)
     return {
         "preview_url": parsed["preview_url"],

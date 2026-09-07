@@ -652,19 +652,22 @@ Discord への投稿本文の 1 行目に使い、同じ 1 本をペットも喋
 **iPhone のスクショを撮れた晒し(段階 4)だけの経路。音声モードとは関係なく走る。** Swift 側がスクショ入りの `SpeechRequest` を bridge へ投げ、返ってきた 1 文と音声をそのままペットに喋らせる(`DetectionEngine.expose`)。返らなければ同封の `iphoneActive` に落ちる。Mac のカメラで撮った晒し・疑い 1〜3・メンヘラモードは bridge を呼ばず、最初から同封セリフを使う。
 
 `bridge/src/device_bridge/voice/generator.py` の `SYSTEM_PROMPT`。「守ること」の中身は
-`bridge/src/device_bridge/voice/persona.py` の `PERSONA_RULES` をそのまま埋め込んだもので、
-Gemini 側(`screen_reader.py`)とも共有している。**人格を変えるときは `persona.py` 1 箇所を直す。**
+共通リソース `persona/mihari_persona.py` の `PERSONA_RULES` をそのまま埋め込んだもので、
+Gemini 側(`screen_reader.py`)とも共有している。`bridge/src/device_bridge/voice/persona.py` は
+この正本を読み出すだけの薄い口。**人格を変えるときは共通リソース `persona/mihari_persona.py`
+1 箇所を直す。** Room（作業部屋）も同じ正本を参照して、専用 Hermes プロファイル（SOUL.md）と
+固定文言を組み立てる。
 
 ```
 あなたは macOS 常駐アプリ「Mihari」のデスクトップペット「みはり」です。
 ユーザーをずっと見張っていて、サボっているのを見つけて話しかけます。
 
 守ること:
-- 出力はセリフ本文のみ。前置き・説明・鉤括弧・絵文字は付けない。
 - あなたの名前は「みはり」。一人称は「私」、相手は「あなた」。相手の名前は呼ばない。
 - 束縛系。「ずっと見てる」「逃げられない」「私だけ見て」という執着と監視の口調で書く。
   皮肉ではなく、寂しさと独占欲を出す。
 - 人格否定・侮辱・脅迫はしない。暴力表現(「殺す」「死ね」など)も自傷表現も書かない。
+- 出力はセリフ本文のみ。前置き・説明・鉤括弧・絵文字は付けない。
 - 1 文か 2 文、30 文字以内。読み上げるので短く言い切る。敬語ではなくタメ口。
   「…」で間を作るのはよい。
 - 与えられた状況に具体的に触れる。毎回違う言い回しにする。
@@ -732,7 +735,7 @@ SSE が流れる。SpringBoard はこの行を切り替えのときにしか出�
 文で返ると日本語が壊れる。`app` は分からなければ空文字で返させ、bridge が `None` に直す
 (Swift 側は `app` が `nil` なら `unknown` 扱いの言い回しに倒す)。
 
-口調のルールは Claude 側と共通で、`bridge/src/device_bridge/voice/persona.py` の `PERSONA_RULES` 1 箇所に置いてある。画面を読むときはこれに加えて「アプリ名か見ているものを 1 語入れる」「`category` ごとの方向」「当たりの強さに合わせて強弱を変える」「個人名・メッセージ本文・金額は引用しない」を指示する。
+口調のルールは Claude 側と共通で、共通リソース `persona/mihari_persona.py` の `PERSONA_RULES` 1 箇所に置いてある（`bridge/src/device_bridge/voice/persona.py` はそれを読み出すだけ）。画面を読むときはこれに加えて「アプリ名か見ているものを 1 語入れる」「`category` ごとの方向」「当たりの強さに合わせて強弱を変える」「個人名・メッセージ本文・金額は引用しない」を指示する。
 
 落ち方は 3 段。キーが無い・6 秒で返らない・応答が壊れている・セリフが長すぎる(60 文字超)、のどれでも次に落ちる。
 
@@ -1030,5 +1033,7 @@ LLM が使えない・失敗した・遅すぎたときの保険。`fallback_lin
 | `bridge/src/device_bridge/commands/iphone_state_source.py` | 実機の観測(画面状態・前面アプリ・表示名) |
 | `bridge/src/device_bridge/voice/generator.py` | 検知セリフの生成(`SYSTEM_PROMPT`) |
 | `bridge/src/device_bridge/voice/context.py` | 状況の enum と LLM へ渡す 1 行 |
+| `persona/mihari_persona.py` | 人格の正本（名前・一人称・呼び方・口調・発話規則）。bridge と Room が参照 |
+| `bridge/src/device_bridge/voice/persona.py` | 共通リソースを読み出す薄い口（`PERSONA_RULES`） |
 | `bridge/src/device_bridge/voice/fallback.py` | 固定文言 |
 | `bridge/src/device_bridge/voice/voicevox.py` | 検知セリフの音声合成 |
