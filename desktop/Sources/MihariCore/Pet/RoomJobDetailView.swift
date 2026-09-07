@@ -8,6 +8,7 @@ import SwiftUI
 /// - 非公開は認証付きのアプリ内プレビュー（Room トークンはヘッダだけ）で見られる
 /// - 「この版を再公開」は旧版の内容を新しい非公開バージョンとして載せ直す（rollback の改称）
 /// - 「この版から修正」は作業ファイルを復元してから指摘の実行に使う（実行中は復元不可）
+/// - 版に含まれる Markdown / PDF は文書行として並べ、公開中はプレビュー・ダウンロードできる
 ///
 /// 開いたときに固定した仕事（`jobID`）を最後まで見る。別ジョブの進捗で表示が切り替わらない。
 /// 長文・多数の成果物でも操作不能にならないよう、全体をスクロールできる可変サイズにする。
@@ -194,9 +195,41 @@ public struct RoomJobDetailView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            documentSection(artifact)
         }
         .padding(6)
         .overlay(Rectangle().stroke(Color.secondary.opacity(0.25), lineWidth: 1))
+    }
+
+    /// 成果物の版に含まれる文書（Markdown / PDF）の行。
+    /// 公開中は共有 URL でプレビュー・ダウンロード、非公開は版の認証付きプレビューで見る。
+    @ViewBuilder
+    private func documentSection(_ artifact: RoomArtifact) -> some View {
+        if artifact.documents.isEmpty {
+            EmptyView()
+        } else {
+            ForEach(artifact.documents) { document in
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(document.name)
+                            .font(.body)
+                        Text(document.kindLabel)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if artifact.isPublic {
+                        if let preview = document.previewURL {
+                            Button("プレビュー") { onOpenArtifact(preview) }
+                        }
+                        if let download = document.downloadURL {
+                            Button("ダウンロード") { onOpenArtifact(download) }
+                        }
+                    }
+                }
+                .padding(.leading, 8)
+            }
+        }
     }
 
     @ViewBuilder

@@ -1159,6 +1159,7 @@ class InProcessHermes:
                 agent = None
                 restore_memory_guard: Callable[[], None] | None = None
                 restore_discord_tools: Callable[[], None] | None = None
+                restore_doc_tools: Callable[[], None] | None = None
                 restore_temp_deploy: Callable[[], None] | None = None
                 try:
                     # Bounded discord_* を registry に先に載せる（agent build が読む）。
@@ -1168,6 +1169,13 @@ class InProcessHermes:
                         restore_discord_tools = register_discord_tools(job)
                     except Exception:
                         logger.debug("discord tools register failed", exc_info=True)
+                    # 文書ツール（PDF・Markdown）も同じ toolset に載せる。
+                    try:
+                        from mihari_room.worker.doc_tools import register_doc_tools
+
+                        restore_doc_tools = register_doc_tools(job)
+                    except Exception:
+                        logger.debug("document tools register failed", exc_info=True)
                     try:
                         from mihari_room.worker.wrangler_temp import register_temp_deploy_tool
 
@@ -1253,6 +1261,11 @@ class InProcessHermes:
                     if restore_discord_tools is not None:
                         try:
                             restore_discord_tools()
+                        except Exception:
+                            pass
+                    if restore_doc_tools is not None:
+                        try:
+                            restore_doc_tools()
                         except Exception:
                             pass
                     if restore_temp_deploy is not None:

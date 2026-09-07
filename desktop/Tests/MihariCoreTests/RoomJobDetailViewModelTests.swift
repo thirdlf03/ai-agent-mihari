@@ -155,7 +155,7 @@ struct RoomJobDetailViewModelTests {
 
         let model = RoomJobDetailViewModel(monitor: monitor, jobID: "abc")
         model.comment = "色を直して"
-        await model.submitComment(previewURL: nil)
+        await model.submitComment()
 
         #expect(model.didFail)
         #expect(model.notice?.contains("サーバが落ちた") == true)

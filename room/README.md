@@ -20,7 +20,7 @@ Hermes の Discord Gateway は起動しない。Forum・タグ・ペット HTTP 
   （`approve` / `reject`）を待つ。`add` のみ候補化し、`replace` / `remove` は未対応として明示拒否する
 - 同時実行は 1 件。タイムアウト 15 分で failed 扱い
 
-**検証状況（正直なところ）:** ローカルは偽 Hermes のテスト（`uv run pytest -q` 230 件）。
+**検証状況（正直なところ）:** ローカルは偽 Hermes のテスト（`uv run pytest -q` 284 件）。
 実機は ConoHa で systemd 常駐、Tailscale 経由で API / プレビューが動く。
 社外向けの公開 HTTPS はまだ無い。受け入れは `docs/room-mvp.md`。
 
@@ -40,6 +40,7 @@ Hermes の Discord Gateway は起動しない。Forum・タグ・ペット HTTP 
 | `MIHARI_ROOM_PYTHON` | mihari-room を動かす Python（systemd の ExecStart 用） |
 | `MIHARI_PREVIEW_BASE_URL` | 静的プレビューの公開ホスト名。API ホストとは別にする（推奨） |
 | `MIHARI_ARCHIVE_CHANNEL_IDS` | 任意。絞るときだけチャンネル ID をカンマ区切り。空なら Bot が見えるチャンネル全部を収録 |
+| `MIHARI_POPPLER_BIN` / `MIHARI_TESSERACT_BIN` | 任意。Poppler（pdftoppm）と Tesseract のパス。標準パスに無いときだけ |
 
 ## デプロイ
 

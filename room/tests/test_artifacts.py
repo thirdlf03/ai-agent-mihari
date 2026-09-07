@@ -68,7 +68,9 @@ def test_publish_creates_immutable_private_version(tmp_path: Path) -> None:
         "expires_at",
         "sha256",
         "source_ids",
+        "documents",
     }
+    assert manifest["documents"] == []
     assert manifest["job_id"] == job.id
     assert manifest["session_id"] == "sess-1"
     assert manifest["version"] == 1
@@ -307,8 +309,11 @@ def test_excludes_secrets_symlinks_and_nonweb(tmp_path: Path) -> None:
     assert "index.html" in names
     assert "ok.png" in names
     # 秘密・非 web アセット・シンボリックリンクは写らない。
-    for banned in ("secret.txt", ".env", "claim_url", "script.py", "notes.md", "leak.txt"):
+    for banned in ("secret.txt", ".env", "claim_url", "script.py", "leak.txt"):
         assert banned not in names
+    # Markdown は文書として版に載る（プレビュー直下＝ web アセットと同じ位置）。
+    assert {doc["name"] for doc in manifest["documents"]} == {"notes.md"}
+    assert (preview_dir / "notes.md").is_file()
 
 
 def test_publish_skips_when_no_index(tmp_path: Path) -> None:
