@@ -20,9 +20,9 @@ Hermes の Discord Gateway は起動しない。Forum・タグ・ペット HTTP 
   （`approve` / `reject`）を待つ。`add` のみ候補化し、`replace` / `remove` は未対応として明示拒否する
 - 同時実行は 1 件。タイムアウト 15 分で failed 扱い
 
-**検証状況（正直なところ）:** ローカルは偽 Hermes でのテストのみ。実 Hermes の E2E は
-未実施。2026-09-05 の SSH 疎通がタイムアウトしたため実機デプロイは行っていない。
-受け入れは `docs/room-mvp.md` のチェックリストで。
+**検証状況（正直なところ）:** ローカルは偽 Hermes のテスト（`uv run pytest -q` 230 件）。
+実機は ConoHa で systemd 常駐、Tailscale 経由で API / プレビューが動く。
+社外向けの公開 HTTPS はまだ無い。受け入れは `docs/room-mvp.md`。
 
 ## 必要な環境変数
 

@@ -9,11 +9,13 @@
 # 構成の約束:
 #   - API ホスト: ローカルの Room(127.0.0.1:8787) に全部転送。
 #     認証は Room 自身の X-Mihari-Token（ヘッダ）。Caddy ではトークンを扱わない。
-#   - プレビュー ホスト: /previews/* の静的ファイルだけ。それ以外は全部 404。
-#     API・管理・ルート一覧には触れさせない。
+#   - プレビュー ホスト: /previews/* だけ Room へ reverse_proxy。それ以外は全部 404。
+#     API・管理・ルート一覧には触れさせない。ディスク直出し（file_server）はしない
+#     （CSP / allowlist を Room 側で掛けるため）。
 #   - SSE（/jobs/{id}/events）はバッファしない（flush_interval -1）。
 #   - アクセスログにパス・トークンは出さない（下を参照）。
-#   - Cloudflare はまだ実装していない。cloudflared の設定は入れない。
+#   - 社外公開は Cloudflare Tunnel（preview 専用ホスト）を推奨。
+#     Temporary Deploy / CDN は Phase 6。
 
 {
     # access log を出さない。パス（ジョブ ID が入る）も Authorization 系ヘッダも
@@ -36,12 +38,11 @@ api.room.example.com {
 }
 
 # ---- プレビュー ホスト ----
+# ディスクを直接 file_server しない。Room の GET /previews を通して
+# CSP・拡張子 allowlist・symlink 拒否を保つ。
 preview.room.example.com {
-    # /previews/<job>/<file> を /var/lib/mihari/room/previews/<job>/<file> から出す
-    #（handle_path が /previews を剥がす）
-    handle_path /previews/* {
-        root * /var/lib/mihari/room/previews
-        file_server
+    handle /previews/* {
+        reverse_proxy 127.0.0.1:8787
     }
     # /previews/* 以外（API 等）は全部 404
     handle {

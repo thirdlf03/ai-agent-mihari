@@ -10,7 +10,8 @@ Hermes の Discord Gateway は起動しない。
 | --- | --- |
 | `env.example` | 環境変数の雛形。実値は書かない |
 | `mihari-room.service` | systemd unit（foreground uvicorn、restart、umask、サンドボックス） |
-| `Caddyfile.example` | Caddy 例（API ホスト + プレビュー ホスト） |
+| `Caddyfile.example` | Caddy 例（API ホスト + プレビュー ホスト。プレビューは Room へ reverse_proxy） |
+| `cloudflared-preview.yml.example` | Cloudflare Tunnel でプレビューだけ公開する例 |
 | `backup.sh` | バックアップ（停止 or `--live-consistent`、WAL 対応、mode 600） |
 
 ## 構成
@@ -19,9 +20,9 @@ Hermes の Discord Gateway は起動しない。
 /var/lib/mihari/
 ├── room/                  MIHARI_ROOM_ROOT
 │   ├── jobs/<id>/         meta.json / input/ / output/ / followup-*.txt / hermes_session_id
-│   ├── messages.db        部屋のメッセージログ（Phase 後半。未実装なら無い）
-│   ├── archive/           アーカイブ（Phase 後半）
-│   └── previews/          公開してよい静的成果物（プレビュー ホストの webroot）
+│   ├── messages.db        Discord アーカイブ（SQLite WAL + FTS5）
+│   ├── archive/           添付の実体
+│   └── previews/          公開してよい静的成果物（Room の GET /previews が配信）
 ├── hermes/                HERMES_HOME（Hermes 専用プロファイル。既定の ~/.hermes には触れない）
 │   ├── state.db(-wal/-shm) セッション/メモリ（SQLite WAL）
 │   ├── config.yaml / .env
@@ -156,7 +157,8 @@ sudo systemctl reload caddy
 ```
 
 - **API ホスト**: `127.0.0.1:8787` へ転送。認証は Room 自身（`X-Mihari-Token`）
-- **プレビュー ホスト**: `/previews/*` だけ静的に出し、他は 404（API に触れない）
+- **プレビュー ホスト**: `/previews/*` だけ Room へ reverse_proxy。他は 404
+  （ディスク直出しはしない。CSP と allowlist は Room 側）
 - SSE は `flush_interval -1` でバッファしない
 - `/previews/*` 以外の静的パス（memory / research / manifests 等）を webroot に
   置かない。`/var/lib/mihari/room/previews` には公開してよい成果物だけ、
@@ -165,19 +167,21 @@ sudo systemctl reload caddy
 
 ### HTTPS か Tailscale か
 
-- **API**: クライアントが自動ログインして来る通常のユースなら、Caddy の自動
-  HTTPS（Let's Encrypt）で公開 DNS に出す。
-  開発者だけで叩くなら Tailscale serve で tailnet 内に閉じてもよい
-  （`tailscale serve --bg 8787`）。どちらでも **平文 HTTP で外に晒さない**
-- **プレビュー**: Unlisted 前提（誰でも URL を知っていれば見られる）を要求するなら、
-  **静的プレビューは必ず一般公開の HTTPS に出す**。Tailscale だけでは tailnet 外から
-  見えず、「公開 URL を渡して見てもらう」用途を満たさない
-  - 例: `preview.room.example.com` を Caddy / CDN で公開 HTTPS に
-  - 完全に非公開でよいなら tailnet 内だけで終わらせられるが、その場合は「Unlisted で
-    公開」ではないと認識すること
-
-Cloudflare は**まだ実装していない**。cloudflared の設定は入れない。
-将来入れる場合も、API・プレビューの 2 ホスト構成はそのまま Caddy の内側に保つ。
+- **API**: ペットと運用者だけが叩く。いまは Tailscale Serve
+  （`https://v133-117-76-14.tail0820c2.ts.net` → `127.0.0.1:8787`）。
+  **合言葉付きの `/jobs` をインターネットに出さない。**
+- **プレビュー**: Unlisted（URL を知っていれば誰でも見られる）にするなら、
+  **プレビュー専用の公開ホスト**が要る。Tailscale だけでは tailnet 外から見えない。
+  - **推奨: Cloudflare Tunnel**。ConoHa の 80/443 を開けなくてよい。ドメインが
+    Cloudflare にあれば `preview.<domain>` → `http://127.0.0.1:8787` の
+    `/previews` だけ。雛形は `cloudflared-preview.yml.example`。
+    通ったら `MIHARI_PREVIEW_BASE_URL=https://preview.<domain>/previews`
+  - VPS に穴を開ける（Caddy + Let's Encrypt + DNS A）も動くが、原点 IP が
+    見え、ファイアウォールと証明書の運用が増える。Tunnel の方が早い
+  - **オブジェクトストレージ（R2 / S3）は今はやらない。** 成果物はすでに
+    Room が allowlist して `previews/` に置いている。コピー経路を増やすだけで、
+    CSP と token 管理が二重になる
+- Cloudflare **Temporary Deploy**（約 60 分 URL）は Phase 6。Tunnel とは別
 
 ## 6. バックアップと復元
 
@@ -220,25 +224,26 @@ sudo systemctl start mihari-room
 注意:
 
 - `tar -xpf` は owner / mode を保存する（root で）
-- **旧 URL の継続性**: プレビュー URL は `<preview>/previews/<job_id>/...` で、
-  ジョブ ID（uuid の先頭 12 文字）と `previews/` のディレクトリ構造で決まる。
-  復元は **同じ絶対パス**（`/var/lib/mihari/room/previews`）に戻すこと。
-  別のディレクトリに付け替えると Caddy の root がずれて旧 URL が切れる
+- **旧 URL の継続性**: プレビュー URL は `<preview_base>/<token>/` で、token は
+  公開時のランダム値。復元は **同じ絶対パス**（`/var/lib/mihari/room/previews`）
+  に戻すこと。原点（`MIHARI_PREVIEW_BASE_URL`）を変えると新規仕事から URL が変わる
 - messages.db / state.db の owner は mihari:mihari、mode は 600 を保つ
 - WAL の三つ組で戻すときは db / -wal / -shm を**全部同時に**置く
   （`--live-consistent` のスナップショットなら 1 ファイルでよい）
 
 ## 7. 検証状況（正直なところ）
 
-- ローカルでは**偽 Hermes（test fixtures）でのテストのみ**。実 Hermes の E2E は未実施
-- 2026-09-05 に SSH で実機（ConoHa）へつなぎに行ったが**タイムアウト**。
-  実デプロイ・本番起動は**行っていない**
-- 受け入れは `docs/room-mvp.md` のチェックリストで。
-  「ローカル済み（偽 Hermes）」と「ライブ未確認」を分けて記録する
+- ローカルは偽 Hermes のテスト（`cd room && uv run pytest -q`）
+- 実機は ConoHa + systemd + Tailscale Serve。ジョブ・followup・Discord 検索・
+  Tailscale プレビュー URL は通した
+- `--live-consistent` バックアップを 2026-09-07 に撮り、temp 展開で
+  DB integrity と preview の sha 一致を確認した。サービス停止しての本番上書き復元は未実施
+- 社外向けプレビュー HTTPS と Cloudflare Temporary Deploy は未接続
 
 ## 8. やらないこと
 
 - 既存の Gateway（本家 Hermes / Mihari の Bot）をローカルや VPS で
   勝手に start / cancel しない。gateway の運用は担当者が行う
 - 実値の秘密をこのリポジトリに入れない
-- Cloudflare / 他 CDN の設定を入れない（未実装）
+- API をインターネットに出さない
+- Cloudflare Temporary Deploy / 他 CDN は Phase 6（Tunnel でのプレビュー公開とは別）

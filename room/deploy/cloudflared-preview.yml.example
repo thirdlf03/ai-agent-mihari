@@ -1,0 +1,30 @@
+# Cloudflare Tunnel — プレビュー専用ホストの例
+#
+# 目的: 社外に渡せる Unlisted HTTPS。API（/jobs, SSE, 合言葉）は出さない。
+# Tailscale Serve の API はそのまま残す。
+#
+# ダッシュボードでリモート管理トンネルを作るか、cloudflared login → tunnel create
+# したあと、このファイルを /etc/cloudflared/config.yml に置く。
+# hostname と tunnel UUID / credentials-file は実値に置き換えること。
+#
+#   cloudflared tunnel route dns <TUNNEL> preview.example.com
+#   sudo systemctl enable --now cloudflared
+#
+# 通ったら Room 側:
+#   MIHARI_PREVIEW_BASE_URL=https://preview.example.com/previews
+# を /etc/mihari-room/env に入れて mihari-room を再起動する。
+# 既存の Tailscale URL は古いまま残る。これから完了する仕事だけ新原点になる。
+#
+# 出典: https://developers.cloudflare.com/tunnel/advanced/local-management/configuration-file/
+
+tunnel: 00000000-0000-0000-0000-000000000000
+credentials-file: /etc/cloudflared/00000000-0000-0000-0000-000000000000.json
+
+ingress:
+  # path は Go 正規表現。先頭 /previews だけ Room へ。フルパスはそのまま転送される。
+  - hostname: preview.example.com
+    path: ^/previews
+    service: http://127.0.0.1:8787
+  - hostname: preview.example.com
+    service: http_status:404
+  - service: http_status:404
