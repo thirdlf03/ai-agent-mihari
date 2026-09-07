@@ -59,8 +59,13 @@ public struct JobRequestClient: Sendable {
     }
 
     /// 仕事を 1 件頼む。タイトルが空なら本文の先頭行から作る。
+    /// スクショ付きならバイト列（base64）を `screenshots` に載せる。
     @discardableResult
-    public func submit(title: String, body: String) async throws -> JobRequestResponse {
+    public func submit(
+        title: String,
+        body: String,
+        screenshots: [ScreenshotUploadPayload] = []
+    ) async throws -> JobRequestResponse {
         guard let url = URL(string: "jobs", relativeTo: baseURL) else {
             throw JobRequestError.invalidURL(path: "jobs")
         }
@@ -69,7 +74,11 @@ public struct JobRequestClient: Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(token, forHTTPHeaderField: DaemonClient.tokenHeader)
         request.httpBody = try JSONEncoder().encode(
-            JobRequestPayload(title: Self.resolveTitle(title: title, body: body), body: body)
+            JobRequestPayload(
+                title: Self.resolveTitle(title: title, body: body),
+                body: body,
+                screenshots: screenshots
+            )
         )
 
         let data: Data
@@ -104,15 +113,35 @@ public struct JobRequestClient: Sendable {
     }
 
     /// `POST /jobs` の本文。`source` はつねに `pet`。
+    /// スクショが無いときは従来どおりの JSON のまま（既存互換）。
     private struct JobRequestPayload: Encodable {
         let title: String
         let body: String
         let source: String
+        let screenshots: [ScreenshotUploadPayload]
 
-        init(title: String, body: String) {
+        init(title: String, body: String, screenshots: [ScreenshotUploadPayload] = []) {
             self.title = title
             self.body = body
             self.source = "pet"
+            self.screenshots = screenshots
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case title
+            case body
+            case source
+            case screenshots
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(title, forKey: .title)
+            try container.encode(body, forKey: .body)
+            try container.encode(source, forKey: .source)
+            if !screenshots.isEmpty {
+                try container.encode(screenshots, forKey: .screenshots)
+            }
         }
     }
 

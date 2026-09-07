@@ -169,4 +169,78 @@ struct JobRequestClientTests {
             try await client.submit(title: "掃除", body: "頼む")
         }
     }
+
+    // MARK: - スクショ添付（#22）
+
+    @Test("スクショ付きの依頼はバイト列を base64 の screenshots に載せる")
+    func submitsScreenshotsAsEncodedBytes() async throws {
+        let client = makeClient()
+        StubURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data(#"{"job_id":"abc","status":"queued"}"#.utf8))
+        }
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3])
+        let attachment = ScreenshotAttachment(
+            filename: "shot.png",
+            pngData: png,
+            sourceKind: .window,
+            sourceTitle: "Safari: 設定",
+            displayID: 2,
+            windowID: 99,
+            pixelWidth: 1920,
+            pixelHeight: 1080,
+            pointWidth: 960,
+            pointHeight: 540,
+            backingScale: 2.0,
+            frameX: -1920,
+            frameY: 0
+        )
+
+        _ = try await client.submit(
+            title: "見て",
+            body: "この画面",
+            screenshots: [ScreenshotUploadPayload(attachment: attachment)]
+        )
+
+        let json = try sentJSON()
+        let shots = try #require(json["screenshots"] as? [[String: Any]])
+        #expect(shots.count == 1)
+        let shot = try #require(shots.first)
+        // 本文へパスを書くだけではなく、バイト列が JSON に載る。
+        let base64 = try #require(shot["content_base64"] as? String)
+        #expect(Data(base64Encoded: base64) == png)
+        #expect(base64.contains("input/screenshots") == false)
+        #expect(shot["media_type"] as? String == "image/png")
+        #expect(shot["source"] as? String == "window")
+        #expect(shot["source_title"] as? String == "Safari: 設定")
+        #expect(shot["display_id"] as? Int == 2)
+        #expect(shot["window_id"] as? Int == 99)
+        #expect(shot["backing_scale"] as? Double == 2.0)
+        #expect(shot["frame_x"] as? Double == -1920)
+    }
+
+    @Test("スクショが無い依頼は従来どおり screenshots キーを付けない")
+    func plainSubmitKeepsOldShape() async throws {
+        let client = makeClient()
+        StubURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data(#"{"job_id":"abc"}"#.utf8))
+        }
+
+        _ = try await client.submit(title: "掃除", body: "片付けて")
+
+        let json = try sentJSON()
+        #expect(json["screenshots"] == nil)
+        #expect(json["source"] as? String == "pet")
+    }
 }
