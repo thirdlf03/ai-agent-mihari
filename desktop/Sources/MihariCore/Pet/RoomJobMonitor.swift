@@ -46,8 +46,38 @@ public struct RoomJobTrackedJob: Equatable, Sendable, Identifiable {
     public let directive: RoomPhaseDirective?
     /// 承認待ちの件数。
     public var pendingMemoryCount: Int { memories.filter(\.isPending).count }
+    /// 監視中に見た出来事の履歴（新しい順）。詳細パネルの「履歴」に出す。
+    public var history: [RoomJobHistoryEntry] = []
 
     public var id: String { jobID }
+
+    public init(
+        jobID: String,
+        title: String,
+        status: RoomJobStatus,
+        phase: RoomJobPhase? = nil,
+        latestText: String? = nil,
+        artifacts: [RoomArtifact] = [],
+        tempDeploys: [RoomTempDeploy] = [],
+        lastError: String? = nil,
+        memories: [RoomMemoryCandidate] = [],
+        memoryError: String? = nil,
+        directive: RoomPhaseDirective? = nil,
+        history: [RoomJobHistoryEntry] = []
+    ) {
+        self.jobID = jobID
+        self.title = title
+        self.status = status
+        self.phase = phase
+        self.latestText = latestText
+        self.artifacts = artifacts
+        self.tempDeploys = tempDeploys
+        self.lastError = lastError
+        self.memories = memories
+        self.memoryError = memoryError
+        self.directive = directive
+        self.history = history
+    }
 
     /// メニューに出す要約。
     public var summary: RoomJobSummary {
@@ -85,6 +115,8 @@ public final class RoomJobMonitor: ObservableObject {
     static let seenIDLimit = 512
     /// 重複排除の集合が上限を超えたとき、残しておく件数。
     static let seenIDTrim = 256
+    /// 詳細の「履歴」に残す出来事の上限。
+    static let historyLimit = 100
     /// バックオフの上限(秒)。これ以上は長くしない。
     nonisolated static let backoffCapSeconds: TimeInterval = 30
     /// バックオフの起点(秒)。
@@ -121,6 +153,7 @@ public final class RoomJobMonitor: ObservableObject {
         var operationError: String?
         var lastActivityAt = Date.distantPast
         var lastDirective: RoomPhaseDirective?
+        var history: [RoomJobHistoryEntry] = []
     }
 
     public init(access: any RoomAccess, cursorStore: RoomJobCursorStoring) {
@@ -505,6 +538,14 @@ public final class RoomJobMonitor: ObservableObject {
         state.status = Self.advanceStatus(from: state.status, after: event)
         state.handledCount += 1
         state.lastDirective = directive
+        // 履歴は新しい順に保ち、上限で古いものを落とす。
+        state.history.insert(
+            RoomJobHistoryEntry(phase: event.phase, kind: event.kind, text: event.text),
+            at: 0
+        )
+        if state.history.count > Self.historyLimit {
+            state.history = Array(state.history.prefix(Self.historyLimit))
+        }
         states[jobID] = state
 
         publish()
@@ -621,7 +662,8 @@ public final class RoomJobMonitor: ObservableObject {
                     operationError: state.operationError,
                     memories: state.memories,
                     memoryError: state.memoryError,
-                    directive: state.lastDirective
+                    directive: state.lastDirective,
+                    history: state.history
                 )
             }
     }
@@ -640,9 +682,15 @@ public final class RoomJobMonitor: ObservableObject {
                 operationError: state.operationError,
                 memories: state.memories,
                 memoryError: state.memoryError,
-                directive: state.lastDirective
+                directive: state.lastDirective,
+                history: state.history
             )
         }
+    }
+
+    /// その仕事をいま監視しているか。詳細を開く前に拾い直す判断に使う。
+    public func isTracking(_ jobID: String) -> Bool {
+        states[jobID] != nil
     }
 
     private func describe(_ error: Error) -> String {

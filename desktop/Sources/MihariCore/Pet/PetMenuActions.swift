@@ -35,6 +35,10 @@ public protocol PetMenuActions: AnyObject, ObservableObject {
     func openDiscordSettings()
     /// 仕事の依頼窓を開く。
     func openJobRequest()
+    /// 部屋が仕事一覧に対応しているか。旧バックエンドでは一覧の項目を出さない。
+    var supportsRoomJobList: Bool { get }
+    /// 仕事一覧の窓を開く。
+    func openRoomJobList()
     /// 作業部屋でいま追っている仕事。無ければ `nil`。
     var roomJob: RoomJobSummary? { get }
     /// 走っている仕事へ追記する窓を開く。
