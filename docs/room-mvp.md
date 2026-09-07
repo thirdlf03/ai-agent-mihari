@@ -8,12 +8,13 @@ desktop 側の対応は別 owner（`desktop/`）が持つ。ここでは backend
 
 - **ローカル**: 偽 Hermes（`room/tests/fixtures/fake_hermes_*.py`＋注入 fake agent）で
   ストア・キュー・Forum・orchestrator・HTTP・memory 承認・プレビュー・
-  終端 E2E（`room/tests/test_room_e2e.py`）を通した。`uv run pytest -q` 205 件、
+  終端 E2E（`room/tests/test_room_e2e.py`）を通した。`uv run pytest -q` 230 件、
   `ruff check` / `ruff format` clean
-- **実 Hermes の E2E は未実施**。実機（ConoHa）へのデプロイも未実施
-- 2026-09-05、SSH で実機へつなぎに行ったが**タイムアウト**。この日以降の実操作は無い
-- **「出荷済み E2E 検証済み」とは書かない**。下のチェックリストを埋めたときだけ言える
-- Phase 6（後回しに決めた任意フェーズ）は**未着手**・対象外。Cloudflare/CDN も対象外
+- **実機**: ConoHa で systemd 常駐。Tailscale Serve が API と `/previews` を
+  tailnet 内 HTTPS に出している。`MIHARI_PREVIEW_BASE_URL` は Tailscale 原点。
+  社外に渡せる公開 HTTPS はまだ無い（Cloudflare Tunnel が次。API は Tailscale のまま）
+- Phase 6（成果物棚・HTML コメント・ダイジェスト・Cloudflare Temporary Deploy）は
+  **未着手**・対象外
 - 本番 Python は **3.11 に固定**する。Hermes は
   `requires-python = ">=3.11,<3.14"` で、room も同じ interpreter で回す
   （`room/.python-version` と `room/deploy/README.md` の
@@ -115,7 +116,8 @@ desktop は詳細 refresh 時に `GET .../memory` を引き直すこと。
     API origin への権限は渡さない
   - preview ホストは `/previews/*` 以外を 404（API に触れない）
   - webroot に memory / research / manifests は置かない
-  - 未実装の間は `MIHARI_PREVIEW_BASE_URL` は空のまま（公開全体が無効）
+  - 本番は Tailscale 原点が入っている。社外公開は Cloudflare Tunnel で
+    **プレビュー専用ホスト**だけを出す（`room/deploy/README.md`）
 - **アーカイブ**: 既定で Bot が見えるテキスト / スレッド / Forum を全部収録する。
   `MIHARI_ARCHIVE_CHANNEL_IDS` は任意の絞り込み（空なら全チャンネル）。
   起動時に各チャンネルの最終収録以降を history で埋め直す。
@@ -136,7 +138,7 @@ Python は **3.11**（room と Hermes を同じ interpreter で回す。3.14 の
 
 ### ローカル（偽 Hermes）— 済み
 
-- [x] `uv run pytest -q`（205 件：store / queue / forum / discord / worker /
+- [x] `uv run pytest -q`（230 件：store / queue / forum / discord / worker /
   orchestrator / app / memory 承認 HTTP / guard hook / bounded discord tools /
   hardening / cancel-interrupt / preview security / 終端 E2E）
 - [x] HTTP: `POST /jobs` → queue → 実行 → Forum タグ更新（RecordingBoard で確認）
@@ -152,19 +154,19 @@ Python は **3.11**（room と Hermes を同じ interpreter で回す。3.14 の
 - [x] ruff lint / format clean
 - [x] 本番 Python pin の文書化（3.11、`room/deploy/README.md`）
 
-### ライブ（実 Hermes、実 Forum）— 未実施
+### ライブ（実 Hermes、実 Forum）
 
-- [ ] 実 `AIAgent` でジョブ 1 件が通って Forum に進捗が流れる
-- [ ] followup で同じセッションが resume され、実行中の仕事に続きが載る
-- [ ] 実機 systemd 起動 → `/health` OK、`POST /jobs` 認証 OK
-- [ ] Caddy 経由（HTTPS / Tailscale）で API が動く、preview が public URL で見える
-- [ ] バックアップ → 停止復元で state.db / jobs / previews が旧 URL のまま戻る
-- [ ] 実 Hermes の memory 候補 → approve / reject のフロー（HTTP 契約は実装済み、
-  実 model の tool 経路は未検証）
-- [ ] 実 Hermes registry での `mihari_room` toolset 登録の実機確認
-  （ローカルでは pin ソースの registry 署名検証＋impl テストのみ）
+- [x] 実 `AIAgent` でジョブ 1 件が通って Forum に進捗が流れる
+- [x] followup で同じセッションが resume される（実機で session_id 一致を確認）
+- [x] 実機 systemd 起動 → `/health` OK、`POST /jobs` 認証 OK
+- [x] Tailscale HTTPS で API が動く。preview は tailnet 内 URL で見える
+- [ ] 社外向けの公開 HTTPS（Cloudflare Tunnel のプレビュー専用ホスト）
+- [x] バックアップ（`--live-consistent`）→ temp 展開で state.db / messages.db
+  の integrity ok、previews の sha 一致。本番ディレクトリへの上書き復元は未実施
+- [x] 実 Hermes の memory 候補 → approve（200）→ 済みを reject すると 409
+- [x] 実機で `discord_search` 等の `mihari_room` ツールがジョブから使えた
 
 ### 未着手 / 延期（対象外と明記）
 
 - [ ] Phase 6（任意フェーズ）: 後回しに決定、未着手
-- [ ] Cloudflare / 他 CDN
+- [ ] Cloudflare Temporary Deploy / 他 CDN（Tunnel でのプレビュー公開とは別）
