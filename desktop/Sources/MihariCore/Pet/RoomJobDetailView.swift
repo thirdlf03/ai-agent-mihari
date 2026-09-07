@@ -27,9 +27,9 @@ public struct RoomJobDetailView: View {
         self.onOpenArtifact = onOpenArtifact
     }
 
-    /// 固定した仕事だけを見る。消えても別ジョブへ表示を切り替えない。
+    /// いま見ている仕事。監視から外れたら `nil`（別の仕事には切り替えない）。
     private var tracked: RoomJobTrackedJob? {
-        monitor.jobs.first { $0.jobID == model.jobID }
+        model.trackedJob
     }
 
     public var body: some View {
@@ -51,6 +51,11 @@ public struct RoomJobDetailView: View {
                     Text("一覧から選ぶか、依頼窓から頼むとここに表示されるよ")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+                if let opError = tracked?.operationError {
+                    Text("操作エラー: \(opError)")
+                        .font(.caption)
+                        .foregroundStyle(.red)
                 }
                 if let notice = model.notice {
                     Text(notice)
@@ -318,12 +323,18 @@ public final class RoomJobDetailViewModel: ObservableObject {
         self.jobID = jobID
     }
 
-    /// 記憶の一覧を引き直す。詳細・候補イベント・決定後の更新口。
+    /// いま見ている仕事。監視から外れたら `nil`。対象が消えたら別の仕事を
+    /// 代わりに見せない。
+    public var trackedJob: RoomJobTrackedJob? {
+        monitor.jobs.first { $0.jobID == jobID }
+    }
+
+    /// 状態・成果物・記憶の候補をまとめて引き直す。詳細の状態を正とする。
     public func refresh() async {
         guard !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
-        await monitor.refreshMemory(jobID: jobID)
+        await monitor.refreshArtifacts(jobID: jobID)
     }
 
     /// 候補を承認する。API が成功するまで結果を約束しない。

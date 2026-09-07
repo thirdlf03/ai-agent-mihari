@@ -164,6 +164,11 @@ public enum PetMenuEntries {
                 .item(title: "配信エラー: \(error)", action: {})
             )
         }
+        if let opError = job.operationError {
+            entries.append(
+                .item(title: "操作エラー: \(opError)", action: {})
+            )
+        }
         let openable = job.artifacts.filter {
             guard let scheme = $0.previewURL?.scheme?.lowercased() else { return false }
             return scheme == "http" || scheme == "https"

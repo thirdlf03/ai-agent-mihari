@@ -18,6 +18,10 @@ struct RoomJobMonitorTests {
         var detailResults: [String: RoomJobDetail] = [:]
         private(set) var followupCalls: [String] = []
         private(set) var cancelCalls: [String] = []
+        /// 追記の応答。設定が無ければ「作業中」を返す。
+        var followupResults: [String: JobRequestResponse] = [:]
+        /// 追記・中断・決定・ロールバックが投げるエラー。設定しておくと API より先に見る。
+        var operationError: (any Error)?
         /// SSE を開いた順の仕事 ID。
         private(set) var openedJobIDs: [String] = []
         /// SSE を開いた順のカーソル。
@@ -43,11 +47,13 @@ struct RoomJobMonitorTests {
 
         func followup(jobID: String, body: String, requestedBy: String?) async throws -> JobRequestResponse {
             followupCalls.append(jobID)
-            return JobRequestResponse(jobID: jobID, threadID: nil, status: "running")
+            if let operationError { throw operationError }
+            return followupResults[jobID] ?? JobRequestResponse(jobID: jobID, threadID: nil, status: "running")
         }
 
         func cancel(jobID: String) async throws -> JobRequestResponse {
             cancelCalls.append(jobID)
+            if let operationError { throw operationError }
             return JobRequestResponse(jobID: jobID, threadID: nil, status: "cancelled")
         }
 
@@ -60,10 +66,12 @@ struct RoomJobMonitorTests {
         }
 
         func approveMemory(jobID: String, candidateID: String) async throws {
+            if let operationError { throw operationError }
             approveCalls.append((jobID, candidateID))
         }
 
         func rejectMemory(jobID: String, candidateID: String) async throws {
+            if let operationError { throw operationError }
             rejectCalls.append((jobID, candidateID))
         }
 
@@ -681,5 +689,222 @@ struct RoomJobMonitorTests {
         #expect(history.map(\.text) == ["調べている", "始める"])
         #expect(history.first?.phase == .researching)
         #expect(history.first?.kind == .log)
+    }
+
+    // MARK: - 再実行・巻き戻し
+
+    @Test("完了後の追記は応答を正として「待ち」へ戻る")
+    func followupAfterDoneMovesToQueuedImmediately() async throws {
+        let access = StubRoomAccess()
+        access.streamsForOpen = [
+            (
+                sse(frames: [
+                    frame(eventJSON(id: "1", jobID: "abc", phase: "queued", kind: "log", text: "受け付けたよ")),
+                    frame(eventJSON(id: "2", jobID: "abc", phase: "researching", kind: "speech", text: "調べる")),
+                    frame(eventJSON(id: "3", jobID: "abc", phase: "done", kind: "summary", text: "完了した")),
+                ]),
+                200
+            )
+        ]
+        let monitor = RoomJobMonitor(access: access, cursorStore: makeStore())
+        monitor.attach(jobID: "abc", title: "掃除")
+        defer { monitor.stopAll() }
+
+        try await eventually("完了になる") { monitor.jobs.first?.status == .done }
+        #expect(monitor.jobs.first?.latestText == "完了した")
+
+        // サーバが「待ち」に戻した応答を正として、イベントを待たず表示を切り替える。
+        access.followupResults["abc"] = JobRequestResponse(jobID: "abc", threadID: nil, status: "queued")
+        _ = try await monitor.followup(jobID: "abc", body: "直して")
+        #expect(monitor.jobs.first?.status == .queued)
+
+        // 詳細の更新で、再実行の「作業中」とその後の「完了」もサーバ状態に合わせて拾う。
+        access.detailResults["abc"] = RoomJobDetail(
+            jobID: "abc",
+            title: "掃除",
+            status: "running",
+            latestEvent: RoomEvent(id: "4", jobID: "abc", phase: .researching, kind: .speech, text: "直す")
+        )
+        await monitor.refreshArtifacts(jobID: "abc")
+        #expect(monitor.jobs.first?.status == .running)
+        #expect(monitor.jobs.first?.latestText == "直す")
+
+        access.detailResults["abc"] = RoomJobDetail(
+            jobID: "abc",
+            title: "掃除",
+            status: "done",
+            latestEvent: RoomEvent(id: "5", jobID: "abc", phase: .done, kind: .summary, text: "直した")
+        )
+        await monitor.refreshArtifacts(jobID: "abc")
+        #expect(monitor.jobs.first?.status == .done)
+        #expect(monitor.jobs.first?.latestText == "直した")
+    }
+
+    @Test("失敗後の再実行イベントで終端を抜けて待ち・作業中・完了へ進む")
+    func failedRestartExitsTerminalOnQueuedEvent() async throws {
+        let access = StubRoomAccess()
+        access.streamsForOpen = [
+            (
+                sse(frames: [
+                    frame(eventJSON(id: "1", jobID: "abc", phase: "failed", kind: "speech", text: "失敗した")),
+                    frame(eventJSON(id: "2", jobID: "abc", phase: "queued", kind: "log", text: "続きが来た")),
+                    frame(eventJSON(id: "3", jobID: "abc", phase: "researching", kind: "speech", text: "直す")),
+                    frame(eventJSON(id: "4", jobID: "abc", phase: "done", kind: "summary", text: "直した")),
+                ]),
+                200
+            )
+        ]
+        let monitor = RoomJobMonitor(access: access, cursorStore: makeStore())
+        monitor.attach(jobID: "abc", title: "掃除")
+        defer { monitor.stopAll() }
+
+        // 終端で止まらず、最後まで再実行の結果（完了）に追いつく。
+        try await eventually("再実行の完了になる") { monitor.jobs.first?.status == .done }
+        #expect(monitor.jobs.first?.latestText == "直した")
+    }
+
+    @Test("中断後の再実行イベントで終端を抜ける")
+    func cancelledRestartExitsTerminalOnQueuedEvent() async throws {
+        let access = StubRoomAccess()
+        access.streamsForOpen = [
+            (
+                sse(frames: [
+                    frame(eventJSON(id: "1", jobID: "abc", phase: "waiting", kind: "cancelled", text: "やめたよ")),
+                    frame(eventJSON(id: "2", jobID: "abc", phase: "queued", kind: "log", text: "続きが来た")),
+                    frame(eventJSON(id: "3", jobID: "abc", phase: "researching", kind: "speech", text: "直す")),
+                ]),
+                200
+            )
+        ]
+        let monitor = RoomJobMonitor(access: access, cursorStore: makeStore())
+        monitor.attach(jobID: "abc", title: "掃除")
+        defer { monitor.stopAll() }
+
+        // 中断のまま止まらず、再実行の「作業中」へ進む。
+        try await eventually("作業中になる") { monitor.jobs.first?.status == .running }
+        #expect(monitor.jobs.first?.phase == .researching)
+    }
+
+    @Test("記憶の承認・決定イベントでは完了表示を巻き戻さない")
+    func memoryDecisionDoesNotRewindDone() async throws {
+        let access = StubRoomAccess()
+        access.streamsForOpen = [
+            (
+                sse(frames: [
+                    frame(eventJSON(id: "1", jobID: "abc", phase: "done", kind: "summary", text: "完了した")),
+                    frame(eventJSON(id: "2", jobID: "abc", phase: "waiting", kind: "log", text: "memory 候補を確定したよ。")),
+                ]),
+                200
+            )
+        ]
+        let monitor = RoomJobMonitor(access: access, cursorStore: makeStore())
+        monitor.attach(jobID: "abc", title: "掃除")
+        defer { monitor.stopAll() }
+
+        try await eventually("決定イベントが載る") { monitor.jobs.first?.latestText == "memory 候補を確定したよ。" }
+        // 本文は更新しても、状態は完了のまま。
+        #expect(monitor.jobs.first?.status == .done)
+    }
+
+    @Test("復帰時も詳細の status を正とし、記憶決定イベントから作業中と推測しない")
+    func resumeDoesNotInferRunningFromMemoryDecision() async throws {
+        let access = StubRoomAccess()
+        access.listRunningResults = []
+        access.detailResults = [
+            "abc": RoomJobDetail(
+                jobID: "abc",
+                title: "掃除",
+                status: "done",
+                latestEvent: RoomEvent(id: "9", jobID: "abc", phase: .waiting, kind: .log, text: "memory 候補を確定したよ。")
+            )
+        ]
+        let store = makeStore()
+        store.lastJobID = "abc"
+        store.setCursor("9", for: "abc")
+        let monitor = RoomJobMonitor(access: access, cursorStore: store)
+
+        await monitor.resume()
+        defer { monitor.stopAll() }
+
+        try await eventually("完了の仕事が拾われる") { monitor.jobs.contains { $0.jobID == "abc" } }
+        #expect(monitor.jobs.first?.status == .done)
+    }
+
+    @Test("中断・承認の失敗は操作エラーとして表示に残る")
+    func operationFailuresAreRecorded() async throws {
+        let access = StubRoomAccess()
+        let monitor = RoomJobMonitor(access: access, cursorStore: makeStore())
+        monitor.attach(jobID: "abc", title: "掃除")
+        defer { monitor.stopAll() }
+
+        access.operationError = RoomError.requestFailed(status: 403, message: "止められない")
+        await #expect(throws: RoomError.self) {
+            try await monitor.cancel(jobID: "abc")
+        }
+        #expect(monitor.jobs.first?.operationError?.contains("止められない") == true)
+
+        access.operationError = RoomError.requestFailed(status: 409, message: "すでに決定済み")
+        await #expect(throws: RoomError.self) {
+            try await monitor.approveMemory(jobID: "abc", candidateID: "c1")
+        }
+        #expect(monitor.jobs.first?.operationError?.contains("すでに決定済み") == true)
+
+        // 次に成功したら失敗表示は消える。
+        access.operationError = nil
+        access.memoryResults = ["abc": []]
+        try await monitor.rejectMemory(jobID: "abc", candidateID: "c1")
+        #expect(monitor.jobs.first?.operationError == nil)
+    }
+
+    @Test("対象が消えた（404）操作は監視から外して表示も巻き戻さない")
+    func missingJobOperationStopsTracking() async throws {
+        let access = StubRoomAccess()
+        let monitor = RoomJobMonitor(access: access, cursorStore: makeStore())
+        monitor.attach(jobID: "abc", title: "掃除")
+        defer { monitor.stopAll() }
+
+        access.operationError = RoomError.requestFailed(status: 404, message: "仕事がない")
+        await #expect(throws: RoomError.self) {
+            try await monitor.cancel(jobID: "abc")
+        }
+        #expect(monitor.jobs.isEmpty)
+    }
+
+    @Test("イベント 1 件から次の状態を決める（終端は queued でだけ抜ける）")
+    func advanceStatusTransitions() {
+        func event(id: String, phase: RoomJobPhase?, kind: RoomEventKind?) -> RoomEvent {
+            RoomEvent(id: id, jobID: "abc", phase: phase, kind: kind, text: "")
+        }
+
+        // 完了中の仕事に waiting（記憶の決定・候補）が来ても完了のまま。
+        #expect(RoomJobMonitor.advanceStatus(from: .done, after: event(id: "1", phase: .waiting, kind: .log)) == .done)
+        #expect(
+            RoomJobMonitor.advanceStatus(from: .done, after: event(id: "2", phase: .waiting, kind: .memoryCandidate))
+                == .done
+        )
+        // 中断後の trailing な進捗でも中断のまま。
+        #expect(
+            RoomJobMonitor.advanceStatus(from: .cancelled, after: event(id: "3", phase: .researching, kind: .speech))
+                == .cancelled
+        )
+        // 本当の再実行（queued）だけが終端を抜ける。
+        #expect(RoomJobMonitor.advanceStatus(from: .done, after: event(id: "4", phase: .queued, kind: .log)) == .queued)
+        #expect(
+            RoomJobMonitor.advanceStatus(from: .failed, after: event(id: "5", phase: .queued, kind: .log)) == .queued
+        )
+        #expect(
+            RoomJobMonitor.advanceStatus(from: .cancelled, after: event(id: "6", phase: .queued, kind: .log)) == .queued
+        )
+        #expect(
+            RoomJobMonitor.advanceStatus(from: .queued, after: event(id: "7", phase: .researching, kind: .speech))
+                == .running
+        )
+        #expect(
+            RoomJobMonitor.advanceStatus(from: .running, after: event(id: "8", phase: .done, kind: .summary)) == .done
+        )
+        // 再実行の失敗も終端として受け取る。
+        #expect(
+            RoomJobMonitor.advanceStatus(from: .queued, after: event(id: "9", phase: .failed, kind: .speech)) == .failed
+        )
     }
 }
