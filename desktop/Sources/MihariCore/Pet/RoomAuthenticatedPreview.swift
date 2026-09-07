@@ -20,11 +20,29 @@ public struct RoomPreviewFetcher: Sendable {
     /// `X-Mihari-Token` ヘッダにだけ載せる。URL には載せない。
     public let token: String
     public let session: URLSession
+    /// いま開いている版。他の仕事・他の版・API への中継はしない。
+    public let jobID: String
+    public let version: String
 
-    public init(baseURL: URL, token: String, session: URLSession = .shared) {
+    public init(
+        baseURL: URL,
+        token: String,
+        session: URLSession = .shared,
+        jobID: String,
+        version: String
+    ) {
         self.baseURL = baseURL
         self.token = token
         self.session = session
+        self.jobID = jobID
+        self.version = version
+    }
+
+    /// このプレビューが中継してよいパスか。他ジョブの API を開くプロキシにしない。
+    public func allowsPath(_ path: String) -> Bool {
+        let prefix = "/jobs/\(jobID)/artifacts/\(version)/files"
+        if path.contains("..") { return false }
+        return path == prefix || path == prefix + "/" || path.hasPrefix(prefix + "/")
     }
 
     /// アプリ内ページの URL。`/jobs/<id>/artifacts/<v>/files/` をそのまま写す。
@@ -40,9 +58,10 @@ public struct RoomPreviewFetcher: Sendable {
     ///
     /// パスはそのまま（例 `mihari-preview://room/jobs/.. /files/app.css` →
     /// `GET <baseURL>/jobs/.. /files/app.css`）。トークンはヘッダにしか置かない。
+    /// 開いている版の files 配下以外は中継しない。
     public func request(forScheme schemeURL: URL) -> URLRequest? {
         let path = schemeURL.path
-        guard !path.isEmpty, let url = URL(string: path, relativeTo: baseURL) else { return nil }
+        guard allowsPath(path), let url = URL(string: path, relativeTo: baseURL) else { return nil }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue(token, forHTTPHeaderField: DaemonClient.tokenHeader)
@@ -121,7 +140,7 @@ public final class RoomArtifactPreviewWindowController: NSObject, WKNavigationDe
 
     /// 指定版の成果物をアプリ内で認証付きプレビューする。
     public func show(client: RoomEventClient, jobID: String, version: String, title: String) {
-        let fetcher = client.previewFetcher()
+        let fetcher = client.previewFetcher(jobID: jobID, version: version)
         guard let pageURL = fetcher.pageURL(jobID: jobID, version: version) else { return }
         let handler = RoomAuthenticatedURLSchemeHandler(fetcher: fetcher)
         let configuration = WKWebViewConfiguration()

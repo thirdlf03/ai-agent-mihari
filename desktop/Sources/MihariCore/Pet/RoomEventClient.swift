@@ -191,8 +191,15 @@ public struct RoomEventClient: Sendable, RoomAccess {
     }
 
     /// 非公開版の認証付きプレビュー用フェッチャー。トークンはヘッダだけに載せる。
-    public func previewFetcher() -> RoomPreviewFetcher {
-        RoomPreviewFetcher(baseURL: baseURL, token: token, session: session)
+    /// 中継先は `jobID` / `version` の files 配下に限る。
+    public func previewFetcher(jobID: String, version: String) -> RoomPreviewFetcher {
+        RoomPreviewFetcher(
+            baseURL: baseURL,
+            token: token,
+            session: session,
+            jobID: jobID,
+            version: version
+        )
     }
 
     /// SSE をつなぎ、バイト列と応答を返す。

@@ -170,7 +170,9 @@ struct RoomArtifactVisibilityTests {
         let fetcher = RoomPreviewFetcher(
             baseURL: URL(string: "http://127.0.0.1:8787")!,
             token: "room-token",
-            session: URLSession.shared
+            session: URLSession.shared,
+            jobID: "abc",
+            version: "2"
         )
         let page = try #require(fetcher.pageURL(jobID: "abc", version: "2"))
         #expect(page.scheme == RoomAuthenticatedPreview.scheme)
@@ -195,6 +197,14 @@ struct RoomArtifactVisibilityTests {
         let cssRequest = try #require(fetcher.request(forScheme: css))
         #expect(cssRequest.url?.absoluteString == "http://127.0.0.1:8787/jobs/abc/artifacts/2/files/app.css")
         #expect(cssRequest.value(forHTTPHeaderField: DaemonClient.tokenHeader) == "room-token")
+
+        // 他の仕事や API は中継しない（トークン付きオープンプロキシにしない）。
+        let otherJob = try #require(URL(string: "mihari-preview://room/jobs/other/artifacts/2/files/"))
+        #expect(fetcher.request(forScheme: otherJob) == nil)
+        let jobAPI = try #require(URL(string: "mihari-preview://room/jobs/abc"))
+        #expect(fetcher.request(forScheme: jobAPI) == nil)
+        let traversal = try #require(URL(string: "mihari-preview://room/jobs/abc/artifacts/2/files/../secret"))
+        #expect(fetcher.request(forScheme: traversal) == nil)
     }
 
     // MARK: - 「この版から修正」の流れ
