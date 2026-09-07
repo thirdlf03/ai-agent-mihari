@@ -84,6 +84,11 @@ def test_sanitize_secrets_and_claim_url() -> None:
     assert "***" in cleaned
     assert "user:pass" not in cleaned
 
+    preview = "see https://dash.cloudflare.com/claim-preview?claimToken=SECRETCLAIM now"
+    cleaned_preview = sanitize_text(preview)
+    assert "SECRETCLAIM" not in cleaned_preview
+    assert "claimToken" not in cleaned_preview
+
     assert "hunter2" not in sanitize_text("MIHARI_ROOM_TOKEN=hunter2")
     assert "sk-abc123xyz" not in sanitize_text("key is sk-abc123xyz")
     assert "Bearer abcd1234" not in sanitize_text("Authorization: Bearer abcd1234")

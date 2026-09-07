@@ -49,6 +49,8 @@ public protocol RoomAccess: Sendable {
     func approveMemory(jobID: String, candidateID: String) async throws
     /// `POST /jobs/{id}/memory/{candidateID}/reject`。却下する。
     func rejectMemory(jobID: String, candidateID: String) async throws
+    /// `POST /jobs/{id}/artifacts/{version}/rollback`。旧版を新 token で再公開する。
+    func rollbackArtifact(jobID: String, version: String) async throws -> RoomArtifact
     /// `GET /jobs/{id}/events`。SSE をつなぎ、バイト列と HTTP 状態を返す。
     ///
     /// `lastEventID` が渡されたら `Last-Event-ID` ヘッダで再開点を伝える。
@@ -147,6 +149,13 @@ public struct RoomEventClient: Sendable, RoomAccess {
     public func rejectMemory(jobID: String, candidateID: String) async throws {
         let _: RoomMemoryDecisionAck = try await post(
             "jobs/\(jobID)/memory/\(candidateID)/reject",
+            body: RoomEmptyBody()
+        )
+    }
+
+    public func rollbackArtifact(jobID: String, version: String) async throws -> RoomArtifact {
+        try await post(
+            "jobs/\(jobID)/artifacts/\(version)/rollback",
             body: RoomEmptyBody()
         )
     }

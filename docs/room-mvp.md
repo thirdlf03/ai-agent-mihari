@@ -13,8 +13,8 @@ desktop 側の対応は別 owner（`desktop/`）が持つ。ここでは backend
 - **実機**: ConoHa で systemd 常駐。Tailscale Serve が API と `/previews` を
   tailnet 内 HTTPS に出している。`MIHARI_PREVIEW_BASE_URL` は Tailscale 原点。
   社外に渡せる公開 HTTPS はまだ無い（Cloudflare Tunnel が次。API は Tailscale のまま）
-- Phase 6（成果物棚・HTML コメント・ダイジェスト・Cloudflare Temporary Deploy）は
-  **未着手**・対象外
+- Phase 6 の棚・Temporary Accounts・記憶ワンクリック・指摘 followup は実装済み
+  （Temporary Accounts の VPS 実機 wrangler は未接続）
 - 本番 Python は **3.11 に固定**する。Hermes は
   `requires-python = ">=3.11,<3.14"` で、room も同じ interpreter で回す
   （`room/.python-version` と `room/deploy/README.md` の
@@ -53,11 +53,12 @@ Discord (Mihari Bot) ────> forum 入出力（本家 Gateway は使わな
 | `POST /jobs/{id}/cancel` | 実装済み | body: `{by?}`。by 無しなら owner。頼んだ人か `MIHARI_OWNER_ID` だけ。`404` / `403`。実行中は worker thread に interrupt を届け、終了を待ってから次へ |
 | `POST /jobs/{id}/followup` | 実装済み | 同じジョブの続き（input/ に追記、空いたら再実行、実行中は終了後に再回し）。cancel 後の中断 thread 生存中は終了後に再開（生存中の再開はしない） |
 | `GET /jobs/running` | 実装済み | `{"jobs": [...]}`。今動いている 1 件 |
-| `GET /jobs/{id}` | 実装済み | 単体。`404` は無い仕事 |
+| `GET /jobs/{id}` | 実装済み | 単体。`artifacts`（version ごとの一意 `id`）と `temp_deploys`（claim URL 含む。認証済み）。`404` は無い仕事 |
 | `GET /jobs/{id}/events` | 実装済み | SSE。`Last-Event-ID` で再開。イベント `id` は整数連番（desktop は整数 OR 文字列どちらも decode すること）。未知・壊れた cursor は先頭から全件（取りこぼさない）。完了後 5 秒で閉じるので desktop は張り直して cursor から再開すること |
 | `GET /jobs/{id}/memory` | 実装済み | `{"candidates": [{id, target, content, status, created_at}]}`。`target` は `MEMORY.md` / `USER.md` |
 | `POST /jobs/{id}/memory/{candidate_id}/approve` | 実装済み | 候補を確定（owner 明示承認）。承認者は**サーバ設定の owner**（body の身分は使わない）。`MIHARI_OWNER_ID` 未設定は `403`。冪等（2 回目は同値 200）。済み逆遷移は `409`、未知候補は `404` |
 | `POST /jobs/{id}/memory/{candidate_id}/reject` | 実装済み | 候補を捨てる（home に書かない）。冪等・状態遷移は approve と対称 |
+| `POST /jobs/{id}/artifacts/{version}/rollback` | 実装済み | 旧 version の静的プレビューを新しい token として再公開（owner のみ）。過去 token は残す。`404` は無い仕事・無い version |
 | `GET /previews/{token}/...` | 実装済み | 未認証・安全ヘッダ付きの成果物配信（allowlist 拡張子のみ、symlink/隠しファイル/メタデータ経路は 404） |
 
 ステータスは `queued / running / done / failed / cancelled`
@@ -86,13 +87,14 @@ desktop は詳細 refresh 時に `GET .../memory` を引き直すこと。
   `discord / discord_admin` 送信系は常に OFF。MCP 動的 toolset（`mcp-*`）も有効化しない
 - 残すのは読み・生成系：`file`（write_file/patch 含む）・`search`・`web`・
   `session_search`・`memory`（承認制）・`mihari_room`（discord_search / recent /
-  channels / message / context / export）
+  channels / message / context / export / cloudflare_temp_deploy）
 - Discord 横断検索・PDF 取り込みは shell 不要の in-process bounded ツールで提供する
   （実 Hermes registry に `mihari_room` toolset として登録・検証済み）：
   `discord_search` / `discord_recent` / `discord_channels` / `discord_message` /
-  `discord_context` / `discord_export`
-  （archive DB 読み取り専用、export は `research/downloads/` 内のみ、結果は件数・字数頭打ち）。
-  ジョブ内からサブプロセス CLI を呼ぶ必要は無い
+  `discord_context` / `discord_export` /
+  `cloudflare_temp_deploy`（`wrangler deploy --temporary`。ジョブ dir と
+  `XDG_CONFIG_HOME=<job>/.wrangler-tmp` に閉じる。claim URL は GET /jobs の
+  `temp_deploys` だけ。Forum には workers.dev のみ）
 - 危険ツール名の最終扉として `delegate_task / skill_manage / cronjob_manage / terminal`
   等を agent 表面から名指し除去する（`skills_list / skill_view` の参照は残す）
 - **制限の正直な範囲**: `bash` 完全無制限化（opt-in 時）の書き込み先までは塞げない。
@@ -110,9 +112,11 @@ desktop は詳細 refresh 時に `GET .../memory` を引き直すこと。
     Forum へ通知するのも安全な成果物だけ
   - manifest（id/version/preview_url/sha256/source_ids/session_id）は
     `root/registry/` に置き、HTTP では出さない。sha256 は決定的
-    （相対パス昇順）。version は単調増加、id は安定
+    （相対パス昇順）。version は単調増加、各 version の `id` は
+    `art-<job>-v<n>` で一意（古い registry も読み出し時に付け直す）
   - CSP は `sandbox allow-scripts`（`allow-same-origin` なしの opaque origin）。
-    相対 CSS/画像/フォント＋同一フォルダ JS のみ。`connect-src 'none'` で
+    相対 CSS/画像/フォント＋同一フォルダの `.js` のみ。HTML インライン script と
+    CDN は `script-src 'self'` で拒否する。`connect-src 'none'` で
     API origin への権限は渡さない
   - preview ホストは `/previews/*` 以外を 404（API に触れない）
   - webroot に memory / research / manifests は置かない
@@ -168,5 +172,6 @@ Python は **3.11**（room と Hermes を同じ interpreter で回す。3.14 の
 
 ### 未着手 / 延期（対象外と明記）
 
-- [ ] Phase 6（任意フェーズ）: 後回しに決定、未着手
-- [ ] Cloudflare Temporary Deploy / 他 CDN（Tunnel でのプレビュー公開とは別）
+- [ ] 定期ダイジェスト
+- [ ] プレビュー CSP を緩めてモック内からコメントを送ること
+- [ ] 本番 Cloudflare アカウントへの login 済み `wrangler deploy`

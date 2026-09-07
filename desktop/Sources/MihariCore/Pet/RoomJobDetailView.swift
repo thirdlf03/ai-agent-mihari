@@ -52,6 +52,9 @@ public struct RoomJobDetailView: View {
                 memorySection(job)
                 Divider()
                 artifactSection(job)
+                tempDeploySection(job)
+                Divider()
+                commentSection(job)
             } else {
                 Text("仕事を追っていない")
                     .font(.headline)
@@ -73,7 +76,7 @@ public struct RoomJobDetailView: View {
             }
         }
         .padding()
-        .frame(width: 480, height: 520)
+        .frame(width: 480, height: 640)
         .task {
             await model.refresh()
         }
@@ -153,16 +156,90 @@ public struct RoomJobDetailView: View {
             } else {
                 ForEach(openable) { artifact in
                     HStack {
-                        Text(artifact.kind?.isEmpty == false ? artifact.kind! : "成果物")
+                        Text(artifactLabel(artifact))
                             .font(.body)
                         Spacer()
                         if let url = artifact.previewURL {
                             Button("開く") { onOpenArtifact(url) }
                         }
+                        if let version = artifact.version, !version.isEmpty {
+                            Button("これに戻す") {
+                                Task { await model.rollback(version: version) }
+                            }
+                            .disabled(model.isRollingBack)
+                        }
                     }
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func tempDeploySection(_ job: RoomJobTrackedJob) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("一時デプロイ")
+                .font(.headline)
+            if job.tempDeploys.isEmpty {
+                Text("なし（Worker/DB 付きの確認用）")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(job.tempDeploys) { deploy in
+                    VStack(alignment: .leading, spacing: 6) {
+                        if let url = deploy.previewURL {
+                            HStack {
+                                Text(url.host ?? "workers.dev")
+                                    .font(.body)
+                                    .lineLimit(1)
+                                Spacer()
+                                Button("開く") { onOpenArtifact(url) }
+                            }
+                        }
+                        if let claim = deploy.claimURL {
+                            Button("アカウントを引き継ぐ") { onOpenArtifact(claim) }
+                        }
+                        Text("claim はあなただけ。Forum には出していないよ")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func commentSection(_ job: RoomJobTrackedJob) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("指摘して直す")
+                .font(.headline)
+            TextEditor(text: $model.comment)
+                .frame(minHeight: 72)
+                .border(Color.secondary.opacity(0.3))
+            HStack {
+                Spacer()
+                Button("指摘を送る") {
+                    Task { await model.submitComment(previewURL: latestPreviewURL(job)) }
+                }
+                .disabled(!model.canSubmitComment)
+            }
+        }
+    }
+
+    private func artifactLabel(_ artifact: RoomArtifact) -> String {
+        if let version = artifact.version, !version.isEmpty {
+            return "v\(version)"
+        }
+        if let kind = artifact.kind, !kind.isEmpty {
+            return kind
+        }
+        return "成果物"
+    }
+
+    private func latestPreviewURL(_ job: RoomJobTrackedJob) -> URL? {
+        job.artifacts.last(where: { artifact in
+            let scheme = artifact.previewURL?.scheme?.lowercased()
+            return scheme == "http" || scheme == "https"
+        })?.previewURL
     }
 }
 
@@ -175,6 +252,9 @@ public final class RoomJobDetailViewModel: ObservableObject {
     @Published public private(set) var didFail = false
     @Published public private(set) var busyIDs: Set<String> = []
     @Published public private(set) var isRefreshing = false
+    @Published public var comment = ""
+    @Published public private(set) var isRollingBack = false
+    @Published public private(set) var isSubmittingComment = false
 
     private let monitor: RoomJobMonitor
 
@@ -199,6 +279,49 @@ public final class RoomJobDetailViewModel: ObservableObject {
     /// 候補を却下する。API が成功するまで結果を約束しない。
     public func reject(candidateID: String) async {
         await decide(candidateID: candidateID, approved: false)
+    }
+
+    /// 旧バージョンを新しい token として再公開する。
+    public func rollback(version: String) async {
+        guard !isRollingBack else { return }
+        isRollingBack = true
+        notice = nil
+        didFail = false
+        defer { isRollingBack = false }
+        do {
+            _ = try await monitor.rollbackArtifact(jobID: jobID, version: version)
+            notice = "戻したよ（新しい URL を置いた）"
+        } catch {
+            didFail = true
+            notice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    var canSubmitComment: Bool {
+        !isSubmittingComment
+            && !comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// 指摘を followup する。対象プレビュー URL があれば追記する。
+    public func submitComment(previewURL: URL?) async {
+        let trimmed = comment.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !isSubmittingComment else { return }
+        isSubmittingComment = true
+        notice = nil
+        didFail = false
+        defer { isSubmittingComment = false }
+        var body = trimmed
+        if let previewURL {
+            body += "\n\n対象プレビュー: \(previewURL.absoluteString)"
+        }
+        do {
+            _ = try await monitor.followup(jobID: jobID, body: body)
+            comment = ""
+            notice = "指摘を送ったよ"
+        } catch {
+            didFail = true
+            notice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
     }
 
     private func decide(candidateID: String, approved: Bool) async {

@@ -42,6 +42,9 @@ struct RoomMemoryJournalTests {
         func rejectMemory(jobID: String, candidateID: String) async throws {
             rejectCalls.append((jobID, candidateID))
         }
+        func rollbackArtifact(jobID: String, version: String) async throws -> RoomArtifact {
+            RoomArtifact(artifactID: "rolled-\(version)", version: version)
+        }
         @MainActor
         func openEventStream(jobID: String, lastEventID: String?) async throws -> (RoomEventByteStream, Int) {
             guard !streamsForOpen.isEmpty else {
@@ -205,8 +208,7 @@ struct RoomMemoryJournalTests {
     @Test("記憶の一覧の形を読む")
     func decodesMemoryList() throws {
         let data = Data(
-            (#"{"candidates":[{"id":"c1","target":"MEMORY.md","#
-                + #"content":"深煎りが好き","status":"pending","created_at":1757073600}]}"#)
+            #"{"candidates":[{"id":"c1","target":"MEMORY.md","content":"深煎りが好き","status":"pending","created_at":1757073600}]}"#
                 .utf8
         )
         let response = try JSONDecoder().decode(RoomMemoryCandidatesResponse.self, from: data)

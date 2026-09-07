@@ -494,6 +494,30 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         NSWorkspace.shared.open(url)
     }
 
+    /// 作業部屋メニューから記憶の候補を承認する。
+    public func approveRoomMemory(candidateID: String) {
+        guard let jobID = room.jobs.first?.jobID else { return }
+        Task {
+            try? await room.approveMemory(jobID: jobID, candidateID: candidateID)
+        }
+    }
+
+    /// 作業部屋メニューから記憶の候補を却下する。
+    public func rejectRoomMemory(candidateID: String) {
+        guard let jobID = room.jobs.first?.jobID else { return }
+        Task {
+            try? await room.rejectMemory(jobID: jobID, candidateID: candidateID)
+        }
+    }
+
+    /// 作業部屋メニューから静的プレビューを指定バージョンへ戻す。
+    public func rollbackRoomArtifact(version: String) {
+        guard let jobID = room.jobs.first?.jobID else { return }
+        Task {
+            _ = try? await room.rollbackArtifact(jobID: jobID, version: version)
+        }
+    }
+
     /// 部屋の位相変化をペットに反映する。検知と同じく、固定・一度きり・吹き出しの順で降ろす。
     private func applyRoomDirective(_ directive: RoomPhaseDirective) {
         pet.controller.setFixedAnimation(directive.fixedAnimation)

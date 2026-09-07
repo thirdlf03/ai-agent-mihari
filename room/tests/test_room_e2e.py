@@ -171,10 +171,12 @@ def test_room_e2e_fake_agent(tmp_path: Path, monkeypatch) -> None:
     # Session continuity: hermes_session_id persisted.
     session_id = (job.directory / "hermes_session_id").read_text(encoding="utf-8").strip()
     assert session_id == "sess-e2e-1"
-    # Only explicitly safe output posted (no secrets/manifests/research).
+    # Preview URL covers artifact/; Forum にソースを添付しない。
     posted = sorted(p.name for _, p in board.files)
-    assert "index.html" in posted
+    assert "index.html" not in posted
+    assert "app.js" not in posted
     assert "secret-notes.txt" not in posted and "claim_url.txt" not in posted
+    assert any("プレビューを置いたよ:" in text for _, text in board.summaries)
     # Research sources exist (export writes sources.json/summary.md under research/).
     assert (job.directory / "research" / "sources.json").is_file()
     assert (job.directory / "research" / "summary.md").is_file()
@@ -185,12 +187,13 @@ def test_room_e2e_fake_agent(tmp_path: Path, monkeypatch) -> None:
     assert parse_last_event_id("not-a-number") == 0
     assert parse_last_event_id(str(journal.after(0)[0]["id"])) == journal.after(0)[0]["id"]
 
-    # Public URL: followup rerun published v2 (stable id, versions increment).
+    # Public URL: followup rerun published v2（id は version ごとに一意）。
     publisher = ArtifactPublisher(root=tmp_path, preview_base_url="https://preview.example.test")
     manifests = publisher.manifests_for(job.id)
     assert len(manifests) == 2
     assert [m["version"] for m in manifests] == [1, 2]
-    assert manifests[0]["id"] == manifests[1]["id"]
+    assert manifests[0]["id"] == f"art-{job.id}-v1"
+    assert manifests[1]["id"] == f"art-{job.id}-v2"
     assert manifests[0]["sha256"] == manifests[1]["sha256"]  # identical content: deterministic
     manifest = manifests[-1]
     assert manifest["preview_url"].startswith("https://preview.example.test/")

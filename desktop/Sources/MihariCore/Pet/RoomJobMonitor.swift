@@ -32,6 +32,8 @@ public struct RoomJobTrackedJob: Equatable, Sendable, Identifiable {
     public let latestText: String?
     /// 直近で取れた成果物。
     public let artifacts: [RoomArtifact]
+    /// 一時デプロイ。
+    public let tempDeploys: [RoomTempDeploy]
     /// 配信が止まっている理由。正常なら `nil`。
     public let lastError: String?
     /// 直近で取れた記憶の候補。承認待ちの表示と件数に使う。
@@ -54,6 +56,7 @@ public struct RoomJobTrackedJob: Equatable, Sendable, Identifiable {
             phase: phase,
             latestText: latestText,
             artifacts: artifacts,
+            tempDeploys: tempDeploys,
             lastError: lastError,
             memoryCandidates: memories
         )
@@ -108,6 +111,7 @@ public final class RoomJobMonitor: ObservableObject {
         var status: RoomJobStatus = .queued
         var latestText: String?
         var artifacts: [RoomArtifact] = []
+        var tempDeploys: [RoomTempDeploy] = []
         var memories: [RoomMemoryCandidate] = []
         var memoryError: String?
         var lastError: String?
@@ -178,6 +182,7 @@ public final class RoomJobMonitor: ObservableObject {
         var state = states[detail.jobID] ?? JobState()
         state.title = detail.title ?? detail.jobID
         state.artifacts = detail.artifacts
+        state.tempDeploys = detail.tempDeploys
         state.status = Self.status(fromRaw: detail.status) ?? state.status
         if let latest = detail.latestEvent {
             state.seeded = true
@@ -274,6 +279,7 @@ public final class RoomJobMonitor: ObservableObject {
             let detail = try await access.detail(jobID: jobID)
             if var state = states[jobID] {
                 state.artifacts = detail.artifacts
+                state.tempDeploys = detail.tempDeploys
                 state.title = state.title ?? detail.title ?? jobID
                 if state.lastPhase == nil, let latest = detail.latestEvent {
                     state.lastPhase = latest.phase
@@ -318,6 +324,14 @@ public final class RoomJobMonitor: ObservableObject {
     public func rejectMemory(jobID: String, candidateID: String) async throws {
         try await access.rejectMemory(jobID: jobID, candidateID: candidateID)
         await refreshMemory(jobID: jobID)
+    }
+
+    /// 旧バージョンを新しい token として再公開する。成功したら成果物を引き直す。
+    @discardableResult
+    public func rollbackArtifact(jobID: String, version: String) async throws -> RoomArtifact {
+        let manifest = try await access.rollbackArtifact(jobID: jobID, version: version)
+        await refreshArtifacts(jobID: jobID)
+        return manifest
     }
 
     // MARK: - 監視の中身
@@ -452,6 +466,11 @@ public final class RoomJobMonitor: ObservableObject {
                 await self?.refreshMemory(jobID: jobID)
             }
         }
+        if event.kind == .tempDeploy {
+            Task { [weak self] in
+                await self?.refreshArtifacts(jobID: jobID)
+            }
+        }
     }
 
     /// 詳細の最新イベントで種付けする。未知のカーソルで過去を喋り直さないため。
@@ -500,6 +519,7 @@ public final class RoomJobMonitor: ObservableObject {
                     phase: state.lastPhase,
                     latestText: state.latestText,
                     artifacts: state.artifacts,
+                    tempDeploys: state.tempDeploys,
                     lastError: state.lastError,
                     memories: state.memories,
                     memoryError: state.memoryError,
@@ -517,6 +537,7 @@ public final class RoomJobMonitor: ObservableObject {
                 phase: state.lastPhase,
                 latestText: state.latestText,
                 artifacts: state.artifacts,
+                tempDeploys: state.tempDeploys,
                 lastError: state.lastError,
                 memories: state.memories,
                 memoryError: state.memoryError,
@@ -537,7 +558,7 @@ public final class RoomJobMonitor: ObservableObject {
     ///   は集中、building/verifying は確認、done は 1 回だけのお祝い(waving / jumping)、
     ///   failed は落ち込む。
     /// - 喋るのは `kind == speech` だけ。位相の変わり目・始まり・終わり(done/failed/cancelled)
-    ///   に限る。summary・log・file・memory_candidate は一切喋らない。
+    ///   に限る。summary・log・file・memory_candidate・temp_deploy は一切喋らない。
     nonisolated static func makeDirective(
         event: RoomEvent,
         previousPhase: RoomJobPhase?,

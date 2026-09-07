@@ -60,6 +60,8 @@ public enum RoomEventKind: String, Sendable, Equatable, CaseIterable {
     case cancelled
     /// 記憶の候補が出た。位相は waiting。喋らず、記憶の一覧を引き直す合図。
     case memoryCandidate = "memory_candidate"
+    /// 一時デプロイできた。位相は deploying。claim URL は本文に出ない。
+    case tempDeploy = "temp_deploy"
 }
 
 /// ペットに渡す位相の変化。
@@ -185,7 +187,12 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
     public let sha256: String?
     public let sourceIDs: [String]
 
-    public var id: String { artifactID }
+    public var id: String {
+        if let version, !version.isEmpty {
+            return "\(artifactID)-v\(version)"
+        }
+        return artifactID
+    }
 
     enum CodingKeys: String, CodingKey {
         case artifactID = "id"
@@ -260,6 +267,69 @@ public struct RoomArtifact: Decodable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// `/jobs/{id}` の一時デプロイ。`claim_url` は認証済み詳細だけに載る bearer。
+public struct RoomTempDeploy: Decodable, Equatable, Sendable, Identifiable {
+    public let previewURL: URL?
+    public let claimURL: URL?
+    public let expiresAt: Date?
+    public let createdAt: Date?
+
+    public var id: String {
+        let preview = previewURL?.absoluteString ?? ""
+        let stamp = createdAt?.timeIntervalSince1970.description ?? ""
+        return "\(preview)-\(stamp)"
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case previewURL = "preview_url"
+        case claimURL = "claim_url"
+        case expiresAt = "expires_at"
+        case createdAt = "created_at"
+    }
+
+    public init(
+        previewURL: URL? = nil,
+        claimURL: URL? = nil,
+        expiresAt: Date? = nil,
+        createdAt: Date? = nil
+    ) {
+        self.previewURL = previewURL
+        self.claimURL = claimURL
+        self.expiresAt = expiresAt
+        self.createdAt = createdAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        previewURL = try Self.decodeURL(container, key: .previewURL)
+        claimURL = try Self.decodeURL(container, key: .claimURL)
+        expiresAt = Self.decodeFlexibleDate(container, key: .expiresAt)
+        createdAt = Self.decodeFlexibleDate(container, key: .createdAt)
+    }
+
+    private static func decodeURL(
+        _ container: KeyedDecodingContainer<CodingKeys>,
+        key: CodingKeys
+    ) throws -> URL? {
+        guard let raw = try container.decodeIfPresent(String.self, forKey: key) else { return nil }
+        return URL(string: raw)
+    }
+
+    private static func decodeFlexibleDate(
+        _ container: KeyedDecodingContainer<CodingKeys>,
+        key: CodingKeys
+    ) -> Date? {
+        if let epoch = try? container.decodeIfPresent(Double.self, forKey: key) {
+            return Date(timeIntervalSince1970: epoch)
+        }
+        if let raw = try? container.decodeIfPresent(String.self, forKey: key) {
+            if let epoch = Double(raw) { return Date(timeIntervalSince1970: epoch) }
+            return DaemonEvent.parseTimestamp(raw)
+        }
+        return nil
+    }
+}
+
 /// `/jobs/running` と `/jobs/{id}` が返す仕事の詳細。
 ///
 /// 全部を任意にして、部屋が将来足すフィールドを黙って無視する。
@@ -270,6 +340,7 @@ public struct RoomJobDetail: Decodable, Equatable, Sendable, Identifiable {
     public let threadID: Int?
     public let sessionID: String?
     public let artifacts: [RoomArtifact]
+    public let tempDeploys: [RoomTempDeploy]
     public let latestEvent: RoomEvent?
 
     public var id: String { jobID }
@@ -281,6 +352,7 @@ public struct RoomJobDetail: Decodable, Equatable, Sendable, Identifiable {
         case threadID = "thread_id"
         case sessionID = "session_id"
         case artifacts
+        case tempDeploys = "temp_deploys"
         case latestEvent = "latest_event"
     }
 
@@ -291,6 +363,7 @@ public struct RoomJobDetail: Decodable, Equatable, Sendable, Identifiable {
         threadID: Int? = nil,
         sessionID: String? = nil,
         artifacts: [RoomArtifact] = [],
+        tempDeploys: [RoomTempDeploy] = [],
         latestEvent: RoomEvent? = nil
     ) {
         self.jobID = jobID
@@ -299,6 +372,7 @@ public struct RoomJobDetail: Decodable, Equatable, Sendable, Identifiable {
         self.threadID = threadID
         self.sessionID = sessionID
         self.artifacts = artifacts
+        self.tempDeploys = tempDeploys
         self.latestEvent = latestEvent
     }
 
@@ -310,6 +384,8 @@ public struct RoomJobDetail: Decodable, Equatable, Sendable, Identifiable {
         threadID = try container.decodeIfPresent(Int.self, forKey: .threadID)
         sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID)
         artifacts = try container.decodeIfPresent([RoomArtifact].self, forKey: .artifacts) ?? []
+        tempDeploys =
+            try container.decodeIfPresent([RoomTempDeploy].self, forKey: .tempDeploys) ?? []
         latestEvent = try container.decodeIfPresent(RoomEvent.self, forKey: .latestEvent)
     }
 }
@@ -416,6 +492,8 @@ public struct RoomJobSummary: Equatable, Sendable {
     public let latestText: String?
     /// 直近で取れた成果物。
     public let artifacts: [RoomArtifact]
+    /// 一時デプロイ（workers.dev）。claim は詳細パネル。
+    public let tempDeploys: [RoomTempDeploy]
     /// 配信が止まっている理由。正常なら `nil`。
     public let lastError: String?
     /// 直近で取れた記憶の候補。承認待ちの表示と件数に使う。
@@ -430,6 +508,7 @@ public struct RoomJobSummary: Equatable, Sendable {
         phase: RoomJobPhase? = nil,
         latestText: String? = nil,
         artifacts: [RoomArtifact] = [],
+        tempDeploys: [RoomTempDeploy] = [],
         lastError: String? = nil,
         memoryCandidates: [RoomMemoryCandidate] = []
     ) {
@@ -439,6 +518,7 @@ public struct RoomJobSummary: Equatable, Sendable {
         self.phase = phase
         self.latestText = latestText
         self.artifacts = artifacts
+        self.tempDeploys = tempDeploys
         self.lastError = lastError
         self.memoryCandidates = memoryCandidates
     }

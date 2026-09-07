@@ -45,6 +45,12 @@ public protocol PetMenuActions: AnyObject, ObservableObject {
     func cancelRoomJob()
     /// 成果物の URL を開く。http/https だけを開く。
     func openRoomArtifact(_ url: URL)
+    /// 記憶の候補を承認する。
+    func approveRoomMemory(candidateID: String)
+    /// 記憶の候補を却下する。
+    func rejectRoomMemory(candidateID: String)
+    /// 静的プレビューを指定バージョンに戻す。
+    func rollbackRoomArtifact(version: String)
     /// 権限の確認画面を開く。
     func openPermissions()
     /// 状態パネルの表示を切り替える。

@@ -60,6 +60,13 @@ struct RoomJobMonitorTests {
             rejectCalls.append((jobID, candidateID))
         }
 
+        private(set) var rollbackCalls: [(String, String)] = []
+
+        func rollbackArtifact(jobID: String, version: String) async throws -> RoomArtifact {
+            rollbackCalls.append((jobID, version))
+            return RoomArtifact(artifactID: "rolled-\(version)", version: version)
+        }
+
         @MainActor
         func openEventStream(jobID: String, lastEventID: String?) async throws -> (RoomEventByteStream, Int) {
             openedJobIDs.append(jobID)
@@ -607,6 +614,29 @@ struct RoomJobMonitorTests {
             access.openedCursors.count >= 1
         }
         #expect(access.openedCursors[0] == "9")
+    }
+
+    @Test("rollback は部屋へ送って成果物を引き直す")
+    func rollbackCallsRoomAndRefreshes() async throws {
+        let access = StubRoomAccess()
+        access.detailResults = [
+            "abc": RoomJobDetail(
+                jobID: "abc",
+                artifacts: [
+                    RoomArtifact(artifactID: "art-abc-v3", version: "3")
+                ]
+            )
+        ]
+        let monitor = RoomJobMonitor(access: access, cursorStore: makeStore())
+        monitor.attach(jobID: "abc", title: "掃除")
+        defer { monitor.stopAll() }
+
+        let rolled = try await monitor.rollbackArtifact(jobID: "abc", version: "1")
+        #expect(access.rollbackCalls.map { "\($0.0):\($0.1)" } == ["abc:1"])
+        #expect(rolled.artifactID == "rolled-1")
+        try await eventually("成果物が引き直される") {
+            monitor.jobs.first?.artifacts.first?.artifactID == "art-abc-v3"
+        }
     }
 
     @Test("バックオフは上限で頭打ちになる")

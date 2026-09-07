@@ -96,6 +96,19 @@ struct RoomEventParserTests {
         #expect(artifact.previewURL?.absoluteString == "https://example.com/r.pdf")
         #expect(artifact.sha256 == "abcd")
         #expect(artifact.sourceIDs == ["ev-1", "ev-2"])
+        #expect(artifact.id == "art-1-v3")
+    }
+
+    @Test("仕事の詳細に一時デプロイを読む")
+    func decodesTempDeploy() throws {
+        let data = try #require(
+            #"{"job_id":"abc","temp_deploys":[{"preview_url":"https://w.example.workers.dev","claim_url":"https://dash.cloudflare.com/claim-preview?claimToken=x"}]}"#
+                .data(using: .utf8)
+        )
+        let detail = try JSONDecoder().decode(RoomJobDetail.self, from: data)
+        #expect(detail.tempDeploys.count == 1)
+        #expect(detail.tempDeploys[0].previewURL?.host == "w.example.workers.dev")
+        #expect(detail.tempDeploys[0].claimURL?.absoluteString.contains("claimToken") == true)
     }
 
     @Test("仕事の詳細を読む")

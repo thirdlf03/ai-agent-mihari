@@ -181,7 +181,9 @@ sudo systemctl reload caddy
   - **オブジェクトストレージ（R2 / S3）は今はやらない。** 成果物はすでに
     Room が allowlist して `previews/` に置いている。コピー経路を増やすだけで、
     CSP と token 管理が二重になる
-- Cloudflare **Temporary Deploy**（約 60 分 URL）は Phase 6。Tunnel とは別
+- Cloudflare **Temporary Accounts** はバックエンド付きの 60 分動作確認用。
+  `wrangler deploy --temporary`（Wrangler 4.102.0+、未ログイン）。
+  静的 HTML の恒久 URL は Tunnel のまま。VPS の `mihari` は `wrangler login` しない
 
 ## 6. バックアップと復元
 
@@ -238,7 +240,7 @@ sudo systemctl start mihari-room
   Tailscale プレビュー URL は通した
 - `--live-consistent` バックアップを 2026-09-07 に撮り、temp 展開で
   DB integrity と preview の sha 一致を確認した。サービス停止しての本番上書き復元は未実施
-- 社外向けプレビュー HTTPS と Cloudflare Temporary Deploy は未接続
+- 社外向けプレビュー HTTPS は Tunnel 済み。Temporary Accounts の実機 wrangler は未接続
 
 ## 8. やらないこと
 
@@ -246,4 +248,5 @@ sudo systemctl start mihari-room
   勝手に start / cancel しない。gateway の運用は担当者が行う
 - 実値の秘密をこのリポジトリに入れない
 - API をインターネットに出さない
-- Cloudflare Temporary Deploy / 他 CDN は Phase 6（Tunnel でのプレビュー公開とは別）
+- 本番 Cloudflare アカウントへの login 済み `wrangler deploy` はしない
+  （一時確認は `--temporary` だけ）

@@ -381,47 +381,62 @@ def discord_export_impl(job: Any, message_id: int, no_fetch: bool = False) -> st
     )
 
 
+def _tool_args(args: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Hermes は ``handler(args_dict, **kwargs)``。kwargs 専用だと TypeError になる。"""
+    merged: dict[str, Any] = {}
+    if isinstance(args, dict):
+        merged.update(args)
+    merged.update(kwargs)
+    return merged
+
+
 def _make_handlers(job: Any) -> dict[str, Any]:
-    def search(**kwargs: Any) -> str:
+    def search(args: Any = None, **kwargs: Any) -> str:
+        opts = _tool_args(args, kwargs)
         return discord_search_impl(
             job,
-            kwargs.get("query", ""),
-            kwargs.get("limit", 5),
-            kwargs.get("channel"),
-            kwargs.get("after"),
-            kwargs.get("before"),
-            kwargs.get("author"),
+            opts.get("query", ""),
+            opts.get("limit", 5),
+            opts.get("channel"),
+            opts.get("after"),
+            opts.get("before"),
+            opts.get("author"),
         )
 
-    def recent(**kwargs: Any) -> str:
+    def recent(args: Any = None, **kwargs: Any) -> str:
+        opts = _tool_args(args, kwargs)
         return discord_recent_impl(
             job,
-            kwargs.get("limit", 10),
-            kwargs.get("channel"),
-            kwargs.get("after"),
-            kwargs.get("before"),
-            kwargs.get("author"),
+            opts.get("limit", 10),
+            opts.get("channel"),
+            opts.get("after"),
+            opts.get("before"),
+            opts.get("author"),
         )
 
-    def channels(**kwargs: Any) -> str:
-        return discord_channels_impl(job, kwargs.get("limit", 50))
+    def channels(args: Any = None, **kwargs: Any) -> str:
+        opts = _tool_args(args, kwargs)
+        return discord_channels_impl(job, opts.get("limit", 50))
 
-    def message(**kwargs: Any) -> str:
-        return discord_message_impl(job, kwargs.get("message_id", 0))
+    def message(args: Any = None, **kwargs: Any) -> str:
+        opts = _tool_args(args, kwargs)
+        return discord_message_impl(job, opts.get("message_id", 0))
 
-    def context(**kwargs: Any) -> str:
+    def context(args: Any = None, **kwargs: Any) -> str:
+        opts = _tool_args(args, kwargs)
         return discord_context_impl(
             job,
-            kwargs.get("message_id", 0),
-            kwargs.get("before", 3),
-            kwargs.get("after", 3),
+            opts.get("message_id", 0),
+            opts.get("before", 3),
+            opts.get("after", 3),
         )
 
-    def export(**kwargs: Any) -> str:
-        no_fetch = kwargs.get("no_fetch", False)
+    def export(args: Any = None, **kwargs: Any) -> str:
+        opts = _tool_args(args, kwargs)
+        no_fetch = opts.get("no_fetch", False)
         return discord_export_impl(
             job,
-            kwargs.get("message_id", 0),
+            opts.get("message_id", 0),
             bool(no_fetch) if isinstance(no_fetch, (bool, int)) else False,
         )
 

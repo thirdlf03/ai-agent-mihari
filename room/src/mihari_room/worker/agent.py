@@ -224,6 +224,8 @@ def build_turn_prompt(job: Job) -> str:
             f"`{INPUT_DIRNAME}/followup-*.txt` にも同じ追記があります。"
             f"`{INPUT_DIRNAME}/` に他の添付が無くても正常です。無いファイルを探さないでください。"
             f"結果は `{OUTPUT_DIRNAME}/` に書き出してください。"
+            "プレビュー CSP は `script-src 'self'`。"
+            "JS は同一フォルダの `.js` に分け、インライン script と CDN は使わないでください。"
             "必要な説明は標準出力の最後に 1〜数行で書いてください。"
         )
     base = build_prompt(job)
@@ -959,6 +961,7 @@ class InProcessHermes:
                 agent = None
                 restore_memory_guard: Callable[[], None] | None = None
                 restore_discord_tools: Callable[[], None] | None = None
+                restore_temp_deploy: Callable[[], None] | None = None
                 try:
                     # Bounded discord_* を registry に先に載せる（agent build が読む）。
                     try:
@@ -967,6 +970,12 @@ class InProcessHermes:
                         restore_discord_tools = register_discord_tools(job)
                     except Exception:
                         logger.debug("discord tools register failed", exc_info=True)
+                    try:
+                        from mihari_room.worker.wrangler_temp import register_temp_deploy_tool
+
+                        restore_temp_deploy = register_temp_deploy_tool(job)
+                    except Exception:
+                        logger.debug("temp deploy tool register failed", exc_info=True)
                     try:
                         from mihari_room.worker.hermes import DISABLED_TOOLSETS
 
@@ -1031,6 +1040,11 @@ class InProcessHermes:
                     if restore_discord_tools is not None:
                         try:
                             restore_discord_tools()
+                        except Exception:
+                            pass
+                    if restore_temp_deploy is not None:
+                        try:
+                            restore_temp_deploy()
                         except Exception:
                             pass
                     self._live.pop(job.id, None)
@@ -1124,8 +1138,16 @@ class InProcessHermes:
             logger.debug("followup cursor advance failed", exc_info=True)
 
         response = str((result or {}).get("final_response") or "").strip()
-        if (result or {}).get("failed") or not response:
+        if (result or {}).get("failed"):
             return JobStatus.FAILED
+        if not response:
+            from mihari_room.worker.wrangler_temp import temp_deploys_for
+
+            deploys = temp_deploys_for(Path(job.directory))
+            preview = str(deploys[-1].get("preview_url") or "").strip() if deploys else ""
+            if not preview:
+                return JobStatus.FAILED
+            response = f"一時デプロイしたよ: {preview}"
         await on_progress(ProgressEvent(kind=ProgressKind.SPEECH, text=response))
         return JobStatus.DONE
 

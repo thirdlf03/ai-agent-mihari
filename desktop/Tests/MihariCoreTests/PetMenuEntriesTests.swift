@@ -158,9 +158,51 @@ struct PetMenuEntriesTests {
         let detail = try #require(findItem("詳細を開く…", in: submenu))
         detail.action()
         #expect(actions.roomDetailOpens == 1)
-        let pending = try #require(findItem("記憶の候補: 1件待ち — 詳細で承認", in: submenu))
-        pending.action()
-        #expect(actions.roomDetailOpens == 2)
+        let approve = try #require(findItem("承認: 深煎りが好き", in: submenu))
+        approve.action()
+        #expect(actions.approvedMemoryIDs == ["c1"])
+        let reject = try #require(findItem("却下: 深煎りが好き", in: submenu))
+        reject.action()
+        #expect(actions.rejectedMemoryIDs == ["c1"])
+        #expect(!titles(of: submenu).contains("記憶の候補: 1件待ち — 詳細で承認"))
+    }
+
+    @Test("成果物は version 付きで開き、ロールバックできる")
+    func roomSubmenuShowsVersionedArtifacts() throws {
+        let presenter = makePresenter()
+        let actions = StubPetMenuActions()
+        actions.roomJob = RoomJobSummary(
+            jobID: "abc",
+            title: "掃除",
+            status: .done,
+            phase: .done,
+            artifacts: [
+                RoomArtifact(
+                    artifactID: "art-abc-v1",
+                    version: "1",
+                    kind: "web",
+                    previewURL: URL(string: "https://preview.example/a/")!
+                ),
+                RoomArtifact(
+                    artifactID: "art-abc-v2",
+                    version: "2",
+                    kind: "web",
+                    previewURL: URL(string: "https://preview.example/b/")!
+                ),
+            ]
+        )
+
+        let entries = PetMenuEntries.make(actions: actions, presenter: presenter)
+        let submenu = try #require(findSubmenu("作業部屋", in: entries))
+        let titles = titles(of: submenu)
+        #expect(titles.contains("v1 を開く"))
+        #expect(titles.contains("v2 を開く"))
+        #expect(titles.contains("v1 に戻す"))
+        #expect(titles.contains("v2 に戻す"))
+
+        let rollback = try #require(findItem("v1 に戻す", in: submenu))
+        rollback.action()
+        #expect(actions.rolledBackVersions == ["1"])
     }
 
     /// タイトルの一致するサブメニューを探す。

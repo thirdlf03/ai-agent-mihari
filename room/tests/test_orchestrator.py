@@ -277,6 +277,56 @@ async def test_cancel_by_requester(tmp_path: Path) -> None:
     assert store.get(job.id).status is JobStatus.CANCELLED
 
 
+async def test_forum_redacts_claim_preview_url(tmp_path: Path) -> None:
+    worker = ScriptedWorker(
+        [
+            ProgressEvent(
+                kind=ProgressKind.LOG,
+                text=(
+                    "Claim URL: https://dash.cloudflare.com/claim-preview?claimToken=SECRETCLAIM"
+                ),
+            ),
+            ProgressEvent(kind=ProgressKind.SUMMARY, text="やった"),
+        ]
+    )
+    orch, _store, board, _ = _make_room(tmp_path, worker)
+    orch.start_pump()
+    await orch.submit(CreateJobRequest(title="掃除", body="頼む", source=JobSource.PET))
+    await asyncio_settle()
+    await orch.aclose()
+    posted = " ".join(text for _, text in board.logs + board.speech + board.summaries)
+    assert "SECRETCLAIM" not in posted
+    assert "claimToken" not in posted
+
+
+async def test_temp_deploy_forum_omits_claim(tmp_path: Path) -> None:
+    from mihari_room.worker.wrangler_temp import save_temp_deploy
+
+    async def on_start(job: Job) -> None:
+        save_temp_deploy(
+            job.directory,
+            {
+                "preview_url": "https://demo.example.workers.dev",
+                "claim_url": ("https://dash.cloudflare.com/claim-preview?claimToken=SECRETCLAIM"),
+                "expires_at": "2099-01-01T00:00:00+00:00",
+            },
+        )
+
+    worker = ScriptedWorker(
+        [ProgressEvent(kind=ProgressKind.SUMMARY, text="やった")],
+        on_start=on_start,
+    )
+    orch, _store, board, _ = _make_room(tmp_path, worker)
+    orch.start_pump()
+    await orch.submit(CreateJobRequest(title="API", body="動かして", source=JobSource.PET))
+    await asyncio_settle()
+    await orch.aclose()
+    posted = " ".join(text for _, text in board.logs + board.speech + board.summaries)
+    assert "demo.example.workers.dev" in posted
+    assert "SECRETCLAIM" not in posted
+    assert "claimToken" not in posted
+
+
 class BoomOnceBoard(RecordingBoard):
     def __init__(self) -> None:
         super().__init__()

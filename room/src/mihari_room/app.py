@@ -35,6 +35,7 @@ from mihari_room.orchestrator import RoomOrchestrator
 from mihari_room.queue.file_queue import CancelNotAllowed
 from mihari_room.store.file_store import JobNotFound
 from mihari_room.worker.agent import read_session_id
+from mihari_room.worker.wrangler_temp import temp_deploys_for
 
 #: SSE のポーリング間隔。ファイルを読むだけなので短くてよい。
 POLL_INTERVAL_SEC = 0.25
@@ -180,6 +181,7 @@ def _job_detail(orchestrator: RoomOrchestrator, job: Job) -> dict[str, Any]:
         "thread_id": job.thread_id,
         "session_id": read_session_id(job),
         "artifacts": artifacts,
+        "temp_deploys": temp_deploys_for(job.directory),
         "latest_event": journal.latest(),
     }
 
@@ -518,6 +520,51 @@ def create_app(
     @app.post("/jobs/{job_id}/memory/{candidate_id}/reject", dependencies=[Depends(verify_token)])
     async def job_memory_reject(request: Request, job_id: str, candidate_id: str) -> dict[str, Any]:
         return await _memory_decide(request, job_id, candidate_id, approve=False)
+
+    @app.post(
+        "/jobs/{job_id}/artifacts/{version}/rollback",
+        dependencies=[Depends(verify_token)],
+    )
+    def job_artifact_rollback(request: Request, job_id: str, version: int) -> dict[str, Any]:
+        orchestrator = request.app.state.orchestrator
+        config: RoomConfig = request.app.state.config
+        if not config.owner_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="owner が未設定（MIHARI_OWNER_ID）"
+            )
+        try:
+            job = orchestrator.store.get(job_id)
+        except JobNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="仕事がない"
+            ) from error
+        publisher = orchestrator.publisher
+        if publisher is None or not getattr(publisher, "enabled", False):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="成果物がない")
+        try:
+            manifest = publisher.rollback(job, version, read_session_id(job))
+        except LookupError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="成果物がない"
+            ) from error
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)
+            ) from error
+        try:
+            journal = EventJournal.for_job(orchestrator.store.job_dir(job_id))
+            from mihari_room.events import EventPhase, JournalKind
+
+            url = manifest.get("preview_url") or ""
+            journal.append(
+                job_id=job_id,
+                phase=EventPhase.DONE,
+                kind=JournalKind.SUMMARY,
+                text=f"プレビューを戻したよ: {url}" if url else "プレビューを戻したよ。",
+            )
+        except Exception:
+            pass
+        return manifest
 
     # --- プレビュー（未認証・安全ヘッダ付き） --------------------------------
 

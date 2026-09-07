@@ -96,6 +96,7 @@ def test_job_detail_shape_and_404(tmp_path: Path) -> None:
     assert detail["status"] == "queued"
     assert detail["session_id"] is None
     assert detail["artifacts"] == []
+    assert detail["temp_deploys"] == []
     assert detail["latest_event"] is not None
     assert detail["latest_event"]["job_id"] == job_id
     # 絶対パスは出さない。
@@ -104,6 +105,28 @@ def test_job_detail_shape_and_404(tmp_path: Path) -> None:
 
     assert client.get("/jobs/does-not-exist", headers=_auth()).status_code == 404
     assert client.get(f"/jobs/{job_id}").status_code == 401
+
+
+def test_job_detail_includes_temp_deploy_claim_for_owner(tmp_path: Path) -> None:
+    from mihari_room.worker.wrangler_temp import save_temp_deploy
+
+    client, orch, store, _ = _make_app(tmp_path)
+    created = client.post(
+        "/jobs", json={"title": "API", "body": "動かして", "source": "pet"}, headers=_auth()
+    ).json()
+    job_id = created["job_id"]
+    save_temp_deploy(
+        store.get(job_id).directory,
+        {
+            "preview_url": "https://demo.example.workers.dev",
+            "claim_url": "https://dash.cloudflare.com/claim-preview?claimToken=SECRETCLAIM",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+        },
+    )
+    detail = client.get(f"/jobs/{job_id}", headers=_auth()).json()
+    assert len(detail["temp_deploys"]) == 1
+    assert detail["temp_deploys"][0]["preview_url"].endswith("workers.dev")
+    assert "SECRETCLAIM" in detail["temp_deploys"][0]["claim_url"]
 
 
 # --- 続き（followup） --------------------------------------------------------
@@ -353,6 +376,63 @@ def test_publish_and_serve_preview_end_to_end(tmp_path: Path) -> None:
         # SSE に preview URL の summary が流れる。
         frames = _read_sse(client, f"/jobs/{job_id}/events", _auth())
         assert any("preview.example.com" in f["text"] for f in frames if f["kind"] == "summary")
+
+
+def test_artifact_rollback_creates_new_token(tmp_path: Path) -> None:
+    def make_artifact(job: Job, body: str) -> None:
+        folder = job.directory / "output" / "artifact"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "index.html").write_text(body, encoding="utf-8")
+
+    round_box = {"n": 0}
+
+    async def on_start(job: Job) -> None:
+        round_box["n"] += 1
+        make_artifact(job, f"<h1>v{round_box['n']}</h1>")
+
+    worker = ScriptedWorker(
+        [ProgressEvent(kind=ProgressKind.SUMMARY, text="やった")], on_start=on_start
+    )
+    client, orch, store, _ = _make_app(
+        tmp_path,
+        start_pump=True,
+        worker=worker,
+        preview_base="https://preview.example.com/previews",
+    )
+    with client:
+        created = client.post(
+            "/jobs", json={"title": "棚", "body": "x", "source": "pet"}, headers=_auth()
+        ).json()
+        job_id = created["job_id"]
+        _wait_done(client, job_id, store)
+        first = client.get(f"/jobs/{job_id}", headers=_auth()).json()["artifacts"][0]
+        assert first["id"].endswith("-v1")
+
+        client.post(f"/jobs/{job_id}/followup", json={"body": "直して"}, headers=_auth())
+        _wait_done(client, job_id, store)
+        versions = client.get(f"/jobs/{job_id}", headers=_auth()).json()["artifacts"]
+        assert [a["id"] for a in versions] == [
+            f"art-{job_id}-v1",
+            f"art-{job_id}-v2",
+        ]
+
+        rolled = client.post(f"/jobs/{job_id}/artifacts/1/rollback", headers=_auth())
+        assert rolled.status_code == 200
+        body = rolled.json()
+        assert body["version"] == 3
+        assert body["id"] == f"art-{job_id}-v3"
+        assert body["preview_url"] != first["preview_url"]
+        token = body["preview_url"].rstrip("/").rsplit("/", 1)[-1]
+        page = client.get(f"/previews/{token}/")
+        assert page.status_code == 200
+        assert "v1" in page.text
+        old_token = first["preview_url"].rstrip("/").rsplit("/", 1)[-1]
+        assert client.get(f"/previews/{old_token}/").status_code == 200
+
+        assert (
+            client.post(f"/jobs/{job_id}/artifacts/99/rollback", headers=_auth()).status_code == 404
+        )
+        assert client.post(f"/jobs/{job_id}/artifacts/1/rollback").status_code == 401
 
 
 # --- ヘルパー ----------------------------------------------------------------
