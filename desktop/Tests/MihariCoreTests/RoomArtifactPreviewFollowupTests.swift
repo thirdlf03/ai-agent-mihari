@@ -53,7 +53,7 @@ struct RoomArtifactPreviewFollowupTests {
         await model.submitFeedback()
     }
 
-    @Test("280 文字を超えたら送れない")
+    @Test("280 文字を超えたら送れない（trim 後）")
     func tooLongFeedbackCannotSubmit() async {
         let model = RoomArtifactPreviewViewModel(
             jobID: "abc",
@@ -64,10 +64,40 @@ struct RoomArtifactPreviewFollowupTests {
             }
         )
         model.feedback = String(repeating: "あ", count: 281)
+        #expect(model.trimmedFeedbackCount == 281)
+        #expect(model.isOverCharacterLimit == true)
         #expect(model.canSubmit == false)
     }
 
-    @Test("失敗したらみはり口調で知らせる")
+    @Test("前後空白は文字数に数えない")
+    func paddingDoesNotCountTowardLimit() {
+        let core = String(repeating: "あ", count: 280)
+        let model = RoomArtifactPreviewViewModel(
+            jobID: "abc",
+            version: "1",
+            sendFollowup: { _ in JobRequestResponse(jobID: "abc", threadID: nil, status: "queued") }
+        )
+        model.feedback = "  \(core)  "
+        #expect(model.trimmedFeedbackCount == 280)
+        #expect(model.isOverCharacterLimit == false)
+        #expect(model.canSubmit == true)
+    }
+
+    @Test("trim 後 281 文字なら前後空白があっても送れない")
+    func paddedTooLongFeedbackCannotSubmit() {
+        let core = String(repeating: "あ", count: 281)
+        let model = RoomArtifactPreviewViewModel(
+            jobID: "abc",
+            version: "1",
+            sendFollowup: { _ in JobRequestResponse(jobID: "abc", threadID: nil, status: "queued") }
+        )
+        model.feedback = " \(core) "
+        #expect(model.trimmedFeedbackCount == 281)
+        #expect(model.isOverCharacterLimit == true)
+        #expect(model.canSubmit == false)
+    }
+
+    @Test("失敗しても UI にはみはり口調だけ出す（LocalizedError も隠す）")
     func submitFailureShowsMihariNotice() async {
         struct SampleError: LocalizedError {
             var errorDescription: String? { "部屋が応答しなかった" }
@@ -81,8 +111,22 @@ struct RoomArtifactPreviewFollowupTests {
         await model.submitFeedback()
 
         #expect(model.didFail == true)
-        #expect(model.notice == "部屋が応答しなかった")
+        #expect(model.notice == RoomArtifactPreviewViewModel.failureNotice)
         #expect(model.feedback == "直して")
+    }
+
+    @Test("RoomError も UI には出さずみはり口調に統一する")
+    func submitRoomErrorUsesMihariNotice() async {
+        let model = RoomArtifactPreviewViewModel(
+            jobID: "abc",
+            version: "1",
+            sendFollowup: { _ in throw RoomError.requestFailed(status: 503, message: "続きを書いて") }
+        )
+        model.feedback = "直して"
+        await model.submitFeedback()
+
+        #expect(model.didFail == true)
+        #expect(model.notice == RoomArtifactPreviewViewModel.failureNotice)
     }
 
     @Test("不明なエラーは汎用の失敗メッセージになる")
@@ -97,6 +141,6 @@ struct RoomArtifactPreviewFollowupTests {
         await model.submitFeedback()
 
         #expect(model.didFail == true)
-        #expect(model.notice == "送れなかったよ。もう一度試してみてね")
+        #expect(model.notice == RoomArtifactPreviewViewModel.failureNotice)
     }
 }

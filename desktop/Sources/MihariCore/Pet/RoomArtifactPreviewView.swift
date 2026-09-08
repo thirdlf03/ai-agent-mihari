@@ -40,7 +40,7 @@ struct RoomArtifactPreviewView: View {
                 .disabled(!viewModel.canSubmit)
                 .keyboardShortcut(.return, modifiers: [.command])
             }
-            if viewModel.feedback.count > RoomArtifactPreviewViewModel.maxFeedbackLength {
+            if viewModel.isOverCharacterLimit {
                 Text("280 文字以内にしてね")
                     .font(.caption2)
                     .foregroundStyle(.red)
