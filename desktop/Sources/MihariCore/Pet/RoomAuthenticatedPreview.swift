@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import SwiftUI
 import WebKit
 
 /// 非公開版を desktop 内で認証付きプレビューする仕組み。
@@ -129,69 +131,50 @@ public final class RoomAuthenticatedURLSchemeHandler: NSObject, WKURLSchemeHandl
 }
 
 /// 非公開版の認証付きプレビュー窓。公開済み URL は従来どおりブラウザで開く。
+/// プレビュー HTML 内からの追記（CSP 緩和）はせず、窓下部のネイティブ入力から followup する。
 @MainActor
-public final class RoomArtifactPreviewWindowController: NSObject, WKNavigationDelegate {
+public final class RoomArtifactPreviewWindowController {
     /// アプリ全体で 1 つのプレビュー窓。開き直しても同じ窓を使う。
     public static let shared = RoomArtifactPreviewWindowController()
 
     private var window: NSWindow?
 
-    public override init() {}
+    public init() {}
 
     /// 指定版の成果物をアプリ内で認証付きプレビューする。
     public func show(client: RoomEventClient, jobID: String, version: String, title: String) {
         let fetcher = client.previewFetcher(jobID: jobID, version: version)
         guard let pageURL = fetcher.pageURL(jobID: jobID, version: version) else { return }
-        let handler = RoomAuthenticatedURLSchemeHandler(fetcher: fetcher)
-        let configuration = WKWebViewConfiguration()
-        configuration.setURLSchemeHandler(handler, forURLScheme: RoomAuthenticatedPreview.scheme)
-        configuration.websiteDataStore = .nonPersistent()
-        let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 960, height: 640), configuration: configuration)
-        webView.navigationDelegate = self
-        webView.allowsBackForwardNavigationGestures = true
-
+        let viewModel = RoomArtifactPreviewViewModel(client: client, jobID: jobID, version: version)
+        let content = RoomArtifactPreviewView(
+            viewModel: viewModel,
+            fetcher: fetcher,
+            pageURL: pageURL
+        )
         if let window {
-            window.contentView = webView
+            window.contentViewController = NSHostingController(rootView: AnyView(content))
             window.title = title
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
         } else {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 960, height: 640),
+                contentRect: NSRect(x: 0, y: 0, width: 960, height: 680),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered,
                 defer: false
             )
             window.title = title
             window.isReleasedWhenClosed = false
-            window.contentView = webView
+            window.contentViewController = NSHostingController(rootView: AnyView(content))
             window.center()
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
             self.window = window
         }
-        webView.load(URLRequest(url: pageURL))
     }
-}
 
-/// 外部の http(s) へは飛ばさずブラウザで開く（ヘッダ付きの内部ページを離れない）。
-extension RoomArtifactPreviewWindowController {
-    public func webView(
-        _ webView: WKWebView,
-        decidePolicyFor navigationAction: WKNavigationAction,
-        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
-    ) {
-        guard let url = navigationAction.request.url else {
-            decisionHandler(.cancel)
-            return
-        }
-        if url.scheme == RoomAuthenticatedPreview.scheme || url.scheme == "about" {
-            decisionHandler(.allow)
-            return
-        }
-        if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
-            NSWorkspace.shared.open(url)
-        }
-        decisionHandler(.cancel)
+    /// テストから窓の有無を見るための入り口。
+    var isVisibleForTesting: Bool {
+        window?.isVisible ?? false
     }
 }
