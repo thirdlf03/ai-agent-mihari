@@ -93,7 +93,7 @@ struct JobRequestViewModelTests {
     }
 
     /// テスト用の撮影対象（Retina のメタデータ付き）。
-    private nonisolated(unsafe) static let target = ScreenshotTarget(
+    private static let target = ScreenshotTarget(
         id: "display:1",
         kind: .display,
         title: "Built-in Retina Display (3024×1964)",
@@ -129,8 +129,7 @@ struct JobRequestViewModelTests {
     private func makeModel(client: JobRequestClient) -> JobRequestViewModel {
         JobRequestViewModel(
             client: client,
-            listTargets: { [Self.target] },
-            capture: { try await self.captureStub($0) }
+            pickScreenshot: { try await self.captureStub(Self.target) }
         )
     }
 
@@ -186,14 +185,10 @@ struct JobRequestViewModelTests {
 
     // MARK: - スクショ添付（#22）
 
-    @Test("対象一覧を読み込み、撮ったスクショを添付・削除できる")
+    @Test("撮ったスクショを添付・削除できる")
     func capturesAndRemovesAttachment() async {
         let model = makeModel(client: makeRequestClient())
-        await model.loadScreenshotTargets()
-        #expect(model.screenshotTargets.count == 1)
-        #expect(model.captureErrorMessage == nil)
-
-        await model.captureScreenshot(target: Self.target)
+        await model.captureScreenshot()
         #expect(model.screenshots.count == 1)
         #expect(model.screenshots[0].pngData == Self.png)
         #expect(model.screenshots[0].backingScale == 2.0)
@@ -203,17 +198,16 @@ struct JobRequestViewModelTests {
         #expect(model.screenshots.isEmpty)
     }
 
-    @Test("権限が無ければ対象一覧の読み込みで理由を表示する")
+    @Test("権限が無ければ撮影で理由を表示する")
     func permissionDeniedShowsMessage() async {
         let model = JobRequestViewModel(
             client: makeRequestClient(),
-            listTargets: {
+            pickScreenshot: {
                 throw CaptureError.screenRecordingPermissionNotGranted(detail: "denied (拒否)")
-            },
-            capture: { _ in throw CaptureError.screenCaptureFailed(reason: "x") }
+            }
         )
-        await model.loadScreenshotTargets()
-        #expect(model.screenshotTargets.isEmpty)
+        await model.captureScreenshot()
+        #expect(model.screenshots.isEmpty)
         #expect(model.captureErrorMessage?.contains("権限") == true)
         #expect(model.messageMentionsPermission == true)
     }
@@ -222,13 +216,22 @@ struct JobRequestViewModelTests {
     func captureFailureShowsMessage() async {
         let model = JobRequestViewModel(
             client: makeRequestClient(),
-            listTargets: { [Self.target] },
-            capture: { _ in throw CaptureError.screenCaptureFailed(reason: "権限なしテスト") }
+            pickScreenshot: { throw CaptureError.screenCaptureFailed(reason: "権限なしテスト") }
         )
-        await model.loadScreenshotTargets()
-        await model.captureScreenshot(target: Self.target)
+        await model.captureScreenshot()
         #expect(model.screenshots.isEmpty)
         #expect(model.captureErrorMessage?.contains("取得に失敗") == true)
+    }
+
+    @Test("対象選びを閉じたら添付もエラーも残さない")
+    func pickerCancelLeavesStateClean() async {
+        let model = JobRequestViewModel(
+            client: makeRequestClient(),
+            pickScreenshot: { throw CancellationError() }
+        )
+        await model.captureScreenshot()
+        #expect(model.screenshots.isEmpty)
+        #expect(model.captureErrorMessage == nil)
     }
 
     @Test("送信が通ったら添付を空にし、失敗したら残す")
@@ -244,8 +247,7 @@ struct JobRequestViewModelTests {
         }
         let model = makeModel(client: makeRequestClient())
         model.body = "この画面のエラーを見て"
-        await model.loadScreenshotTargets()
-        await model.captureScreenshot(target: Self.target)
+        await model.captureScreenshot()
 
         await model.submit()
 
@@ -270,7 +272,7 @@ struct JobRequestViewModelTests {
             return (response, Data(#"{"detail":"部屋が落ちてる"}"#.utf8))
         }
         model.body = "もう一度"
-        await model.captureScreenshot(target: Self.target)
+        await model.captureScreenshot()
         await model.submit()
 
         #expect(model.didSucceed == false)
@@ -292,12 +294,10 @@ struct JobRequestViewModelTests {
         let model = JobRequestViewModel(
             followupClient: makeRoomClient(),
             jobID: "abc",
-            listTargets: { [Self.target] },
-            capture: { try await self.captureStub($0) }
+            pickScreenshot: { try await self.captureStub(Self.target) }
         )
         model.body = "この画面も見て"
-        await model.loadScreenshotTargets()
-        await model.captureScreenshot(target: Self.target)
+        await model.captureScreenshot()
 
         await model.submit()
 

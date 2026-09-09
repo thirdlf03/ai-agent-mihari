@@ -124,10 +124,29 @@ async def test_post_file_attaches_file(tmp_path: Path) -> None:
     target.write_text("できたよ")
     await board.post_file(7, target)
     thread.send.assert_awaited_once()
-    sent_file = thread.send.await_args.kwargs["file"]
-    # discord.File は filename を持つ。添付なしはダメ。
-    filename = getattr(sent_file, "filename", str(sent_file))
+    sent_files = thread.send.await_args.kwargs["files"]
+    assert len(sent_files) == 1
+    filename = getattr(sent_files[0], "filename", str(sent_files[0]))
     assert "result.txt" in str(filename)
+
+
+async def test_post_files_attaches_many_with_note(tmp_path: Path) -> None:
+    board, _, thread = _make_board()
+    first = tmp_path / "0001.png"
+    second = tmp_path / "0002.png"
+    first.write_bytes(b"one")
+    second.write_bytes(b"two")
+    await board.post_files(
+        7,
+        [first, second],
+        note="依頼のスクショだよ（2 枚）",
+        filenames=["画面.png", "メモ.png"],
+    )
+    thread.send.assert_awaited_once()
+    kwargs = thread.send.await_args.kwargs
+    assert kwargs["content"] == "依頼のスクショだよ（2 枚）"
+    names = [getattr(item, "filename", str(item)) for item in kwargs["files"]]
+    assert names == ["画面.png", "メモ.png"]
 
 
 async def test_post_summary_sends_single_message() -> None:

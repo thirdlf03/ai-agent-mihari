@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 
@@ -37,7 +38,10 @@ struct ScreenshotCaptureServiceTests {
                 frameX: 0,
                 frameY: 0
             )
-            try await ScreenshotCaptureService.capturePNG(of: target, checkPermission: denied)
+            _ = try await ScreenshotCaptureService.capturePNG(of: target, checkPermission: denied)
+        }
+        await #expect(throws: CaptureError.screenRecordingPermissionNotGranted(detail: "denied (拒否)")) {
+            _ = try await SystemScreenshotPicker.pick(checkPermission: denied)
         }
     }
 }
@@ -83,5 +87,115 @@ struct ScreenshotGeometryTests {
         #expect(rect.origin.y == 0)
         #expect(rect.width == 3840)
         #expect(rect.height == 2160)
+    }
+}
+
+@Suite("システムの対象選びから画面・ウィンドウを当てる")
+struct ScreenshotSourceResolveTests {
+
+    private let builtIn = ScreenshotCaptureService.DisplaySnapshot(
+        displayID: 1,
+        bounds: CGRect(x: 0, y: 0, width: 1512, height: 982),
+        title: "Built-in (3024×1964)"
+    )
+    private let left = ScreenshotCaptureService.DisplaySnapshot(
+        displayID: 2,
+        bounds: CGRect(x: -1920, y: 0, width: 1920, height: 1080),
+        title: "左の画面 (3840×2160)"
+    )
+    private let safari = ScreenshotCaptureService.WindowSnapshot(
+        windowID: 42,
+        frame: CGRect(x: 100, y: 80, width: 800, height: 600),
+        title: "Safari: 検索"
+    )
+
+    @Test("ウィンドウ枠がほぼ同じならウィンドウとして当てる")
+    func matchesWindowByFrame() {
+        let source = ScreenshotCaptureService.resolveSource(
+            styleHint: .window,
+            contentRect: CGRect(x: 102, y: 78, width: 800, height: 600),
+            displays: [builtIn],
+            windows: [safari]
+        )
+        #expect(source.kind == .window)
+        #expect(source.windowID == 42)
+        #expect(source.displayID == 1)
+        #expect(source.title == "Safari: 検索")
+    }
+
+    @Test("画面全体を選んだときはウィンドウがあっても画面として当てる")
+    func displayHintIgnoresOverlappingWindow() {
+        let fullscreenWindow = ScreenshotCaptureService.WindowSnapshot(
+            windowID: 9,
+            frame: builtIn.bounds,
+            title: "アプリ: 全画面"
+        )
+        let source = ScreenshotCaptureService.resolveSource(
+            styleHint: .display,
+            contentRect: builtIn.bounds,
+            displays: [builtIn, left],
+            windows: [fullscreenWindow]
+        )
+        #expect(source.kind == .display)
+        #expect(source.displayID == 1)
+        #expect(source.windowID == nil)
+        #expect(source.title == "Built-in (3024×1964)")
+    }
+
+    @Test("左側の画面は負の座標のまま当てる")
+    func matchesLeftDisplayNegativeOrigin() {
+        let source = ScreenshotCaptureService.resolveSource(
+            styleHint: .display,
+            contentRect: left.bounds,
+            displays: [builtIn, left],
+            windows: []
+        )
+        #expect(source.kind == .display)
+        #expect(source.displayID == 2)
+        #expect(source.frameX == -1920)
+        #expect(source.title == "左の画面 (3840×2160)")
+    }
+
+    @Test("ヒントが無くても重なりが大きいウィンドウを当てる")
+    func infersWindowFromOverlap() {
+        let source = ScreenshotCaptureService.resolveSource(
+            styleHint: nil,
+            contentRect: CGRect(x: 120, y: 100, width: 760, height: 560),
+            displays: [builtIn],
+            windows: [safari]
+        )
+        #expect(source.kind == .window)
+        #expect(source.windowID == 42)
+    }
+}
+
+@Suite("対象選び中の依頼窓の前面維持")
+@MainActor
+struct ScreenshotPickerAnchorTests {
+
+    @Test("選んでいるあいだは浮かべ、終わったら元の階層へ戻す")
+    func holdsFloatingThenRestoresLevel() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 120),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.level = .normal
+        window.hidesOnDeactivate = true
+
+        let anchor = ScreenshotPickerAnchor(window: window)
+        #expect(anchor != nil)
+        #expect(window.level == .floating)
+        #expect(window.hidesOnDeactivate == false)
+
+        anchor?.restore()
+        #expect(window.level == .normal)
+        #expect(window.hidesOnDeactivate == true)
+    }
+
+    @Test("窓が無ければ何もしない")
+    func missingWindowIsIgnored() {
+        #expect(ScreenshotPickerAnchor(window: nil) == nil)
     }
 }
