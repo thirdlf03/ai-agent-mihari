@@ -45,6 +45,7 @@ EVENT_INPUT_IMAGE = "input.image"
 # --- room → クライアント ---------------------------------------------------
 
 EVENT_SESSION_READY = "session.ready"
+EVENT_HISTORY_SYNC = "history.sync"
 EVENT_ASSISTANT_TEXT = "assistant.text"
 EVENT_ASSISTANT_TOOL_CALL = "assistant.tool_call"
 EVENT_ERROR = "error"
@@ -60,14 +61,21 @@ def error_event(message: str, *, code: str = "voice_error") -> dict[str, Any]:
     return client_event(EVENT_ERROR, code=code, message=message)
 
 
-def session_ready_event(*, session_id: str, model: str) -> dict[str, Any]:
+def session_ready_event(
+    *, session_id: str, model: str, resumed: bool = False
+) -> dict[str, Any]:
     return client_event(
         EVENT_SESSION_READY,
         session_id=session_id,
         model=model,
         protocol_version=PROTOCOL_VERSION,
         output_modalities=["text"],
+        resumed=resumed,
     )
+
+
+def history_sync_event(*, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    return client_event(EVENT_HISTORY_SYNC, messages=messages)
 
 
 def assistant_text_event(*, text: str = "", delta: str = "", done: bool = False) -> dict[str, Any]:
