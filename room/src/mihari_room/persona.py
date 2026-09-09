@@ -220,3 +220,16 @@ def memory_candidate_line(target: str) -> str:
 #: 確認したいことがあるが、一人で進める（attended でない部屋の代行）。
 def confirm_alone_line(question: str) -> str:
     return f"確認したいけど、一人で進める: {question}"
+
+
+#: ユーザー入力待ち（voice / desktop が API で答える）。
+def question_waiting_line(question: str) -> str:
+    return f"確認したい: {question}"
+
+
+#: steer 指示を受け取った。
+def steer_received_line(text: str) -> str:
+    preview = text.strip()
+    if len(preview) > 120:
+        preview = preview[:117] + "..."
+    return f"途中指示を受け取った: {preview}"

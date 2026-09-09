@@ -256,7 +256,11 @@ class HermesWorker:
         self._agent_factory = agent_factory
         #: Mac 操作の hub。create_app が後付けする（無ければ mac_* ツールは無い）。
         self._mac_control: Any = None
+        self._interactions: Any = None
         self._runner: Any = None
+
+    def attach_interactions(self, hub: Any) -> None:
+        self._interactions = hub
 
     def attach_mac_control(self, hub: Any) -> None:
         """Mac 操作の hub を後付けする。Hermes 実行ごとに mac_* ツールを載せる。"""
@@ -319,6 +323,15 @@ class HermesWorker:
                 return False
         return False
 
+    def deliver_steer(self, job_id: str, text: str) -> bool:
+        runner = getattr(self, "_runner", None)
+        if runner is not None and hasattr(runner, "deliver_steer"):
+            try:
+                return bool(runner.deliver_steer(job_id, text))
+            except Exception:
+                return False
+        return False
+
     async def _run_inprocess(
         self,
         job: Job,
@@ -333,6 +346,8 @@ class HermesWorker:
             agent_factory=self._agent_factory,
             mac_control=self._mac_control,
         )
+        if self._interactions is not None and hasattr(runner, "attach_interactions"):
+            runner.attach_interactions(self._interactions)
         self._runner = runner
         try:
             status = await runner.run(job, build_turn_prompt(job), on_progress)

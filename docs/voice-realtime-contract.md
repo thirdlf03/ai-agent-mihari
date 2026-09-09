@@ -1,6 +1,6 @@
 # Voice Realtime 契約（room ↔ desktop 共有）
 
-Epic: [#35](https://github.com/thirdlf03/ai-agent-mihari/issues/35) / room 実装: [#36](https://github.com/thirdlf03/ai-agent-mihari/issues/36) / セッション完成: [#38](https://github.com/thirdlf03/ai-agent-mihari/issues/38)
+Epic: [#35](https://github.com/thirdlf03/ai-agent-mihari/issues/35) / room 実装: [#36](https://github.com/thirdlf03/ai-agent-mihari/issues/36) / セッション完成: [#38](https://github.com/thirdlf03/ai-agent-mihari/issues/38) / ジョブ接続: [#40](https://github.com/thirdlf03/ai-agent-mihari/issues/40)
 
 OpenAI Realtime（`gpt-realtime-2.1-mini`）への接続は **room のみ** が行う。API キーは room 環境変数（`MIHARI_OPENAI_API_KEY` または `OPENAI_API_KEY`）に置き、desktop へは渡さない。
 
@@ -155,3 +155,70 @@ room は upstream 接続直後に `session.update` で `output_modalities: ["tex
 - 保存先: `{MIHARI_ROOM_ROOT}/voice/sessions/<id>/meta.json` と `history.jsonl`
 - 保存対象: テキスト（画像プロンプト、assistant 応答、tool_call メタ）
 - 非保存: マイク PCM / 音声ファイル
+
+## ジョブ接続（voice 会話 ↔ Hermes ジョブ）
+
+voice **session_id** と Hermes **job_id** は別 ID。会話セッションのストレージは `voice/sessions/`、ジョブは `jobs/`。会話からジョブを参照するときは既存のジョブ API を使う（セッション ID を job ID にしない）。
+
+### ジョブ状態 `waiting_for_input`
+
+Hermes が clarify 等でユーザー入力待ちになったとき、ジョブ status は `waiting_for_input`（机占有・`/jobs/running` に含む）。回答後は `running` に戻る。
+
+### `POST /jobs/{id}/steer`
+
+実行中（`running` / `waiting_for_input`）ジョブへ途中指示を足す。
+
+**Request**
+
+```json
+{ "text": "左側を優先して" }
+```
+
+**Response 200**
+
+```json
+{
+  "job_id": "<id>",
+  "seq": 1,
+  "filename": "001.txt",
+  "text": "左側を優先して",
+  "created_at": 0.0,
+  "delivered": true
+}
+```
+
+未実行・終端ジョブは **409**。指示は `jobs/<id>/input/steer/` に永続化される。
+
+### `GET /jobs/{id}/questions`
+
+質問一覧（pending / answered / cancelled）。
+
+### `POST /jobs/{id}/questions/{qid}/answer`
+
+`waiting_for_input` 中の pending 質問に答える。
+
+**Request**
+
+```json
+{ "answer": "blue" }
+```
+
+**Response 200**
+
+```json
+{
+  "job_id": "<id>",
+  "question": {
+    "id": "<qid>",
+    "question": "色は？",
+    "choices": ["red", "blue"],
+    "multi_select": false,
+    "status": "answered",
+    "answer": "blue",
+    "created_at": 0.0,
+    "answered_at": 0.1
+  }
+}
+```
+
+`GET /jobs/{id}` の `pending_questions` に未回答分が載る。desktop 実装は [#41](https://github.com/thirdlf03/ai-agent-mihari/issues/41)。

@@ -79,6 +79,7 @@ async def test_set_tag_uses_status_tag_names() -> None:
     expected = {
         JobStatus.QUEUED: "待ち",
         JobStatus.RUNNING: "作業中",
+        JobStatus.WAITING_FOR_INPUT: "入力待ち",
         JobStatus.DONE: "完了",
         JobStatus.FAILED: "失敗",
         JobStatus.CANCELLED: "中断",

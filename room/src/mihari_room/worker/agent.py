@@ -54,6 +54,7 @@ from mihari_room.persona import (
     confirm_alone_line,
     ensure_room_soul,
     memory_candidate_line,
+    question_waiting_line,
     temp_deploy_posted_line,
 )
 from mihari_room.worker.progress import format_tool_progress
@@ -1055,6 +1056,26 @@ class InProcessHermes:
         self._live_lock = threading.Lock()
         #: Mac 操作の hub。無ければ mac_* ツールを載せない。
         self._mac_control = mac_control
+        self._interactions: Any = None
+
+    def attach_interactions(self, hub: Any) -> None:
+        self._interactions = hub
+
+    def deliver_steer(self, job_id: str, text: str) -> bool:
+        """live agent へ steer を届ける。届けられなければ False。"""
+        agent = self._live.get(job_id)
+        if agent is None:
+            return False
+        for method_name in ("steer", "inject_user_message", "add_user_message", "add_message"):
+            method = getattr(agent, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                method(text)
+                return True
+            except Exception:
+                logger.debug("deliver_steer via %s failed", method_name, exc_info=True)
+        return False
 
     def request_cancel(self, job_id: str) -> bool:
         """実行中の agent に interrupt を届ける。届けば True。"""
@@ -1109,10 +1130,59 @@ class InProcessHermes:
                 )
 
         def clarify_callback(question: str, choices: Any = None, multi_select: bool = False) -> str:
+            hub = self._interactions
+            safe_question = sanitize_preview(question) or question
+            if hub is not None:
+                from mihari_room.job_interactions import DEFAULT_QUESTION_TIMEOUT_SEC
+
+                choice_list: list[str] | None = None
+                if choices:
+                    if isinstance(choices, (list, tuple)):
+                        choice_list = [str(c) for c in choices]
+                    else:
+                        choice_list = [str(choices)]
+                emit(
+                    ProgressEvent(
+                        kind=ProgressKind.LOG,
+                        text=question_waiting_line(safe_question),
+                        phase="waiting",
+                    )
+                )
+                try:
+                    from mihari_room.events import EventJournal, EventPhase, JournalKind
+
+                    EventJournal.for_job(job.directory).append(
+                        job_id=job.id,
+                        phase=EventPhase.WAITING,
+                        kind=JournalKind.QUESTION,
+                        text=safe_question,
+                    )
+                except Exception:
+                    pass
+                pending = hub.register_question(
+                    job,
+                    safe_question,
+                    choice_list,
+                    multi_select=multi_select,
+                )
+                try:
+                    answer = hub.wait_for_answer(
+                        job.id,
+                        pending.id,
+                        timeout=min(self._timeout, DEFAULT_QUESTION_TIMEOUT_SEC),
+                    )
+                except Exception:
+                    hub.cleanup_question(pending.id)
+                    hub.resume_running(job.id)
+                    raise
+                finally:
+                    hub.cleanup_question(pending.id)
+                hub.resume_running(job.id)
+                return answer
             emit(
                 ProgressEvent(
                     kind=ProgressKind.LOG,
-                    text=confirm_alone_line(sanitize_preview(question)),
+                    text=confirm_alone_line(safe_question),
                 )
             )
             if choices:
@@ -1240,6 +1310,10 @@ class InProcessHermes:
                     )
                     holder.append(agent)
                     self._live[job.id] = agent
+                    if self._interactions is not None:
+                        self._interactions.register_steer_deliverer(
+                            job.id, self.deliver_steer
+                        )
                     # セッション ID は早めに残す（中断時も拾えるように）。
                     _persist_session_best_effort(job, getattr(agent, "session_id", None))
                     try:
@@ -1314,6 +1388,8 @@ class InProcessHermes:
                         except Exception:
                             pass
                     self._live.pop(job.id, None)
+                    if self._interactions is not None:
+                        self._interactions.unregister_steer_deliverer(job.id)
                     # 中断時も ID があれば残す。
                     try:
                         if holder:
