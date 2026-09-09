@@ -80,4 +80,53 @@ struct VoiceStreamConnectorTests {
         )
         #expect(result == nil)
     }
+
+    @Test("streaming セッションへの tryReconnect は接続を返す")
+    func tryReconnectReturnsConnectionForStreamingSession() async throws {
+        let connector = makeConnector()
+        StubURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            let body = """
+            {"session_id":"live","model":"gpt-realtime-2.1-mini","status":"streaming","error":null}
+            """
+            #expect(request.httpMethod == "GET")
+            return (response, Data(body.utf8))
+        }
+
+        let result = try await connector.tryReconnect(
+            sessionID: "live",
+            streamPath: "/voice/sessions/live/stream"
+        )
+        #expect(result?.sessionID == "live")
+        #expect(result?.model == "gpt-realtime-2.1-mini")
+    }
+
+    @Test("connectNew は POST 後に WebSocket を開く")
+    func connectNewCreatesSessionAndOpensSocket() async throws {
+        let connector = makeConnector()
+        StubURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            #expect(request.httpMethod == "POST")
+            #expect(request.url?.path == "/voice/sessions")
+            let body = """
+            {"session_id":"new-sess","model":"gpt-realtime-2.1-mini","status":"created",\
+            "protocol_version":1,"stream_path":"/voice/sessions/new-sess/stream"}
+            """
+            return (response, Data(body.utf8))
+        }
+
+        let connection = try await connector.connectNew()
+        #expect(connection.sessionID == "new-sess")
+        #expect(connection.streamPath == "/voice/sessions/new-sess/stream")
+    }
 }

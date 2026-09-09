@@ -161,4 +161,68 @@ struct VoiceJobCollaborationTests {
         #expect(pending[0].questionID == "q1")
         #expect(pending[0].prompt == "続けますか？")
     }
+
+    @Test("submit_job / get_job_status の別名と引数キーを読む")
+    func mapsSubmitAndStatusToolAliases() {
+        let submit = VoiceToolCallHandler.action(
+            for: "create_job",
+            arguments: #"{"title":"調査","body":"README を読んで"}"#
+        )
+        #expect(submit == .submitJob(title: "調査", body: "README を読んで"))
+
+        let status = VoiceToolCallHandler.action(
+            for: "job_status",
+            arguments: #"{"job_id":"j9"}"#
+        )
+        #expect(status == .getJobStatus(jobID: "j9"))
+    }
+
+    @Test("steer の別名と instruction / body / message を読む")
+    func mapsSteerAliasesAndArgumentKeys() {
+        let steer = VoiceToolCallHandler.action(
+            for: "steer",
+            arguments: #"{"job_id":"j1","message":"左側を優先"}"#
+        )
+        #expect(steer == .steerJob(jobID: "j1", instruction: "左側を優先"))
+
+        let bodySteer = VoiceToolCallHandler.action(
+            for: "steer_job",
+            arguments: #"{"body":"急いで"}"#
+        )
+        #expect(bodySteer == .steerJob(jobID: nil, instruction: "急いで"))
+    }
+
+    @Test("statusSummary は title / status / phase / pending をまとめる")
+    func buildsStatusSummary() {
+        let detail = RoomJobDetail(
+            jobID: "j1",
+            title: "調査タスク",
+            status: "waiting_for_input",
+            latestEvent: RoomEvent(
+                id: "e1",
+                jobID: "j1",
+                phase: .researching,
+                kind: nil,
+                text: "資料を読んでいる"
+            ),
+            pendingQuestions: [
+                RoomPendingQuestion(id: "q1", question: "続けますか？", status: "pending"),
+            ]
+        )
+        let summary = VoiceJobQuestionParser.statusSummary(from: detail)
+        #expect(summary.contains("調査タスク"))
+        #expect(summary.contains("waiting_for_input"))
+        #expect(summary.contains("調査中"))
+        #expect(summary.contains("資料を読んでいる"))
+        #expect(summary.contains("質問: 続けますか？"))
+    }
+
+    @Test("JobSteerResponse の created_at は Int でも decode する")
+    func decodesSteerCreatedAtAsInt() throws {
+        let json = """
+        {"job_id":"j1","seq":2,"text":"急いで","created_at":1700000000,"delivered":true}
+        """
+        let response = try JSONDecoder().decode(JobSteerResponse.self, from: Data(json.utf8))
+        #expect(response.createdAt == Date(timeIntervalSince1970: 1_700_000_000))
+    }
 }

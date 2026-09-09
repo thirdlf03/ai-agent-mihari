@@ -99,6 +99,39 @@ struct VoiceConversationControllerTests {
         func listRunning() async throws -> [RoomJobDetail] { [] }
     }
 
+    private final class TrackingJobCollaboration: VoiceJobCollaborating, @unchecked Sendable {
+        private let lock = NSLock()
+        private(set) var steerCalls: [(jobID: String, instruction: String)] = []
+        private(set) var answerCalls: [(jobID: String, questionID: String, answer: String)] = []
+
+        func submitJob(title: String, body: String) async throws -> JobRequestResponse {
+            JobRequestResponse(jobID: "job-active", status: "queued")
+        }
+
+        func steer(jobID: String, instruction: String) async throws -> JobSteerResponse {
+            lock.withLock { steerCalls.append((jobID, instruction)) }
+            return JobSteerResponse(jobID: jobID, seq: 1, text: instruction, delivered: true)
+        }
+
+        func answerQuestion(
+            jobID: String,
+            questionID: String,
+            answer: String
+        ) async throws -> JobQuestionAnswerResponse {
+            lock.withLock { answerCalls.append((jobID, questionID, answer)) }
+            return JobQuestionAnswerResponse(
+                jobID: jobID,
+                question: RoomPendingQuestion(id: questionID, question: "?", status: "answered", answer: answer)
+            )
+        }
+
+        func fetchJob(jobID: String) async throws -> RoomJobDetail {
+            RoomJobDetail(jobID: jobID, status: "running", pendingQuestions: [])
+        }
+
+        func listRunning() async throws -> [RoomJobDetail] { [] }
+    }
+
     private struct StubScreenCapture: VoiceScreenCapturing {
         func captureMouseDisplayPNG() async throws -> VoiceScreenCaptureResult {
             VoiceScreenCaptureResult(pngData: Data([0x89, 0x50, 0x4E, 0x47]), displayTitle: "Main", displayID: 1)
@@ -108,7 +141,8 @@ struct VoiceConversationControllerTests {
     private func makeController(
         socket: ScriptedSocket,
         player: SpeechPlayer = SpeechPlayer(),
-        factory: ScriptedSocketFactory? = nil
+        factory: ScriptedSocketFactory? = nil,
+        jobCollaboration: (any VoiceJobCollaborating)? = nil
     ) -> (VoiceConversationController, StubMic, ScriptedSocket, ScriptedSocketFactory) {
         let factory = factory ?? ScriptedSocketFactory()
         factory.queue(socket)
@@ -152,7 +186,7 @@ struct VoiceConversationControllerTests {
                     session: session
                 ),
                 micFactory: { stubMic },
-                jobCollaboration: StubJobCollaboration(),
+                jobCollaboration: jobCollaboration ?? StubJobCollaboration(),
                 screenCapture: StubScreenCapture(),
                 onJobSubmitted: nil
             )
@@ -328,6 +362,82 @@ struct VoiceConversationControllerTests {
         try await Task.sleep(for: .milliseconds(1200))
 
         #expect(factory.makeCount == 2)
+
+        controller.stop()
+    }
+
+    @Test("steer_job ツールで room へ指示を送る")
+    func handlesSteerJobToolCall() async throws {
+        let socket = ScriptedSocket()
+        let jobs = TrackingJobCollaboration()
+        let (controller, _, _, _) = makeController(socket: socket, jobCollaboration: jobs)
+        controller.start()
+
+        try await Task.sleep(for: .milliseconds(100))
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        socket.feed(
+            #"{"type":"assistant.tool_call","name":"submit_job","call_id":"c0","arguments":"{\"body\":\"調査して\"}"}"#
+        )
+        try await Task.sleep(for: .milliseconds(200))
+        socket.feed(
+            #"{"type":"assistant.tool_call","name":"steer_job","call_id":"c1","arguments":"{\"instruction\":\"左側を優先\"}"}"#
+        )
+        try await Task.sleep(for: .milliseconds(200))
+
+        #expect(jobs.steerCalls.count == 1)
+        #expect(jobs.steerCalls[0].jobID == "job-active")
+        #expect(jobs.steerCalls[0].instruction == "左側を優先")
+        #expect(controller.messages.contains(where: {
+            $0.role == .system && $0.text.contains("指示を送った")
+        }))
+
+        controller.stop()
+    }
+
+    @Test("show_job_question で pendingQuestions に載せ、回答を room へ送る")
+    func handlesPendingQuestionFlow() async throws {
+        let socket = ScriptedSocket()
+        let jobs = TrackingJobCollaboration()
+        let (controller, _, _, _) = makeController(socket: socket, jobCollaboration: jobs)
+        controller.start()
+
+        try await Task.sleep(for: .milliseconds(100))
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        socket.feed(
+            #"{"type":"assistant.tool_call","name":"show_job_question","call_id":"c2","arguments":"{\"job_id\":\"j1\",\"question_id\":\"q1\",\"prompt\":\"続けますか？\"}"}"#
+        )
+        try await Task.sleep(for: .milliseconds(200))
+
+        #expect(controller.pendingQuestions.count == 1)
+        #expect(controller.pendingQuestions[0].questionID == "q1")
+        #expect(controller.pendingQuestions[0].prompt == "続けますか？")
+
+        controller.submitPendingQuestionAnswer("はい", questionID: "q1")
+        try await Task.sleep(for: .milliseconds(200))
+
+        #expect(jobs.answerCalls.count == 1)
+        #expect(jobs.answerCalls[0].answer == "はい")
+        #expect(controller.pendingQuestions.isEmpty)
+
+        controller.stop()
+    }
+
+    @Test("error フレームは system メッセージになる")
+    func handlesErrorFrame() async throws {
+        let socket = ScriptedSocket()
+        let (controller, _, _, _) = makeController(socket: socket)
+        controller.start()
+
+        try await Task.sleep(for: .milliseconds(100))
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        socket.feed(
+            #"{"type":"error","code":"upstream_error","message":"Realtime が落ちた"}"#
+        )
+        try await Task.sleep(for: .milliseconds(200))
+
+        #expect(controller.messages.contains(where: {
+            $0.role == .system && $0.text.contains("エラー: Realtime が落ちた")
+        }))
 
         controller.stop()
     }
