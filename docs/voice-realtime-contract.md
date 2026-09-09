@@ -4,6 +4,8 @@ Epic: [#35](https://github.com/thirdlf03/ai-agent-mihari/issues/35) / room 実�
 
 OpenAI Realtime（`gpt-realtime-2.1-mini`）への接続は **room のみ** が行う。API キーは room 環境変数（`MIHARI_OPENAI_API_KEY` または `OPENAI_API_KEY`）に置き、desktop へは渡さない。
 
+room 側のローカル試行・pytest・課金確認手順: [`voice-realtime-room-trial.md`](./voice-realtime-room-trial.md)
+
 ## 認証
 
 既存の `X-Mihari-Token`（`mihari_room.auth.verify_token` / `TOKEN_HEADER`）。

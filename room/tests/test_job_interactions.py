@@ -151,6 +151,68 @@ def test_steer_adds_instruction_to_running_job(tmp_path: Path) -> None:
         released.set()
 
 
+def test_steer_allowed_during_waiting_for_input(tmp_path: Path) -> None:
+    gate = asyncio.Event()
+
+    async def hold(_job: Job) -> None:
+        await gate.wait()
+
+    worker = InteractiveWorker(on_start=hold)
+    client, _, store, w = _make_app(tmp_path, worker=worker)
+    hub: JobInteractionHub = client.app.state.job_interactions  # type: ignore[attr-defined]
+    with client:
+        created = client.post(
+            "/jobs", json={"title": "入力待ち", "body": "x", "source": "pet"}, headers=_auth()
+        ).json()
+        job_id = created["job_id"]
+        for _ in range(50):
+            if store.get(job_id).status is JobStatus.RUNNING:
+                break
+            import time
+
+            time.sleep(0.01)
+        job = store.get(job_id)
+        hub.register_question(job, "色は？", ["red", "blue"])
+        assert store.get(job_id).status is JobStatus.WAITING_FOR_INPUT
+        resp = client.post(
+            f"/jobs/{job_id}/steer",
+            json={"text": "左側を優先して"},
+            headers=_auth(),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["delivered"] is True
+        assert w.steers == ["左側を優先して"]
+        gate.set()
+
+
+def test_jobs_running_includes_waiting_for_input(tmp_path: Path) -> None:
+    gate = asyncio.Event()
+
+    async def hold(_job: Job) -> None:
+        await gate.wait()
+
+    worker = InteractiveWorker(on_start=hold)
+    client, _, store, _ = _make_app(tmp_path, worker=worker)
+    hub: JobInteractionHub = client.app.state.job_interactions  # type: ignore[attr-defined]
+    with client:
+        created = client.post(
+            "/jobs", json={"title": "机占有", "body": "x", "source": "pet"}, headers=_auth()
+        ).json()
+        job_id = created["job_id"]
+        for _ in range(50):
+            if store.get(job_id).status is JobStatus.RUNNING:
+                break
+            import time
+
+            time.sleep(0.01)
+        hub.register_question(store.get(job_id), "待て", None)
+        assert store.get(job_id).status is JobStatus.WAITING_FOR_INPUT
+        running = client.get("/jobs/running", headers=_auth()).json()["jobs"]
+        assert [j["job_id"] for j in running] == [job_id]
+        assert running[0]["status"] == "waiting_for_input"
+        gate.set()
+
+
 def test_steer_rejected_when_not_running(tmp_path: Path) -> None:
     client, _, store, _ = _make_app(tmp_path, start_pump=False)
     created = client.post(
