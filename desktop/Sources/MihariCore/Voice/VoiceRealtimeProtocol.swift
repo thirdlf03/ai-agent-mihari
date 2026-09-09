@@ -6,6 +6,7 @@ enum VoiceRealtimeProtocol {
 
     enum EventType {
         static let sessionReady = "session.ready"
+        static let historySync = "history.sync"
         static let inputAudio = "input.audio"
         static let inputImage = "input.image"
         static let assistantText = "assistant.text"
@@ -56,9 +57,63 @@ struct VoiceSessionStatusResponse: Decodable, Equatable, Sendable {
     }
 }
 
+/// `history.sync` の 1 行。マイク音声は含めない。
+struct VoiceHistorySyncEntry: Equatable, Sendable {
+    let role: String
+    let text: String
+    let timestamp: Date
+    let kind: String
+    let toolName: String
+    let toolArguments: String
+
+    static func parse(from raw: [String: Any]) -> VoiceHistorySyncEntry? {
+        guard let role = raw["role"] as? String else { return nil }
+        let text = raw["text"] as? String ?? ""
+        let ts: Double
+        if let value = raw["ts"] as? Double {
+            ts = value
+        } else if let value = raw["ts"] as? NSNumber {
+            ts = value.doubleValue
+        } else {
+            ts = 0
+        }
+        return VoiceHistorySyncEntry(
+            role: role,
+            text: text,
+            timestamp: Date(timeIntervalSince1970: ts),
+            kind: raw["kind"] as? String ?? "text",
+            toolName: raw["tool_name"] as? String ?? "",
+            toolArguments: raw["tool_arguments"] as? String ?? ""
+        )
+    }
+
+    /// 会話 UI 用の 1 行に写す。room の履歴が正。
+    func asConversationMessage() -> VoiceConversationMessage? {
+        switch role {
+        case "user":
+            guard !text.isEmpty else { return nil }
+            return VoiceConversationMessage(role: .user, text: text, timestamp: timestamp)
+        case "assistant":
+            if kind == "tool_call" {
+                let label = toolName.isEmpty ? "（名前なし）" : toolName
+                return VoiceConversationMessage(
+                    role: .system,
+                    text: "ツール呼び出し: \(label)",
+                    timestamp: timestamp
+                )
+            }
+            guard !text.isEmpty else { return nil }
+            return VoiceConversationMessage(role: .assistant, text: text, timestamp: timestamp)
+        default:
+            return nil
+        }
+    }
+}
+
 /// room → client の 1 フレーム。
 enum VoiceIncomingFrame: Equatable, Sendable {
     case sessionReady(sessionID: String, model: String)
+    case historySync(messages: [VoiceHistorySyncEntry])
     case assistantText(delta: String, text: String, done: Bool)
     case assistantToolCall(name: String, callID: String, arguments: String)
     case error(code: String, message: String)
@@ -78,6 +133,10 @@ enum VoiceIncomingFrame: Equatable, Sendable {
                 sessionID: json["session_id"] as? String ?? "",
                 model: json["model"] as? String ?? ""
             )
+        case VoiceRealtimeProtocol.EventType.historySync:
+            let rawMessages = json["messages"] as? [[String: Any]] ?? []
+            let messages = rawMessages.compactMap(VoiceHistorySyncEntry.parse(from:))
+            return .historySync(messages: messages)
         case VoiceRealtimeProtocol.EventType.assistantText:
             return .assistantText(
                 delta: json["delta"] as? String ?? "",

@@ -34,4 +34,40 @@ struct VoiceRealtimeProtocolTests {
         let frame = VoiceIncomingFrame.parse(data: Data(json.utf8))
         #expect(frame == .sessionReady(sessionID: "abc", model: "gpt-realtime-2.1-mini"))
     }
+
+    @Test("history.sync を messages 付きで読む")
+    func parsesHistorySync() {
+        let json = """
+        {"type":"history.sync","messages":[\
+        {"role":"user","text":"こんにちは","ts":1.0,"kind":"text"},\
+        {"role":"assistant","text":"やあ","ts":2.0,"kind":"text"},\
+        {"role":"user","text":"画面見て","ts":3.0,"kind":"image_prompt"}\
+        ]}
+        """
+        let frame = VoiceIncomingFrame.parse(data: Data(json.utf8))
+        guard case .historySync(let messages) = frame else {
+            Issue.record("history.sync として解釈されるべき")
+            return
+        }
+        #expect(messages.count == 3)
+        #expect(messages[0].role == "user")
+        #expect(messages[0].text == "こんにちは")
+        #expect(messages[0].kind == "text")
+        #expect(messages[2].kind == "image_prompt")
+    }
+
+    @Test("history.sync の tool_call は system メッセージになる")
+    func mapsToolCallEntry() {
+        let entry = VoiceHistorySyncEntry(
+            role: "assistant",
+            text: "",
+            timestamp: Date(timeIntervalSince1970: 0),
+            kind: "tool_call",
+            toolName: "echo_phrase",
+            toolArguments: #"{"phrase":"hi"}"#
+        )
+        let message = entry.asConversationMessage()
+        #expect(message?.role == .system)
+        #expect(message?.text == "ツール呼び出し: echo_phrase")
+    }
 }

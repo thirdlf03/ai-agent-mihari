@@ -184,6 +184,10 @@ public final class VoiceConversationController: ObservableObject {
             appendSystem("セッション \(sessionID) が準備できた")
             return true
 
+        case .historySync(let entries):
+            applyHistorySync(entries)
+            return false
+
         case .assistantText(let delta, let text, let done):
             let piece = !delta.isEmpty ? delta : text
             guard !piece.isEmpty else {
@@ -413,6 +417,14 @@ public final class VoiceConversationController: ObservableObject {
 
     private func appendMessage(_ message: VoiceConversationMessage) {
         messages.append(message)
+    }
+
+    /// room から送られた `history.sync` でローカル履歴を置き換える。
+    private func applyHistorySync(_ entries: [VoiceHistorySyncEntry]) {
+        pendingAssistantText = ""
+        currentAssistantMessageID = nil
+        messages = entries.compactMap { $0.asConversationMessage() }
+        statusText = "履歴を同期した（\(messages.count) 件）"
     }
 
     private func closeSocket() {

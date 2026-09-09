@@ -145,6 +145,36 @@ struct VoiceConversationControllerTests {
         }
     }
 
+    @Test("history.sync でローカル履歴を room の内容に置き換える")
+    func historySyncReplacesLocalMessages() async throws {
+        let socket = ScriptedSocket()
+        let (controller, _, _, _) = makeController(socket: socket)
+        controller.start()
+
+        try await Task.sleep(for: .milliseconds(100))
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        socket.feed(
+            """
+            {"type":"history.sync","messages":[\
+            {"role":"user","text":"以前の質問","ts":10.0,"kind":"text"},\
+            {"role":"assistant","text":"以前の回答","ts":11.0,"kind":"text"}\
+            ]}
+            """
+        )
+
+        try await Task.sleep(for: .milliseconds(100))
+
+        #expect(controller.messages.count == 2)
+        #expect(controller.messages[0].role == .user)
+        #expect(controller.messages[0].text == "以前の質問")
+        #expect(controller.messages[1].role == .assistant)
+        #expect(controller.messages[1].text == "以前の回答")
+        #expect(!controller.messages.contains(where: { $0.text == "会話を開始した" }))
+        #expect(controller.statusText.contains("履歴を同期"))
+
+        controller.stop()
+    }
+
     @Test("session.ready で ready になり、assistant.text が履歴に載る")
     func handlesAssistantText() async throws {
         let socket = ScriptedSocket()
