@@ -4,9 +4,22 @@ from __future__ import annotations
 
 import hmac
 
-from fastapi import Header, HTTPException, Request, status
+from fastapi import Header, HTTPException, Request, WebSocket, status
 
 from mihari_room.config import TOKEN_HEADER
+
+
+def ws_token_candidate(websocket: WebSocket) -> str:
+    """WebSocket の合言葉。ヘッダ優先、無ければ query ``token``。"""
+    raw_header = websocket.headers.get(TOKEN_HEADER.lower()) or ""
+    raw_query = websocket.query_params.get("token") or ""
+    return raw_header or raw_query
+
+
+def verify_ws_token(websocket: WebSocket, expected: str) -> bool:
+    """WebSocket 接続前の合言葉検証。Mac 操作 WS と同じ 4401 で拒否する。"""
+    candidate = ws_token_candidate(websocket)
+    return bool(candidate) and hmac.compare_digest(candidate, expected)
 
 
 def verify_token(request: Request, x_mihari_token: str | None = Header(default=None)) -> None:
