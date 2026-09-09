@@ -38,6 +38,8 @@ from mihari_room.persona import (
     preview_posted_line,
     publish_failed_line,
     restart_line,
+    screenshot_followup_posted_line,
+    screenshot_posted_line,
     start_line,
     temp_deploy_posted_line,
     thread_create_failed_line,
@@ -55,9 +57,12 @@ EXPECTED_UTTERANCE_LIMIT = 30
 #: 固定文言一式。ここを足すときはテストの一覧も足す。
 FIXED_LINES: dict[str, str] = {
     "accepted": accepted_line("仕様まとめ"),
+    "screenshot_posted": screenshot_posted_line(1),
+    "screenshot_posted_many": screenshot_posted_line(2),
     "start": start_line("仕様まとめ"),
     "restart": restart_line("仕様まとめ"),
     "followup_queued": followup_queued_line("仕様まとめ"),
+    "screenshot_followup_posted": screenshot_followup_posted_line(1),
     "followup_again": followup_again_line(),
     "cancelled_journal": cancelled_line(),
     "cancel_accepted": cancel_accepted_line(),

@@ -53,9 +53,11 @@ SOFTWARE.
 - **markdown-it-py** — Markdown の表示用 HTML 化（MarkdownIt の Python 移植）。
   MIT License。アップストリーム: https://github.com/executablebooks/markdown-it-py
   Hermes 等の Markdown 表示に同梱して使い、生 HTML は無効・CDN 不使用で描画する
-- **fpdf2** — Markdown → PDF の専用レンダラーの PDF 出力基盤。
+- **fpdf2** — Markdown → PDF の控えレンダラー（Playwright が無いとき）。
   MIT License（LGPL 時代の fpdf からフォークして再ライセンス）。アップストリーム:
   https://github.com/PyFPDF/fpdf2
+- **Playwright** — Markdown → PDF の既定エンジン。プレビュー HTML を Chromium で印刷する。
+  Apache License 2.0。アップストリーム: https://github.com/microsoft/playwright-python
 - **Pillow** — PDF 内への画像埋め込み（fpdf2 の依存）。HPND ライセンス
 - **fontTools** — フォントのサブセット化（fpdf2 の依存）。MIT License
 

@@ -288,6 +288,44 @@ public enum ScreenshotCaptureService {
             throw CaptureError.screenCaptureFailed(reason: error.localizedDescription)
         }
 
+        return try makeCapture(image: image, filter: filter, source: ResolvedScreenshotSource(target: target))
+    }
+
+    /// システムの対象選びが返したフィルタから 1 枚撮る。ストリームは開始しない。
+    public static func capturePNG(
+        filter: SCContentFilter,
+        checkPermission: @Sendable () -> PermissionState = { PermissionChecker.check(.screenRecording) }
+    ) async throws -> ScreenshotCapture {
+        let permission = checkPermission()
+        guard permission.grant == .granted else {
+            throw CaptureError.screenRecordingPermissionNotGranted(detail: permission.detail)
+        }
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.current
+        } catch {
+            throw CaptureError.screenCaptureFailed(reason: error.localizedDescription)
+        }
+        let image: CGImage
+        do {
+            image = try await captureImage(filter: filter)
+        } catch {
+            throw CaptureError.screenCaptureFailed(reason: error.localizedDescription)
+        }
+        let source = resolveSource(
+            styleHint: sourceKind(for: filter.style),
+            contentRect: filter.contentRect,
+            displays: displaySnapshots(from: content.displays, screens: NSScreen.screens),
+            windows: windowSnapshots(from: content.windows)
+        )
+        return try makeCapture(image: image, filter: filter, source: source)
+    }
+
+    private static func makeCapture(
+        image: CGImage,
+        filter: SCContentFilter,
+        source: ResolvedScreenshotSource
+    ) throws -> ScreenshotCapture {
         let pngData = try CaptureImageCodec.pngData(from: image)
         let pointWidth = filter.contentRect.width
         let pointHeight = filter.contentRect.height
@@ -299,17 +337,17 @@ public enum ScreenshotCaptureService {
         logger.info("キャプチャに成功した: \(image.width, privacy: .public)x\(image.height, privacy: .public)")
         return ScreenshotCapture(
             pngData: pngData,
-            kind: target.kind,
-            title: target.title,
-            displayID: target.displayID,
-            windowID: target.windowID,
+            kind: source.kind,
+            title: source.title,
+            displayID: source.displayID,
+            windowID: source.windowID,
             pixelWidth: image.width,
             pixelHeight: image.height,
             pointWidth: pointWidth,
             pointHeight: pointHeight,
             backingScale: scale,
-            frameX: target.frameX,
-            frameY: target.frameY
+            frameX: source.frameX,
+            frameY: source.frameY
         )
     }
 
@@ -328,14 +366,204 @@ public enum ScreenshotCaptureService {
             }
             filter = SCContentFilter(desktopIndependentWindow: window)
         }
+        let image = try await captureImage(filter: filter)
+        return (image, filter)
+    }
+
+    private static func captureImage(filter: SCContentFilter) async throws -> CGImage {
         let configuration = SCStreamConfiguration()
         let scale = filter.pointPixelScale > 0 ? Double(filter.pointPixelScale) : 1.0
         configuration.width = max(1, Int((filter.contentRect.width * scale).rounded()))
         configuration.height = max(1, Int((filter.contentRect.height * scale).rounded()))
         configuration.showsCursor = true
         configuration.captureResolution = .best
-        let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
-        return (image, filter)
+        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+    }
+
+    /// フィルタの種類から、ウィンドウ撮るか画面撮るかを決める。
+    static func sourceKind(for style: SCShareableContentStyle) -> ScreenshotSourceKind? {
+        switch style {
+        case .window: return .window
+        case .display: return .display
+        case .none, .application: return nil
+        @unknown default: return nil
+        }
+    }
+
+    /// 撮った領域がどの画面・ウィンドウかを、矩形の重なりから決める。
+    static func resolveSource(
+        styleHint: ScreenshotSourceKind?,
+        contentRect: CGRect,
+        displays: [DisplaySnapshot],
+        windows: [WindowSnapshot]
+    ) -> ResolvedScreenshotSource {
+        if styleHint != .display, let window = matchingWindow(contentRect, windows: windows) {
+            let displayID =
+                containingDisplay(center: CGPoint(x: contentRect.midX, y: contentRect.midY), displays: displays)?
+                .displayID
+                ?? displays.first?.displayID
+                ?? CGMainDisplayID()
+            return ResolvedScreenshotSource(
+                kind: .window,
+                title: window.title,
+                displayID: displayID,
+                windowID: window.windowID,
+                frameX: contentRect.origin.x,
+                frameY: contentRect.origin.y
+            )
+        }
+
+        if let display = matchingDisplay(contentRect, displays: displays)
+            ?? containingDisplay(center: CGPoint(x: contentRect.midX, y: contentRect.midY), displays: displays)
+        {
+            return ResolvedScreenshotSource(
+                kind: .display,
+                title: display.title,
+                displayID: display.displayID,
+                windowID: nil,
+                frameX: contentRect.origin.x,
+                frameY: contentRect.origin.y
+            )
+        }
+
+        return ResolvedScreenshotSource(
+            kind: styleHint ?? .display,
+            title: styleHint == .window ? "ウィンドウ" : "選択した画面",
+            displayID: CGMainDisplayID(),
+            windowID: nil,
+            frameX: contentRect.origin.x,
+            frameY: contentRect.origin.y
+        )
+    }
+
+    /// 自動テスト用。ディスプレイの位置と表示名。
+    struct DisplaySnapshot: Equatable, Sendable {
+        var displayID: UInt32
+        var bounds: CGRect
+        var title: String
+    }
+
+    /// 自動テスト用。ウィンドウの位置と表示名。
+    struct WindowSnapshot: Equatable, Sendable {
+        var windowID: UInt32
+        var frame: CGRect
+        var title: String
+    }
+
+    /// 撮った画像に添える、画面またはウィンドウのメタデータ。
+    struct ResolvedScreenshotSource: Equatable, Sendable {
+        var kind: ScreenshotSourceKind
+        var title: String
+        var displayID: UInt32
+        var windowID: UInt32?
+        var frameX: Double
+        var frameY: Double
+
+        init(
+            kind: ScreenshotSourceKind,
+            title: String,
+            displayID: UInt32,
+            windowID: UInt32? = nil,
+            frameX: Double,
+            frameY: Double
+        ) {
+            self.kind = kind
+            self.title = title
+            self.displayID = displayID
+            self.windowID = windowID
+            self.frameX = frameX
+            self.frameY = frameY
+        }
+
+        init(target: ScreenshotTarget) {
+            self.init(
+                kind: target.kind,
+                title: target.title,
+                displayID: target.displayID,
+                windowID: target.windowID,
+                frameX: target.frameX,
+                frameY: target.frameY
+            )
+        }
+    }
+
+    private static func matchingWindow(_ rect: CGRect, windows: [WindowSnapshot]) -> WindowSnapshot? {
+        if let exact = windows.first(where: { rectsMatch($0.frame, rect, tolerance: 8) }) {
+            return exact
+        }
+        return
+            windows
+            .map { (window: $0, score: intersectionOverUnion($0.frame, rect)) }
+            .filter { $0.score >= 0.6 }
+            .max { $0.score < $1.score }?
+            .window
+    }
+
+    private static func matchingDisplay(_ rect: CGRect, displays: [DisplaySnapshot]) -> DisplaySnapshot? {
+        displays.first { rectsMatch($0.bounds, rect, tolerance: 8) }
+    }
+
+    private static func containingDisplay(center: CGPoint, displays: [DisplaySnapshot]) -> DisplaySnapshot? {
+        displays.first { $0.bounds.contains(center) }
+    }
+
+    private static func rectsMatch(_ a: CGRect, _ b: CGRect, tolerance: CGFloat) -> Bool {
+        abs(a.origin.x - b.origin.x) <= tolerance
+            && abs(a.origin.y - b.origin.y) <= tolerance
+            && abs(a.width - b.width) <= tolerance
+            && abs(a.height - b.height) <= tolerance
+    }
+
+    private static func intersectionOverUnion(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        let inter = a.intersection(b)
+        guard !inter.isNull, !inter.isEmpty else { return 0 }
+        let unionArea = a.width * a.height + b.width * b.height - inter.width * inter.height
+        guard unionArea > 0 else { return 0 }
+        return (inter.width * inter.height) / unionArea
+    }
+
+    private static func displaySnapshots(from displays: [SCDisplay], screens: [NSScreen]) -> [DisplaySnapshot] {
+        displays.map { display in
+            let displayID = display.displayID
+            let pixelWidth = Int(CGDisplayPixelsWide(displayID))
+            let pixelHeight = Int(CGDisplayPixelsHigh(displayID))
+            return DisplaySnapshot(
+                displayID: displayID,
+                bounds: CGDisplayBounds(displayID),
+                title: displayTitle(
+                    displayID: displayID,
+                    pixelWidth: pixelWidth,
+                    pixelHeight: pixelHeight,
+                    screens: screens
+                )
+            )
+        }
+    }
+
+    private static func windowSnapshots(from windows: [SCWindow]) -> [WindowSnapshot] {
+        windows.map { window in
+            let appName = window.owningApplication?.applicationName ?? "アプリ"
+            let title = (window.title?.isEmpty == false) ? window.title! : "(無題)"
+            return WindowSnapshot(
+                windowID: window.windowID,
+                frame: window.frame,
+                title: "\(appName): \(title)"
+            )
+        }
+    }
+
+    private static func displayTitle(
+        displayID: UInt32,
+        pixelWidth: Int,
+        pixelHeight: Int,
+        screens: [NSScreen]
+    ) -> String {
+        let name =
+            screens.first {
+                ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+                    == displayID
+            }?.localizedName ?? "ディスプレイ"
+        return "\(name) (\(pixelWidth)×\(pixelHeight))"
     }
 
     // MARK: - 座標・倍率のメタデータ（純粋関数。自動テストの対象）

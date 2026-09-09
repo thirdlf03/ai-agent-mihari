@@ -42,6 +42,8 @@ from mihari_room.persona import (
     followup_queued_line,
     publish_failed_line,
     restart_line,
+    screenshot_followup_posted_line,
+    screenshot_posted_line,
     start_line,
     temp_deploy_posted_line,
     thread_create_failed_line,
@@ -158,8 +160,8 @@ class RoomOrchestrator:
     ) -> Job:
         """新しい仕事。ペット経由ならスレッドを切る。Forum 直なら thread_id 済み。"""
         job = self._store.create(request)
+        saved_shots = self._save_screenshots(job.id, screenshots)
         self._save_attachments(job.id, attachments)
-        self._save_screenshots(job.id, screenshots)
         if job.thread_id is None:
             try:
                 thread_id = await self._board.create_thread(job)
@@ -177,6 +179,9 @@ class RoomOrchestrator:
                 raise RuntimeError(f"Forum スレッドが切れない: {exc}") from exc
             job = self._store.set_thread_id(job.id, thread_id)
         await self._board.set_tag(self._require_thread(job), JobStatus.QUEUED)
+        await self._share_screenshots_on_forum(
+            job, saved_shots, note=screenshot_posted_line(len(saved_shots))
+        )
         self._queue.enqueue(job)
         self._journal(job.id).append(
             job_id=job.id,
@@ -221,8 +226,13 @@ class RoomOrchestrator:
         job = self._store.get(job_id)
         self._write_followup(job.id, body)
         self._save_attachments(job.id, attachments)
-        self._save_screenshots(job.id, screenshots)
+        saved_shots = self._save_screenshots(job.id, screenshots)
         current = self._store.get(job.id)
+        await self._share_screenshots_on_forum(
+            current,
+            saved_shots,
+            note=screenshot_followup_posted_line(len(saved_shots)),
+        )
         if current.status is JobStatus.RUNNING:
             (self._store.job_dir(job.id) / REQUEUE_FILENAME).write_text("1", encoding="utf-8")
             return current
@@ -577,14 +587,17 @@ class RoomOrchestrator:
     #: 認める拡張子。PNG/JPEG 系はそのまま画像として Hermes に載せられる。
     _SCREENSHOT_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
-    def _save_screenshots(self, job_id: str, screenshots: Sequence[ScreenshotAttachment]) -> None:
+    def _save_screenshots(
+        self, job_id: str, screenshots: Sequence[ScreenshotAttachment]
+    ) -> list[Path]:
         """スクショを input/screenshots/<seq>.<ext> に保存する。
 
         撮影メタデータ（scale・座標など）は <seq>.json に置く。成果物公開の対象は
         output/ だけなので、ここに置いた限り自動で公開されない。
         """
+        saved: list[Path] = []
         if not screenshots:
-            return
+            return saved
         folder = self._store.input_dir(job_id) / SCREENSHOTS_DIRNAME
         folder.mkdir(parents=True, exist_ok=True)
         for upload in screenshots:
@@ -599,6 +612,30 @@ class RoomOrchestrator:
             (folder / f"{seq:04d}.json").write_text(
                 json.dumps(meta, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8"
             )
+            saved.append(target)
+        return saved
+
+    async def _share_screenshots_on_forum(
+        self, job: Job, paths: Sequence[Path], *, note: str
+    ) -> None:
+        """依頼のスクショを Forum スレッドへ載せる。失敗しても仕事は止めない。
+
+        Mac 操作中の撮影（``.mac/``）は対象外。成果物公開にも載せない。
+        """
+        existing = [path for path in paths if path.is_file()]
+        if not existing or job.thread_id is None:
+            return
+        names = [_forum_screenshot_name(path) for path in existing]
+        try:
+            await self._board.post_files(
+                job.thread_id, existing, note=note, filenames=names
+            )
+        except Exception:
+            logger.exception("スクショを Forum に載せられなかった job=%s", job.id)
+            try:
+                await self._board.post_log(job.thread_id, "スクショをスレッドに載せられなかったよ")
+            except Exception:
+                logger.exception("スクショ添付失敗の通知もできなかった job=%s", job.id)
 
     def _next_screenshot_seq(self, folder: Path) -> int:
         """置き場にある画像の次の連番。並行で同じ番号を引かないよう冪等に数える。"""
@@ -632,6 +669,19 @@ class RoomOrchestrator:
         if job is None:
             raise JobNotFound(f"thread {thread_id}")
         return job
+
+
+def _forum_screenshot_name(path: Path) -> str:
+    """Discord 添付に出す名前。撮影時の元ファイル名があればそれを使う。"""
+    meta_path = path.with_suffix(".json")
+    try:
+        raw = json.loads(meta_path.read_text(encoding="utf-8"))
+        original = Path(str(raw.get("original_filename") or "")).name
+        if original:
+            return original
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
+    return path.name
 
 
 def _read_failure_reason(job: Job) -> str | None:

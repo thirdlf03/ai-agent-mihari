@@ -112,7 +112,7 @@ sudo -u mihari env UV_PROJECT_ENVIRONMENT=/var/lib/mihari/room-venv \
 ```
 
 `uv sync --locked` が `pyproject.toml` の依存（fastapi / uvicorn / httpx /
-python-dotenv / discord-py / pypdf / markdown-it-py / fpdf2、dev は ruff /
+python-dotenv / discord-py / pypdf / markdown-it-py / fpdf2 / playwright、dev は ruff /
 pytest）を lock どおり入れる。
 `UV_PROJECT_ENVIRONMENT` で venv を `/var/lib/mihari/room-venv` に固定し、
 `MIHARI_ROOM_PYTHON=/var/lib/mihari/room-venv/bin/python` を env に入れる。
@@ -122,18 +122,27 @@ pytest）を lock どおり入れる。
 - `pypdf` — PDF のページ単位テキスト抽出（`pdf_info` / `pdf_text`）
 - Poppler（`pdftoppm`）— PDF のページ画像化（`pdf_pages`）
 - Tesseract（日本語+英語の言語データ込み）— ページ画像の OCR（`pdf_ocr`）
-- `markdown-it-py` / 同梱 IPAexGothic フォント — Markdown の表示 HTML・PDF（`markdown_pdf`）
+- `markdown-it-py` — Markdown の表示 HTML。`markdown_pdf` は同じ HTML を Chromium 印刷する
+- `playwright`（Chromium headless shell）— `markdown_pdf` の既定エンジン。無いときは fpdf2
+- `fpdf2` / 同梱 IPAexGothic — Playwright が無い環境向けの控え PDF
 
 Poppler と Tesseract は OS のパッケージで入れる（in-process ツールが固定引数で
-呼ぶ。shell 権限は不要）。
+呼ぶ。shell 権限は不要）。Chromium 印刷用に CJK フォントも入れる。
 
 ```sh
-sudo apt-get install -y poppler-utils tesseract-ocr tesseract-ocr-jpn tesseract-ocr-eng
+sudo apt-get install -y poppler-utils tesseract-ocr tesseract-ocr-jpn tesseract-ocr-eng \
+    fonts-noto-cjk fonts-ipafont-gothic
+sudo /var/lib/mihari/room-venv/bin/playwright install-deps chromium
+sudo -u mihari mkdir -p /var/lib/mihari/pw-browsers
+sudo -u mihari env PLAYWRIGHT_BROWSERS_PATH=/var/lib/mihari/pw-browsers \
+    /var/lib/mihari/room-venv/bin/playwright install --only-shell chromium
 ```
 
 インストール先が標準と違う場合は `MIHARI_POPPLER_BIN` / `MIHARI_TESSERACT_BIN` で
 パスを明示できる。無い間はツールが `missing_poppler` / `missing_tesseract` を
 明示エラーとして返す（ジョブは失敗しない）。
+`PLAYWRIGHT_BROWSERS_PATH` を unit に書いて Chromium の置き場を固定する。
+systemd の `NoNewPrivileges` のため Chromium は `--no-sandbox` で起動する。
 
 ## 3. 環境変数
 
