@@ -15,6 +15,17 @@ struct VoiceRealtimeProtocolTests {
         #expect(frame == .assistantText(delta: "こん", text: "", done: false))
     }
 
+    @Test("input.image を base64 付きで組み立てる")
+    func buildsInputImage() throws {
+        let png = Data([0x89, 0x50, 0x4E, 0x47])
+        let text = try VoiceOutgoingFrame.inputImage(png: png, prompt: "Describe")
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        #expect(json["type"] as? String == "input.image")
+        #expect(json["image_base64"] as? String == png.base64EncodedString())
+        #expect(json["media_type"] as? String == "image/png")
+        #expect(json["prompt"] as? String == "Describe")
+    }
+
     @Test("input.audio を base64 付きで組み立てる")
     func buildsInputAudio() throws {
         let pcm = Data([0x01, 0x02, 0x03, 0x04])

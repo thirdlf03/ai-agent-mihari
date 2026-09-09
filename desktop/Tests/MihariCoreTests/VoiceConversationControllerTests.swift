@@ -80,6 +80,28 @@ struct VoiceConversationControllerTests {
         }
     }
 
+    private struct StubJobCollaboration: VoiceJobCollaborating {
+        func submitJob(title: String, body: String) async throws -> JobRequestResponse {
+            JobRequestResponse(jobID: "job-test", status: "queued")
+        }
+        func steer(jobID: String, instruction: String) async throws -> JobSteerResponse {
+            JobSteerResponse(jobID: jobID, status: "running")
+        }
+        func answerQuestion(jobID: String, questionID: String, answer: String) async throws -> JobQuestionAnswerResponse {
+            JobQuestionAnswerResponse(jobID: jobID, questionID: questionID, status: "running")
+        }
+        func fetchJob(jobID: String) async throws -> RoomJobDetail {
+            RoomJobDetail(jobID: jobID, status: "running")
+        }
+        func listRunning() async throws -> [RoomJobDetail] { [] }
+    }
+
+    private struct StubScreenCapture: VoiceScreenCapturing {
+        func captureMouseDisplayPNG() async throws -> VoiceScreenCaptureResult {
+            VoiceScreenCaptureResult(pngData: Data([0x89, 0x50, 0x4E, 0x47]), displayTitle: "Main", displayID: 1)
+        }
+    }
+
     private func makeController(
         socket: ScriptedSocket,
         player: SpeechPlayer = SpeechPlayer(),
@@ -126,7 +148,10 @@ struct VoiceConversationControllerTests {
                     ),
                     session: session
                 ),
-                micFactory: { stubMic }
+                micFactory: { stubMic },
+                jobCollaboration: StubJobCollaboration(),
+                screenCapture: StubScreenCapture(),
+                onJobSubmitted: nil
             )
         )
         return (controller, stubMic, socket, factory)
@@ -171,6 +196,33 @@ struct VoiceConversationControllerTests {
         #expect(controller.messages[1].text == "以前の回答")
         #expect(!controller.messages.contains(where: { $0.text == "会話を開始した" }))
         #expect(controller.statusText.contains("履歴を同期"))
+
+        controller.stop()
+    }
+
+    @Test("capture_screen ツールで input.image を送る")
+    func handlesCaptureScreenToolCall() async throws {
+        let socket = ScriptedSocket()
+        let (controller, _, _, _) = makeController(socket: socket)
+        controller.start()
+
+        try await Task.sleep(for: .milliseconds(100))
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        socket.feed(
+            #"{"type":"assistant.tool_call","name":"capture_screen","call_id":"c1","arguments":"{\"prompt\":\"見て\"}"}"#
+        )
+
+        try await Task.sleep(for: .milliseconds(200))
+
+        let sentImage = socket.sent.contains { text in
+            guard
+                let data = text.data(using: .utf8),
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return false }
+            return json["type"] as? String == "input.image"
+        }
+        #expect(sentImage)
+        #expect(controller.messages.contains(where: { $0.imageThumbnailPNG != nil }))
 
         controller.stop()
     }

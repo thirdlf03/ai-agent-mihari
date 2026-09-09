@@ -32,6 +32,14 @@ struct RoomJobDetailViewModelTests {
             if let operationError { throw operationError }
             return JobRequestResponse(jobID: jobID, threadID: nil, status: "queued")
         }
+        func steer(jobID: String, instruction: String) async throws -> JobSteerResponse {
+            if let operationError { throw operationError }
+            return JobSteerResponse(jobID: jobID, status: "running")
+        }
+        func answerQuestion(jobID: String, questionID: String, answer: String) async throws -> JobQuestionAnswerResponse {
+            if let operationError { throw operationError }
+            return JobQuestionAnswerResponse(jobID: jobID, questionID: questionID, status: "running")
+        }
         func cancel(jobID: String) async throws -> JobRequestResponse {
             if let operationError { throw operationError }
             return JobRequestResponse(jobID: jobID, threadID: nil, status: "cancelled")

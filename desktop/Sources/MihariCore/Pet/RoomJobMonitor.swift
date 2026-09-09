@@ -5,6 +5,8 @@ import os
 public enum RoomJobStatus: String, Sendable, Equatable, CaseIterable {
     case queued
     case running
+    /// Epic #35 / room #40: Hermes がユーザー入力待ち。
+    case waitingForInput = "waiting_for_input"
     case done
     case failed
     case cancelled
@@ -14,6 +16,7 @@ public enum RoomJobStatus: String, Sendable, Equatable, CaseIterable {
         switch self {
         case .queued: return "待ち"
         case .running: return "作業中"
+        case .waitingForInput: return "回答待ち"
         case .done: return "完了"
         case .failed: return "失敗"
         case .cancelled: return "中断"
@@ -773,6 +776,7 @@ public final class RoomJobMonitor: ObservableObject {
         case .done: return .done
         case .failed: return .failed
         case .cancelled: return .waiting
+        case .waitingForInput: return .waiting
         case .running: return nil
         }
     }

@@ -51,6 +51,21 @@ struct RoomJobMonitorTests {
             return followupResults[jobID] ?? JobRequestResponse(jobID: jobID, threadID: nil, status: "running")
         }
 
+        private(set) var steerCalls: [(String, String)] = []
+        private(set) var answerCalls: [(String, String, String)] = []
+
+        func steer(jobID: String, instruction: String) async throws -> JobSteerResponse {
+            steerCalls.append((jobID, instruction))
+            if let operationError { throw operationError }
+            return JobSteerResponse(jobID: jobID, status: "running")
+        }
+
+        func answerQuestion(jobID: String, questionID: String, answer: String) async throws -> JobQuestionAnswerResponse {
+            answerCalls.append((jobID, questionID, answer))
+            if let operationError { throw operationError }
+            return JobQuestionAnswerResponse(jobID: jobID, questionID: questionID, status: "running")
+        }
+
         func cancel(jobID: String) async throws -> JobRequestResponse {
             cancelCalls.append(jobID)
             if let operationError { throw operationError }

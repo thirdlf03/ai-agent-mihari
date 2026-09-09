@@ -48,12 +48,17 @@ public final class VoiceCallWindowController {
 
 struct VoiceCallView: View {
     @ObservedObject var controller: VoiceConversationController
+    @State private var answerDraft = ""
 
     var body: some View {
         VStack(spacing: 0) {
             statusBar
             Divider()
             messageList
+            if controller.pendingQuestion != nil {
+                Divider()
+                questionBar
+            }
             Divider()
             controlBar
         }
@@ -113,12 +118,41 @@ struct VoiceCallView: View {
         }
     }
 
+    private var questionBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let question = controller.pendingQuestion {
+                Text("仕事からの質問")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(question.prompt)
+                    .font(.subheadline)
+                    .textSelection(.enabled)
+                HStack {
+                    TextField("回答を入力", text: $answerDraft)
+                        .textFieldStyle(.roundedBorder)
+                    Button("送信") {
+                        controller.submitPendingQuestionAnswer(answerDraft)
+                        answerDraft = ""
+                    }
+                    .disabled(answerDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+        .padding(12)
+        .background(Color.orange.opacity(0.08))
+    }
+
     private var controlBar: some View {
         HStack {
             Button("再接続") {
                 controller.reconnect()
             }
             .disabled(!controller.isActive)
+
+            Button("画面見て") {
+                controller.captureAndSendScreen()
+            }
+            .disabled(!controller.isActive || controller.connectionState != .ready)
 
             Spacer()
 
@@ -142,6 +176,15 @@ private struct VoiceMessageRow: View {
                 Text(roleLabel)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                if let thumbnail = message.imageThumbnailPNG,
+                    let image = NSImage(data: thumbnail)
+                {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 200, maxHeight: 120)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
                 Text(message.text)
                     .font(.body)
                     .textSelection(.enabled)
