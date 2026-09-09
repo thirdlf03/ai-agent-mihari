@@ -363,9 +363,13 @@ public struct RoomEventClient: Sendable, RoomAccess {
     /// `POST /jobs/{id}/cancel` の本文。中身は無いが、JSON の `{}` は送る。
     private struct RoomCancelBody: Encodable {}
 
-    /// `POST /jobs/{id}/steer` の本文（#40 想定）。
+    /// `POST /jobs/{id}/steer` の本文（room #47: `text` キー）。
     private struct RoomSteerBody: Encodable {
-        let instruction: String
+        let text: String
+
+        init(instruction: String) {
+            text = instruction
+        }
     }
 
     /// `POST /jobs/{id}/questions/{qid}/answer` の本文（#40 想定）。

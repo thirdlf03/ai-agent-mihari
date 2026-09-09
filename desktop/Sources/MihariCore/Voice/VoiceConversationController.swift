@@ -23,8 +23,8 @@ public final class VoiceConversationController: ObservableObject {
     @Published public private(set) var isActive = false
     /// マイクが有効か（エコー対策で一時停止中は false）。
     @Published public private(set) var isMicLive = false
-    /// `waiting_for_input` の質問。会話 UI で回答する。
-    @Published public private(set) var pendingQuestion: VoicePendingQuestion?
+    /// `pending_questions` の未回答分。会話 UI で回答する。
+    @Published public private(set) var pendingQuestions: [VoicePendingQuestion] = []
     /// 会話から依頼した直近の仕事 ID（Hermes job と voice session は別）。
     @Published public private(set) var activeVoiceJobID: String?
 
@@ -108,7 +108,7 @@ public final class VoiceConversationController: ObservableObject {
         manualReconnectRequested = false
         backoffSeconds = 1
         messages = []
-        pendingQuestion = nil
+        pendingQuestions = []
         connectionState = .connecting
         statusText = "接続中…"
         appendSystem("会話を開始した")
@@ -152,10 +152,14 @@ public final class VoiceConversationController: ObservableObject {
     }
 
     /// 表示中の質問へ回答する。
-    public func submitPendingQuestionAnswer(_ answer: String) {
+    public func submitPendingQuestionAnswer(_ answer: String, questionID: String) {
         let trimmed = answer.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let question = pendingQuestion else { return }
-        pendingQuestion = nil
+        guard !trimmed.isEmpty,
+            let question = pendingQuestions.first(where: { $0.questionID == questionID })
+        else {
+            return
+        }
+        pendingQuestions.removeAll(where: { $0.questionID == questionID })
         appendMessage(VoiceConversationMessage(role: .user, text: trimmed))
         Task {
             do {
@@ -165,10 +169,10 @@ public final class VoiceConversationController: ObservableObject {
                     answer: trimmed
                 )
                 appendSystem("回答を送った（\(question.questionID)）")
-                await refreshPendingQuestion(jobID: question.jobID)
+                await refreshPendingQuestions(jobID: question.jobID)
             } catch {
                 appendSystem("回答を送れなかった: \(error.localizedDescription)")
-                pendingQuestion = question
+                mergePendingQuestions([question])
             }
         }
     }
@@ -188,9 +192,9 @@ public final class VoiceConversationController: ObservableObject {
             case .getJobStatus(let jobID):
                 await performGetJobStatus(jobID: jobID)
             case .showQuestion(let jobID, let questionID, let prompt):
-                applyPendingQuestion(
-                    VoicePendingQuestion(jobID: jobID, questionID: questionID, prompt: prompt)
-                )
+                mergePendingQuestions([
+                    VoicePendingQuestion(jobID: jobID, questionID: questionID, prompt: prompt),
+                ])
             case .unsupported:
                 break
             }
@@ -237,7 +241,7 @@ public final class VoiceConversationController: ObservableObject {
                 activeVoiceJobID = jobID
                 deps.onJobSubmitted?(jobID, JobRequestClient.resolveTitle(title: title, body: resolvedBody))
                 appendSystem("仕事を依頼した（\(jobID)）")
-                await refreshPendingQuestion(jobID: jobID)
+                await refreshPendingQuestions(jobID: jobID)
             } else {
                 appendSystem("仕事を依頼した（ID 不明）")
             }
@@ -259,7 +263,7 @@ public final class VoiceConversationController: ObservableObject {
         do {
             _ = try await deps.jobCollaboration.steer(jobID: targetJobID, instruction: text)
             appendSystem("仕事 \(targetJobID) へ指示を送った")
-            await refreshPendingQuestion(jobID: targetJobID)
+            await refreshPendingQuestions(jobID: targetJobID)
         } catch {
             appendSystem("steer に失敗: \(error.localizedDescription)")
         }
@@ -288,8 +292,9 @@ public final class VoiceConversationController: ObservableObject {
         do {
             let resolved = detail ?? (try await deps.jobCollaboration.fetchJob(jobID: jobID))
             appendSystem(VoiceJobQuestionParser.statusSummary(from: resolved))
-            if let pending = VoiceJobQuestionParser.pendingQuestion(from: resolved) {
-                applyPendingQuestion(pending)
+            let pending = VoiceJobQuestionParser.pendingQuestions(from: resolved)
+            if !pending.isEmpty {
+                mergePendingQuestions(pending)
             }
             if resolved.status == RoomJobStatus.running.rawValue
                 || resolved.status == RoomJobStatus.waitingForInput.rawValue
@@ -301,21 +306,24 @@ public final class VoiceConversationController: ObservableObject {
         }
     }
 
-    private func refreshPendingQuestion(jobID: String) async {
+    private func refreshPendingQuestions(jobID: String) async {
         guard let detail = try? await deps.jobCollaboration.fetchJob(jobID: jobID) else { return }
-        if let pending = VoiceJobQuestionParser.pendingQuestion(from: detail) {
-            applyPendingQuestion(pending)
-        } else if pendingQuestion?.jobID == jobID {
-            pendingQuestion = nil
-        }
+        let pending = VoiceJobQuestionParser.pendingQuestions(from: detail)
+        pendingQuestions.removeAll(where: { $0.jobID == jobID })
+        mergePendingQuestions(pending)
     }
 
-    private func applyPendingQuestion(_ question: VoicePendingQuestion) {
-        guard !question.jobID.isEmpty, !question.questionID.isEmpty, !question.prompt.isEmpty else {
-            return
+    private func mergePendingQuestions(_ incoming: [VoicePendingQuestion]) {
+        for question in incoming {
+            guard !question.jobID.isEmpty, !question.questionID.isEmpty, !question.prompt.isEmpty else {
+                continue
+            }
+            if pendingQuestions.contains(where: { $0.questionID == question.questionID }) {
+                continue
+            }
+            pendingQuestions.append(question)
+            appendSystem("質問: \(question.prompt)")
         }
-        pendingQuestion = question
-        appendSystem("質問: \(question.prompt)")
     }
 
     private func resolvedJobID(_ explicit: String?) -> String? {

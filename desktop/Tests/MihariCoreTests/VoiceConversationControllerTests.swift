@@ -85,10 +85,13 @@ struct VoiceConversationControllerTests {
             JobRequestResponse(jobID: "job-test", status: "queued")
         }
         func steer(jobID: String, instruction: String) async throws -> JobSteerResponse {
-            JobSteerResponse(jobID: jobID, status: "running")
+            JobSteerResponse(jobID: jobID, seq: 1, text: instruction, delivered: true)
         }
         func answerQuestion(jobID: String, questionID: String, answer: String) async throws -> JobQuestionAnswerResponse {
-            JobQuestionAnswerResponse(jobID: jobID, questionID: questionID, status: "running")
+            JobQuestionAnswerResponse(
+                jobID: jobID,
+                question: RoomPendingQuestion(id: questionID, question: "?", status: "answered", answer: answer)
+            )
         }
         func fetchJob(jobID: String) async throws -> RoomJobDetail {
             RoomJobDetail(jobID: jobID, status: "running")

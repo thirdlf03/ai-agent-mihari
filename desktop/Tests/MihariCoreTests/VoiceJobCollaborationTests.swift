@@ -40,8 +40,8 @@ struct VoiceJobCollaborationTests {
         return URLSession(configuration: configuration)
     }
 
-    @Test("steer は POST /jobs/{id}/steer に instruction を送る")
-    func steerPostsInstruction() async throws {
+    @Test("steer は POST /jobs/{id}/steer に text を送る")
+    func steerPostsText() async throws {
         let session = makeSession()
         StubURLProtocol.handler = { request in
             #expect(request.httpMethod == "POST")
@@ -49,18 +49,30 @@ struct VoiceJobCollaborationTests {
             #expect(request.value(forHTTPHeaderField: DaemonClient.tokenHeader) == "tok")
             let body = try #require(request.httpBody)
             let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
-            #expect(json["instruction"] as? String == "もっと短く")
+            #expect(json["text"] as? String == "左側を優先して")
+            #expect(json["instruction"] == nil)
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, Data(#"{"job_id":"job-9","status":"running"}"#.utf8))
+            return (
+                response,
+                Data(
+                    """
+                    {"job_id":"job-9","seq":1,"filename":"001.txt","text":"左側を優先して",\
+                    "created_at":0.0,"delivered":true}
+                    """.utf8
+                )
+            )
         }
         let client = RoomEventClient(
             baseURL: URL(string: "http://127.0.0.1:8787")!,
             token: "tok",
             session: session
         )
-        let result = try await client.steer(jobID: "job-9", instruction: "もっと短く")
+        let result = try await client.steer(jobID: "job-9", instruction: "左側を優先して")
         #expect(result.jobID == "job-9")
-        #expect(result.status == "running")
+        #expect(result.seq == 1)
+        #expect(result.filename == "001.txt")
+        #expect(result.text == "左側を優先して")
+        #expect(result.delivered == true)
     }
 
     @Test("answer は POST /jobs/{id}/questions/{qid}/answer に answer を送る")
@@ -71,17 +83,45 @@ struct VoiceJobCollaborationTests {
             #expect(request.url?.path == "/jobs/job-9/questions/q1/answer")
             let body = try #require(request.httpBody)
             let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
-            #expect(json["answer"] as? String == "A案")
+            #expect(json["answer"] as? String == "blue")
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, Data(#"{"job_id":"job-9","question_id":"q1","status":"running"}"#.utf8))
+            return (
+                response,
+                Data(
+                    """
+                    {"job_id":"job-9","question":{"id":"q1","question":"色は？","choices":["red","blue"],\
+                    "multi_select":false,"status":"answered","answer":"blue","created_at":0.0,"answered_at":0.1}}
+                    """.utf8
+                )
+            )
         }
         let client = RoomEventClient(
             baseURL: URL(string: "http://127.0.0.1:8787")!,
             token: "tok",
             session: session
         )
-        let result = try await client.answerQuestion(jobID: "job-9", questionID: "q1", answer: "A案")
-        #expect(result.questionID == "q1")
+        let result = try await client.answerQuestion(jobID: "job-9", questionID: "q1", answer: "blue")
+        #expect(result.jobID == "job-9")
+        #expect(result.question?.id == "q1")
+        #expect(result.question?.status == "answered")
+        #expect(result.question?.answer == "blue")
+    }
+
+    @Test("GET /jobs/{id} の pending_questions を decode する")
+    func decodesPendingQuestionsArray() throws {
+        let json = """
+        {"job_id":"j1","status":"waiting_for_input","pending_questions":[\
+        {"id":"q1","question":"続けますか？","choices":null,"multi_select":false,"status":"pending"},\
+        {"id":"q2","question":"色は？","choices":["red","blue"],"multi_select":false,"status":"pending"}\
+        ]}
+        """
+        let detail = try JSONDecoder().decode(RoomJobDetail.self, from: Data(json.utf8))
+        #expect(detail.pendingQuestions.count == 2)
+        #expect(detail.pendingQuestions[0].id == "q1")
+        #expect(detail.pendingQuestions[1].choices == ["red", "blue"])
+        let pending = VoiceJobQuestionParser.pendingQuestions(from: detail)
+        #expect(pending.count == 2)
+        #expect(pending[0].prompt == "続けますか？")
     }
 
     @Test("ツール名と引数を会話アクションへ写す")
@@ -105,17 +145,20 @@ struct VoiceJobCollaborationTests {
         #expect(question == .showQuestion(jobID: "j1", questionID: "q2", prompt: "どれ？"))
     }
 
-    @Test("waiting_for_input の質問を detail から拾う")
-    func parsesPendingQuestion() {
+    @Test("pending_questions の先頭 pending を拾う")
+    func parsesFirstPendingQuestion() {
         let detail = RoomJobDetail(
             jobID: "j1",
             title: "調査",
             status: "waiting_for_input",
-            pendingQuestionID: "q1",
-            pendingQuestionText: "続けますか？"
+            pendingQuestions: [
+                RoomPendingQuestion(id: "q1", question: "続けますか？", status: "pending"),
+                RoomPendingQuestion(id: "q2", question: "色は？", choices: ["red"], status: "answered"),
+            ]
         )
-        let pending = VoiceJobQuestionParser.pendingQuestion(from: detail)
-        #expect(pending?.questionID == "q1")
-        #expect(pending?.prompt == "続けますか？")
+        let pending = VoiceJobQuestionParser.pendingQuestions(from: detail)
+        #expect(pending.count == 1)
+        #expect(pending[0].questionID == "q1")
+        #expect(pending[0].prompt == "続けますか？")
     }
 }

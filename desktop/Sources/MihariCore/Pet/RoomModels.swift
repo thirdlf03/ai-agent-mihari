@@ -461,6 +461,77 @@ public struct RoomTempDeploy: Decodable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// `GET /jobs/{id}` の `pending_questions` 1 件（room #47）。
+public struct RoomPendingQuestion: Decodable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let question: String
+    public let choices: [String]?
+    public let multiSelect: Bool
+    public let status: String
+    public let answer: String?
+    public let createdAt: Date?
+    public let answeredAt: Date?
+
+    /// 未回答か。
+    public var isPending: Bool { status.lowercased() == "pending" }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case question
+        case choices
+        case multiSelect = "multi_select"
+        case status
+        case answer
+        case createdAt = "created_at"
+        case answeredAt = "answered_at"
+    }
+
+    public init(
+        id: String,
+        question: String,
+        choices: [String]? = nil,
+        multiSelect: Bool = false,
+        status: String = "pending",
+        answer: String? = nil,
+        createdAt: Date? = nil,
+        answeredAt: Date? = nil
+    ) {
+        self.id = id
+        self.question = question
+        self.choices = choices
+        self.multiSelect = multiSelect
+        self.status = status
+        self.answer = answer
+        self.createdAt = createdAt
+        self.answeredAt = answeredAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? ""
+        question = try container.decodeIfPresent(String.self, forKey: .question) ?? ""
+        choices = try container.decodeIfPresent([String].self, forKey: .choices)
+        multiSelect = try container.decodeIfPresent(Bool.self, forKey: .multiSelect) ?? false
+        status = try container.decodeIfPresent(String.self, forKey: .status) ?? "pending"
+        answer = try container.decodeIfPresent(String.self, forKey: .answer)
+        createdAt = Self.decodeTimestamp(container, key: .createdAt)
+        answeredAt = Self.decodeTimestamp(container, key: .answeredAt)
+    }
+
+    private static func decodeTimestamp(
+        _ container: KeyedDecodingContainer<CodingKeys>,
+        key: CodingKeys
+    ) -> Date? {
+        if let raw = try? container.decodeIfPresent(Double.self, forKey: key) {
+            return Date(timeIntervalSince1970: raw)
+        }
+        if let raw = try? container.decodeIfPresent(Int.self, forKey: key) {
+            return Date(timeIntervalSince1970: Double(raw))
+        }
+        return nil
+    }
+}
+
 /// `/jobs/running` と `/jobs/{id}` が返す仕事の詳細。
 ///
 /// 全部を任意にして、部屋が将来足すフィールドを黙って無視する。
@@ -478,10 +549,8 @@ public struct RoomJobDetail: Decodable, Equatable, Sendable, Identifiable {
     public let createdAt: Date?
     /// 依頼本文。一覧の検索に使う。旧バックエンドでは `nil`。
     public let body: String?
-    /// `waiting_for_input` の質問 ID（#40 想定）。
-    public let pendingQuestionID: String?
-    /// `waiting_for_input` の質問文（#40 想定）。
-    public let pendingQuestionText: String?
+    /// 未回答の質問一覧（room #47: `pending_questions`）。
+    public let pendingQuestions: [RoomPendingQuestion]
 
     public var id: String { jobID }
 
@@ -497,8 +566,7 @@ public struct RoomJobDetail: Decodable, Equatable, Sendable, Identifiable {
         case latestEvent = "latest_event"
         case createdAt = "created_at"
         case body
-        case pendingQuestionID = "pending_question_id"
-        case pendingQuestionText = "pending_question"
+        case pendingQuestions = "pending_questions"
     }
 
     public init(
@@ -513,8 +581,7 @@ public struct RoomJobDetail: Decodable, Equatable, Sendable, Identifiable {
         latestEvent: RoomEvent? = nil,
         createdAt: Date? = nil,
         body: String? = nil,
-        pendingQuestionID: String? = nil,
-        pendingQuestionText: String? = nil
+        pendingQuestions: [RoomPendingQuestion] = []
     ) {
         self.jobID = jobID
         self.title = title
@@ -527,8 +594,7 @@ public struct RoomJobDetail: Decodable, Equatable, Sendable, Identifiable {
         self.latestEvent = latestEvent
         self.createdAt = createdAt
         self.body = body
-        self.pendingQuestionID = pendingQuestionID
-        self.pendingQuestionText = pendingQuestionText
+        self.pendingQuestions = pendingQuestions
     }
 
     public init(from decoder: Decoder) throws {
@@ -551,8 +617,8 @@ public struct RoomJobDetail: Decodable, Equatable, Sendable, Identifiable {
             createdAt = nil
         }
         body = try container.decodeIfPresent(String.self, forKey: .body)
-        pendingQuestionID = try container.decodeIfPresent(String.self, forKey: .pendingQuestionID)
-        pendingQuestionText = try container.decodeIfPresent(String.self, forKey: .pendingQuestionText)
+        pendingQuestions =
+            try container.decodeIfPresent([RoomPendingQuestion].self, forKey: .pendingQuestions) ?? []
     }
 }
 

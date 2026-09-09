@@ -48,14 +48,14 @@ public final class VoiceCallWindowController {
 
 struct VoiceCallView: View {
     @ObservedObject var controller: VoiceConversationController
-    @State private var answerDraft = ""
+    @State private var answerDrafts: [String: String] = [:]
 
     var body: some View {
         VStack(spacing: 0) {
             statusBar
             Divider()
             messageList
-            if controller.pendingQuestion != nil {
+            if !controller.pendingQuestions.isEmpty {
                 Divider()
                 questionBar
             }
@@ -119,27 +119,46 @@ struct VoiceCallView: View {
     }
 
     private var questionBar: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let question = controller.pendingQuestion {
-                Text("仕事からの質問")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(question.prompt)
-                    .font(.subheadline)
-                    .textSelection(.enabled)
-                HStack {
-                    TextField("回答を入力", text: $answerDraft)
-                        .textFieldStyle(.roundedBorder)
-                    Button("送信") {
-                        controller.submitPendingQuestionAnswer(answerDraft)
-                        answerDraft = ""
+        VStack(alignment: .leading, spacing: 12) {
+            Text("仕事からの質問（\(controller.pendingQuestions.count) 件）")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(controller.pendingQuestions) { question in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(question.prompt)
+                        .font(.subheadline)
+                        .textSelection(.enabled)
+                    if !question.choices.isEmpty {
+                        Text(question.choices.joined(separator: " / "))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    .disabled(answerDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    HStack {
+                        TextField("回答を入力", text: answerBinding(for: question.questionID))
+                            .textFieldStyle(.roundedBorder)
+                        Button("送信") {
+                            let draft = answerDrafts[question.questionID] ?? ""
+                            controller.submitPendingQuestionAnswer(draft, questionID: question.questionID)
+                            answerDrafts[question.questionID] = ""
+                        }
+                        .disabled(
+                            (answerDrafts[question.questionID] ?? "")
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                                .isEmpty
+                        )
+                    }
                 }
             }
         }
         .padding(12)
         .background(Color.orange.opacity(0.08))
+    }
+
+    private func answerBinding(for questionID: String) -> Binding<String> {
+        Binding(
+            get: { answerDrafts[questionID] ?? "" },
+            set: { answerDrafts[questionID] = $0 }
+        )
     }
 
     private var controlBar: some View {

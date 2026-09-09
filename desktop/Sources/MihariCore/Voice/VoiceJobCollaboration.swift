@@ -51,38 +51,70 @@ public struct LiveVoiceJobCollaboration: VoiceJobCollaborating {
     }
 }
 
-/// `POST /jobs/{id}/steer` の応答（#40 想定）。
+/// `POST /jobs/{id}/steer` の応答（room #47）。
 public struct JobSteerResponse: Decodable, Equatable, Sendable {
     public let jobID: String?
-    public let status: String?
+    public let seq: Int?
+    public let filename: String?
+    public let text: String?
+    public let createdAt: Date?
+    public let delivered: Bool?
 
     enum CodingKeys: String, CodingKey {
         case jobID = "job_id"
-        case status
+        case seq
+        case filename
+        case text
+        case createdAt = "created_at"
+        case delivered
     }
 
-    public init(jobID: String? = nil, status: String? = nil) {
+    public init(
+        jobID: String? = nil,
+        seq: Int? = nil,
+        filename: String? = nil,
+        text: String? = nil,
+        createdAt: Date? = nil,
+        delivered: Bool? = nil
+    ) {
         self.jobID = jobID
-        self.status = status
+        self.seq = seq
+        self.filename = filename
+        self.text = text
+        self.createdAt = createdAt
+        self.delivered = delivered
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        jobID = try container.decodeIfPresent(String.self, forKey: .jobID)
+        seq = try container.decodeIfPresent(Int.self, forKey: .seq)
+        filename = try container.decodeIfPresent(String.self, forKey: .filename)
+        text = try container.decodeIfPresent(String.self, forKey: .text)
+        delivered = try container.decodeIfPresent(Bool.self, forKey: .delivered)
+        if let raw = try container.decodeIfPresent(Double.self, forKey: .createdAt) {
+            createdAt = Date(timeIntervalSince1970: raw)
+        } else if let raw = try container.decodeIfPresent(Int.self, forKey: .createdAt) {
+            createdAt = Date(timeIntervalSince1970: Double(raw))
+        } else {
+            createdAt = nil
+        }
     }
 }
 
-/// `POST /jobs/{id}/questions/{qid}/answer` の応答（#40 想定）。
+/// `POST /jobs/{id}/questions/{qid}/answer` の応答（room #47: `question` ネスト）。
 public struct JobQuestionAnswerResponse: Decodable, Equatable, Sendable {
     public let jobID: String?
-    public let questionID: String?
-    public let status: String?
+    public let question: RoomPendingQuestion?
 
     enum CodingKeys: String, CodingKey {
         case jobID = "job_id"
-        case questionID = "question_id"
-        case status
+        case question
     }
 
-    public init(jobID: String? = nil, questionID: String? = nil, status: String? = nil) {
+    public init(jobID: String? = nil, question: RoomPendingQuestion? = nil) {
         self.jobID = jobID
-        self.questionID = questionID
-        self.status = status
+        self.question = question
     }
 }
 
@@ -210,19 +242,19 @@ enum VoiceToolCallHandler {
     }
 }
 
-/// 仕事詳細から `waiting_for_input` の質問を拾う。
+/// 仕事詳細から `pending_questions` を拾う。
 enum VoiceJobQuestionParser {
-    static func pendingQuestion(from detail: RoomJobDetail) -> VoicePendingQuestion? {
-        guard detail.status == RoomJobStatus.waitingForInput.rawValue else { return nil }
-        guard
-            let questionID = detail.pendingQuestionID?.trimmingCharacters(in: .whitespacesAndNewlines),
-            !questionID.isEmpty
-        else {
-            return nil
+    static func pendingQuestions(from detail: RoomJobDetail) -> [VoicePendingQuestion] {
+        detail.pendingQuestions.compactMap { roomQuestion in
+            guard roomQuestion.isPending else { return nil }
+            let prompt = roomQuestion.question.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !roomQuestion.id.isEmpty, !prompt.isEmpty else { return nil }
+            return VoicePendingQuestion(room: roomQuestion, jobID: detail.jobID)
         }
-        let prompt = detail.pendingQuestionText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "回答を入力してください"
-        guard !prompt.isEmpty else { return nil }
-        return VoicePendingQuestion(jobID: detail.jobID, questionID: questionID, prompt: prompt)
+    }
+
+    static func pendingQuestion(from detail: RoomJobDetail) -> VoicePendingQuestion? {
+        pendingQuestions(from: detail).first
     }
 
     static func statusSummary(from detail: RoomJobDetail) -> String {
@@ -235,7 +267,7 @@ enum VoiceJobQuestionParser {
         if let text = detail.latestEvent?.text, !text.isEmpty {
             lines.append(text)
         }
-        if let pending = pendingQuestion(from: detail) {
+        for pending in pendingQuestions(from: detail) {
             lines.append("質問: \(pending.prompt)")
         }
         return lines.joined(separator: "\n")

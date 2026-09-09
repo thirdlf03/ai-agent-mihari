@@ -235,15 +235,35 @@ struct VoiceConversationMessage: Identifiable, Equatable, Sendable {
 }
 
 /// 仕事が `waiting_for_input` のとき、会話 UI に出す質問。
-public struct VoicePendingQuestion: Equatable, Sendable {
+public struct VoicePendingQuestion: Equatable, Sendable, Identifiable {
     public let jobID: String
     public let questionID: String
     public let prompt: String
+    public let choices: [String]
+    public let multiSelect: Bool
 
-    public init(jobID: String, questionID: String, prompt: String) {
+    public var id: String { questionID }
+
+    public init(
+        jobID: String,
+        questionID: String,
+        prompt: String,
+        choices: [String] = [],
+        multiSelect: Bool = false
+    ) {
         self.jobID = jobID
         self.questionID = questionID
         self.prompt = prompt
+        self.choices = choices
+        self.multiSelect = multiSelect
+    }
+
+    init(room: RoomPendingQuestion, jobID: String) {
+        self.jobID = jobID
+        self.questionID = room.id
+        self.prompt = room.question
+        self.choices = room.choices ?? []
+        self.multiSelect = room.multiSelect
     }
 }
 
