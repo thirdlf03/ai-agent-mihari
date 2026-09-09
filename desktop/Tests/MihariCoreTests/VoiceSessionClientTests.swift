@@ -100,4 +100,25 @@ struct VoiceSessionClientTests {
         #expect(status.status == "streaming")
         #expect(status.isReconnectable)
     }
+
+    @Test("closed セッションは isReconnectable が false")
+    func closedSessionIsNotReconnectable() async throws {
+        let client = makeClient()
+        StubURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            let body = """
+            {"session_id":"sess-1","model":"gpt-realtime-2.1-mini","status":"closed","error":null}
+            """
+            return (response, Data(body.utf8))
+        }
+
+        let status = try await client.sessionStatus(sessionID: "sess-1")
+        #expect(status.status == "closed")
+        #expect(status.isReconnectable == false)
+    }
 }

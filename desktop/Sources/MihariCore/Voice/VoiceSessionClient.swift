@@ -107,6 +107,13 @@ struct VoiceStreamConnector: Sendable {
         )
     }
 
+    /// セッションが `created` / `streaming` なら張り直す。`closed` 等なら `nil`。
+    func tryReconnect(sessionID: String, streamPath: String) async throws -> VoiceStreamConnection? {
+        let status = try await client.sessionStatus(sessionID: sessionID)
+        guard status.isReconnectable else { return nil }
+        return try await reconnect(sessionID: sessionID, streamPath: streamPath)
+    }
+
     /// 既存セッションへ WebSocket を張り直す。
     func reconnect(sessionID: String, streamPath: String) async throws -> VoiceStreamConnection {
         let status = try await client.sessionStatus(sessionID: sessionID)

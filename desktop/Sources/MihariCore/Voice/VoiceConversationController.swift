@@ -71,8 +71,8 @@ public final class VoiceConversationController: ObservableObject {
     private var pendingAssistantText = ""
     private var currentAssistantMessageID: UUID?
 
-    /// 発話バッファと VAD 状態。
-    private var speechBuffer = Data()
+    /// VAD 状態。発話中に commit:false で送ったか（確定時に全体を再送しない）。
+    private var hasStreamedAudioInTurn = false
     private var isUserSpeaking = false
     private var lastSpeechTime: Date?
 
@@ -122,10 +122,11 @@ public final class VoiceConversationController: ObservableObject {
         appendSystem("会話を終了した")
     }
 
-    /// 手動で再接続する。
+    /// 手動で再接続する（常に新規セッション）。
     public func reconnect() {
         guard isActive else { return }
         manualReconnectRequested = true
+        clearSession()
         closeSocket()
     }
 
@@ -134,22 +135,7 @@ public final class VoiceConversationController: ObservableObject {
     private func runLoop() async {
         while !Task.isCancelled, isActive {
             do {
-                let connection: VoiceStreamConnection
-                if let sessionID, let streamPath, !manualReconnectRequested {
-                    connectionState = .reconnecting
-                    statusText = "再接続中…"
-                    connection = try await deps.connector.reconnect(
-                        sessionID: sessionID,
-                        streamPath: streamPath
-                    )
-                } else {
-                    connectionState = .connecting
-                    statusText = "接続中…"
-                    connection = try await deps.connector.connectNew()
-                    self.sessionID = connection.sessionID
-                    self.streamPath = connection.streamPath
-                }
-                manualReconnectRequested = false
+                let connection = try await openConnection()
                 currentSocket = connection.socket
                 backoffSeconds = 1
 
@@ -171,6 +157,7 @@ public final class VoiceConversationController: ObservableObject {
             } catch is CancellationError {
                 break
             } catch {
+                clearSession()
                 connectionState = .error(error.localizedDescription)
                 statusText = "切断: \(error.localizedDescription)"
                 appendSystem("切断: \(error.localizedDescription)")
@@ -223,6 +210,7 @@ public final class VoiceConversationController: ObservableObject {
             let detail = reason.isEmpty ? "セッションが閉じた" : reason
             appendSystem(detail)
             statusText = detail
+            clearSession()
             return false
 
         case .unknown:
@@ -255,7 +243,7 @@ public final class VoiceConversationController: ObservableObject {
         mic?.stop()
         mic = nil
         isMicLive = false
-        speechBuffer = Data()
+        hasStreamedAudioInTurn = false
         isUserSpeaking = false
         lastSpeechTime = nil
     }
@@ -279,7 +267,7 @@ public final class VoiceConversationController: ObservableObject {
         if speakingNow {
             isUserSpeaking = true
             lastSpeechTime = Date()
-            speechBuffer.append(data)
+            hasStreamedAudioInTurn = true
             sendAudioChunk(data, commit: false, createResponse: false)
         } else if isUserSpeaking {
             if let lastSpeechTime,
@@ -295,12 +283,16 @@ public final class VoiceConversationController: ObservableObject {
         isUserSpeaking = false
         lastSpeechTime = nil
 
-        if !speechBuffer.isEmpty {
-            sendAudioChunk(speechBuffer, commit: true, createResponse: true)
+        // 発話中に送ったチャンクを再送しない。commit + create_response だけ送る。
+        if hasStreamedAudioInTurn {
+            sendAudioChunk(Self.commitOnlyPCM, commit: true, createResponse: true)
             appendUserPlaceholder()
         }
-        speechBuffer = Data()
+        hasStreamedAudioInTurn = false
     }
+
+    /// 確定専用の最小 PCM16（1 サンプル無音）。room は空 base64 を拒否する。
+    private static let commitOnlyPCM = Data([0, 0])
 
     private func sendAudioChunk(_ pcm: Data, commit: Bool, createResponse: Bool) {
         guard let socket = currentSocket, !pcm.isEmpty else { return }
@@ -429,5 +421,42 @@ public final class VoiceConversationController: ObservableObject {
         if let socket {
             Task { await socket.close() }
         }
+    }
+
+    /// 再接続可能なら同一セッションへ。`closed` や失敗時は新規セッション。
+    private func openConnection() async throws -> VoiceStreamConnection {
+        if manualReconnectRequested {
+            manualReconnectRequested = false
+            return try await connectNew()
+        }
+
+        if let sessionID, let streamPath {
+            connectionState = .reconnecting
+            statusText = "再接続中…"
+            if let restored = try await deps.connector.tryReconnect(
+                sessionID: sessionID,
+                streamPath: streamPath
+            ) {
+                return restored
+            }
+            clearSession()
+            appendSystem("セッションが閉じていたため新規セッションを開始する")
+        }
+
+        return try await connectNew()
+    }
+
+    private func connectNew() async throws -> VoiceStreamConnection {
+        connectionState = .connecting
+        statusText = "接続中…"
+        let connection = try await deps.connector.connectNew()
+        sessionID = connection.sessionID
+        streamPath = connection.streamPath
+        return connection
+    }
+
+    private func clearSession() {
+        sessionID = nil
+        streamPath = nil
     }
 }
