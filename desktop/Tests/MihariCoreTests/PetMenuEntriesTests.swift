@@ -29,6 +29,29 @@ struct PetMenuEntriesTests {
         return nil
     }
 
+    @Test("「会話を開始…」は声を出すの次にあり、押すと開始 / 終了を切り替える")
+    func voiceConversationEntryTogglesStartAndEnd() throws {
+        let presenter = makePresenter()
+        let actions = StubPetMenuActions()
+
+        let idle = PetMenuEntries.make(actions: actions, presenter: presenter)
+        let titles = titles(of: idle)
+        let voiceIndex = try #require(titles.firstIndex(of: "声を出す"))
+        let convIndex = try #require(titles.firstIndex(of: "会話を開始…"))
+        #expect(convIndex == voiceIndex + 1)
+
+        let start = try #require(findItem("会話を開始…", in: idle))
+        start.action()
+        #expect(actions.voiceConversationStarts == 1)
+
+        actions.isVoiceConversationActive = true
+        let active = PetMenuEntries.make(actions: actions, presenter: presenter)
+        let end = try #require(findItem("会話を終了", in: active))
+        #expect(end.isChecked)
+        end.action()
+        #expect(actions.voiceConversationEnds == 1)
+    }
+
     @Test("「スクショに写り込む」のチェックは写り込みの入り / 切りを映し、押すと切り替わる")
     func photobombEntryReflectsAndTogglesTheSetting() throws {
         let presenter = makePresenter()

@@ -91,6 +91,17 @@ public enum PetMenuEntries {
                 action: { pet.setVoiceEnabled(!pet.isVoiceEnabled) }
             ),
             .item(
+                title: actions.isVoiceConversationActive ? "会話を終了" : "会話を開始…",
+                isChecked: actions.isVoiceConversationActive,
+                action: {
+                    if actions.isVoiceConversationActive {
+                        actions.endVoiceConversation()
+                    } else {
+                        actions.startVoiceConversation()
+                    }
+                }
+            ),
+            .item(
                 title: "状態パネルを表示",
                 isChecked: actions.isStatusPanelVisible,
                 action: { actions.toggleStatusPanel() }

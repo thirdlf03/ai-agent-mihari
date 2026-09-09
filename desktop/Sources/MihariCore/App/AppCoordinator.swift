@@ -30,6 +30,8 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     public let room: RoomJobMonitor
     /// 依頼単位でこの Mac を撮影・操作する口（#23）。既定はオフで、許可は依頼ごと。
     public let macControl = MacControlCenter()
+    /// §5-2: room voice Realtime 会話（録音・VOICEVOX・割り込み・履歴）。
+    public lazy var voiceConversation: VoiceConversationController = makeVoiceConversation()
     /// 操作中の常設表示（停止ボタン付き）。macControl に差し込む。
     private let macControlIndicator = MacControlOperationPanelIndicator()
     /// いま固定して操作対象にしている仕事。一覧・詳細で選んだ仕事が入る。
@@ -288,6 +290,9 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         daemon.stop()
         room.stopAll()
         // 部屋へ「アプリが終了する」を伝えてから接続を閉じる（失効は hub 側）。
+        if voiceConversation.isActive {
+            voiceConversation.stop()
+        }
         macControl.sendQuit()
         Task { [weak self] in
             // 1 フレーム届く猶予を置いてから閉じる。届かなくても TCP 切断で失効する。
@@ -686,10 +691,41 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         pet.sayFocusStreak()
     }
 
+    public var isVoiceConversationActive: Bool {
+        voiceConversation.isActive
+    }
+
+    public func startVoiceConversation() {
+        voiceConversation.start()
+        VoiceCallWindowController.shared.show(controller: voiceConversation)
+        objectWillChange.send()
+    }
+
+    public func endVoiceConversation() {
+        voiceConversation.stop()
+        VoiceCallWindowController.shared.closeWindow()
+        objectWillChange.send()
+    }
+
     public func runVoicevoxRoundTripSmokeTest() {
         Task {
             await VoiceConversationSmoke.runRoundTrip(player: speechPlayer)
         }
+    }
+
+    /// §5-2 会話コントローラを組み立て、`SpeechPlayer` の完了通知を既存とチェーンする。
+    private func makeVoiceConversation() -> VoiceConversationController {
+        let controller = VoiceConversationController(
+            deps: .makeDefault(speechPlayer: speechPlayer)
+        )
+        let previousHandler = speechPlayer.onPlaybackFinished
+        speechPlayer.onPlaybackFinished = { [weak controller] priority in
+            previousHandler?(priority)
+            Task { @MainActor in
+                controller?.handlePlaybackFinished(priority: priority)
+            }
+        }
+        return controller
     }
 
     public func runDetectionStep(_ step: DetectionDebugStep) {
