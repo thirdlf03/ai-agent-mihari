@@ -87,6 +87,10 @@ public enum PetDebugMenuEntries {
                 title: "集中継続のセリフを再現",
                 action: { actions.replayFocusStreak() }
             ),
+            .item(
+                title: "VOICEVOX 1往復(§5-1)",
+                action: { actions.runVoicevoxRoundTripSmokeTest() }
+            ),
             .separator,
             .item(
                 title: "ひとりごとを喋る(声あり)",

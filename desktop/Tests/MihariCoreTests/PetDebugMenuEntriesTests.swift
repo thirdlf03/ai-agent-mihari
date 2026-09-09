@@ -201,6 +201,16 @@ struct PetDebugMenuEntriesTests {
         #expect(actions.focusStreakReplays == 1)
     }
 
+    @Test("「VOICEVOX 1往復(§5-1)」で煙テストを呼び出す")
+    func voicevoxRoundTripEntryCallsBack() {
+        let presenter = makePresenter()
+        let actions = StubPetMenuActions()
+
+        tap("VOICEVOX 1往復(§5-1)", in: PetDebugMenuEntries.make(actions: actions, presenter: presenter))
+
+        #expect(actions.voicevoxRoundTripRuns == 1)
+    }
+
     @Test("アニメーションの固定と解除がコントローラに伝わる")
     func fixedAnimationEntriesUpdateController() throws {
         let presenter = makePresenter()

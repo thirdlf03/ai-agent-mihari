@@ -14,6 +14,8 @@ final class StubPetMenuActions: ObservableObject, PetMenuActions {
     var isFastThresholds = false
     /// 「集中継続のセリフを再現」が押された回数。
     private(set) var focusStreakReplays = 0
+    /// 「VOICEVOX 1往復(§5-1)」が押された回数。
+    private(set) var voicevoxRoundTripRuns = 0
     /// 「仕事を頼む…」が押された回数。
     private(set) var jobRequestOpens = 0
     /// 仕事一覧が出せるか。テストからの差し込み口。
@@ -61,5 +63,6 @@ final class StubPetMenuActions: ObservableObject, PetMenuActions {
     func setFocusStreakInterval(_ seconds: TimeInterval) { focusStreakIntervalSeconds = seconds }
     func setFastThresholds(_ enabled: Bool) { isFastThresholds = enabled }
     func replayFocusStreak() { focusStreakReplays += 1 }
+    func runVoicevoxRoundTripSmokeTest() { voicevoxRoundTripRuns += 1 }
     func runDetectionStep(_ step: DetectionDebugStep) { detectionSteps.append(step) }
 }
