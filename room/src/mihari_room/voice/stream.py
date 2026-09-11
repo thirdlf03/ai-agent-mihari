@@ -21,6 +21,7 @@ from mihari_room.voice.protocol import (
     error_event,
     session_closed_event,
     session_ready_event,
+    user_text_event,
 )
 from mihari_room.voice.sessions import VoiceSessionManager
 from mihari_room.voice.upstream import (
@@ -52,6 +53,7 @@ async def handle_voice_stream(
 
     upstream = upstream_factory()
     manager.mark_streaming(session_id)
+    close_sent = False
 
     async def send_client(frame: dict[str, Any]) -> None:
         await websocket.send_text(json.dumps(frame, ensure_ascii=False))
@@ -73,22 +75,32 @@ async def handle_voice_stream(
                 manager=manager,
             )
         )
-        done, pending = await asyncio.wait(
-            {client_task, upstream_task}, return_when=asyncio.FIRST_COMPLETED
-        )
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        for task in done:
-            exc = task.exception()
-            if exc and not isinstance(exc, WebSocketDisconnect):
-                logger.debug("voice stream task ended: %s", exc)
+        try:
+            done, pending = await asyncio.wait(
+                {client_task, upstream_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                exc = task.exception()
+                if exc and not isinstance(exc, WebSocketDisconnect):
+                    logger.debug("voice stream task ended: %s", exc)
+        finally:
+            # ルートタスクが cancel されても子タスクを残さず、例外を回収する。
+            for task in (client_task, upstream_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                client_task, upstream_task, return_exceptions=True
+            )
     except Exception as error:
         logger.exception("voice stream failed for %s", session_id)
         manager.mark_closed(session_id, reason=str(error))
         try:
             await send_client(error_event(str(error)))
             await send_client(session_closed_event(reason=str(error)))
+            close_sent = True
         except Exception:
             pass
     finally:
@@ -96,10 +108,11 @@ async def handle_voice_stream(
         current = manager.get(session_id)
         if current is not None and current.status is not SessionStatus.ERROR:
             manager.mark_closed(session_id)
-        try:
-            await send_client(session_closed_event())
-        except Exception:
-            pass
+        if not close_sent:
+            try:
+                await send_client(session_closed_event())
+            except Exception:
+                pass
 
 
 async def _client_to_upstream(
@@ -187,6 +200,10 @@ async def _upstream_to_client(
             await send_client(assistant_text_event(text=text, done=True))
         elif event_type == "response.done":
             await _emit_tool_calls(event, send_client)
+        elif event_type == "conversation.item.input_audio_transcription.completed":
+            transcript = str(event.get("transcript") or "").strip()
+            if transcript:
+                await send_client(user_text_event(text=transcript))
         elif event_type == "error":
             message = _extract_error_message(event)
             await send_client(error_event(message, code="upstream_error"))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import time
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from mihari_room.voice.protocol import (
     EVENT_ASSISTANT_TEXT,
     EVENT_ASSISTANT_TOOL_CALL,
     EVENT_SESSION_READY,
+    EVENT_USER_TEXT,
 )
 from mihari_room.voice.upstream import FakeRealtimeUpstream
 from tests.recording import RecordingBoard, ScriptedWorker
@@ -59,6 +61,28 @@ def _make_app(
 
 def _auth() -> dict[str, str]:
     return {TOKEN_HEADER: TOKEN}
+
+
+def _disconnect_and_idle(ws, client: TestClient, session_id: str) -> None:
+    """WS を明示的に切り、ハンドラの後始末が終わるまで待つ。
+
+    ``websocket_connect`` の ``__exit__`` は disconnect を投げた直後に
+    アプリタスクを cancel するため、ハンドラ（2タスクの畳み込みと
+    upstream の close）が間に合わず CancelledError になる。
+    事前に disconnect を送り、status が streaming から抜けるのを待てば
+    その競合を避けられる。
+    """
+    ws.send({"type": "websocket.disconnect", "code": 1000, "reason": ""})
+    for _ in range(200):
+        status = (
+            client.get(f"/voice/sessions/{session_id}", headers=_auth())
+            .json()
+            .get("status")
+        )
+        if status != "streaming":
+            return
+        time.sleep(0.02)
+    raise AssertionError("session did not leave streaming state")
 
 
 def test_post_session_requires_token(tmp_path: Path) -> None:
@@ -126,6 +150,7 @@ def test_websocket_text_via_fake_upstream(tmp_path: Path) -> None:
                 tool_calls += 1
         assert "saw-image" in "".join(texts)
         assert tool_calls == 0
+        _disconnect_and_idle(ws, client, session_id)
     sent_types = [e.get("type") for e in fake.sent_events()]
     assert "session.update" in sent_types
     assert "conversation.item.create" in sent_types
@@ -149,6 +174,7 @@ def test_websocket_audio_input_path(tmp_path: Path) -> None:
                 texts.append(frame.get("text", ""))
                 break
         assert texts == ["heard-audio"]
+        _disconnect_and_idle(ws, client, session_id)
     assert any(e.get("type") == "input_audio_buffer.append" for e in fake.sent_events())
 
 
@@ -174,6 +200,7 @@ def test_websocket_image_input_path(tmp_path: Path) -> None:
                 done_text = frame.get("text", "")
                 break
         assert done_text == "saw-image"
+        _disconnect_and_idle(ws, client, session_id)
 
 
 def test_websocket_tool_call_via_audio(tmp_path: Path) -> None:
@@ -196,6 +223,7 @@ def test_websocket_tool_call_via_audio(tmp_path: Path) -> None:
         assert tool["name"] == "echo_phrase"
         assert tool["call_id"] == "call_test_1"
         assert "audio-tool" in tool["arguments"]
+        _disconnect_and_idle(ws, client, session_id)
 
 
 def test_websocket_tool_call_via_image(tmp_path: Path) -> None:
@@ -222,6 +250,7 @@ def test_websocket_tool_call_via_image(tmp_path: Path) -> None:
                 break
         assert tool is not None
         assert "image-tool" in tool["arguments"]
+        _disconnect_and_idle(ws, client, session_id)
 
 
 def test_capabilities_advertises_voice(tmp_path: Path) -> None:
@@ -254,5 +283,47 @@ def test_session_metadata_tracks_no_audio_output(tmp_path: Path) -> None:
             frame = ws.receive_json()
             if frame["type"] == EVENT_ASSISTANT_TEXT and frame.get("done"):
                 break
+        _disconnect_and_idle(ws, client, session_id)
     detail = client.get(f"/voice/sessions/{session_id}", headers=_auth()).json()
     assert detail["upstream_audio_output_events"] == 0
+
+
+def test_session_update_uses_realtime_ga_shape(tmp_path: Path) -> None:
+    """turn_detection 無効化は audio.input 配下で送る（トップレベルは beta 形）。"""
+    fake = FakeRealtimeUpstream()
+    client = _make_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        _disconnect_and_idle(ws, client, session_id)
+    update = next(e for e in fake.sent_events() if e.get("type") == "session.update")
+    session = update["session"]
+    assert session["output_modalities"] == ["text"]
+    assert "turn_detection" not in session
+    audio_input = session["audio"]["input"]
+    assert audio_input["turn_detection"] is None
+    assert audio_input["format"] == {"type": "audio/pcm", "rate": 24000}
+    assert audio_input["transcription"]["model"]
+
+
+def test_user_transcript_relayed_as_user_text(tmp_path: Path) -> None:
+    """input_audio_transcription.completed を user.text としてクライアントへ中継する。"""
+    fake = FakeRealtimeUpstream()
+    client = _make_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01").decode()
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        ws.receive_json()
+        ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+        transcript = None
+        for _ in range(10):
+            frame = ws.receive_json()
+            if frame["type"] == EVENT_USER_TEXT:
+                transcript = frame.get("text", "")
+                break
+        assert transcript == "こんにちは"
+        _disconnect_and_idle(ws, client, session_id)

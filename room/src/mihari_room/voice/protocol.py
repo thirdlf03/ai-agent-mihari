@@ -47,6 +47,7 @@ EVENT_INPUT_IMAGE = "input.image"
 EVENT_SESSION_READY = "session.ready"
 EVENT_ASSISTANT_TEXT = "assistant.text"
 EVENT_ASSISTANT_TOOL_CALL = "assistant.tool_call"
+EVENT_USER_TEXT = "user.text"
 EVENT_ERROR = "error"
 EVENT_SESSION_CLOSED = "session.closed"
 
@@ -88,6 +89,11 @@ def assistant_tool_call_event(
         call_id=call_id,
         arguments=arguments,
     )
+
+
+def user_text_event(*, text: str) -> dict[str, Any]:
+    """入力音声の文字起こし結果。クライアントはユーザーターンの表示に使う。"""
+    return client_event(EVENT_USER_TEXT, text=text)
 
 
 def session_closed_event(*, reason: str = "") -> dict[str, Any]:
