@@ -166,6 +166,9 @@ class FakeRealtimeUpstream(RealtimeUpstream):
                 raw = b""
             if raw == b"tool":
                 await self._emit_tool_call("audio-tool")
+            elif raw == b"audio-out-probe":
+                await self._emit_upstream_audio_output_probe()
+                await self._emit_text("text-only")
             else:
                 await self._emit_text("heard-audio")
             return
@@ -228,6 +231,11 @@ class FakeRealtimeUpstream(RealtimeUpstream):
                 },
             }
         )
+
+    async def _emit_upstream_audio_output_probe(self) -> None:
+        """pytest 用。upstream が音声 OUT を返した場合の観測・非 relay を検証する。"""
+        for event_type in ("response.output_audio.delta", "response.output_audio.done"):
+            await self._queue.put({"type": event_type, "delta": "probe"})
 
     async def _emit_tool_call(self, phrase: str) -> None:
         arguments = json.dumps({"phrase": phrase}, ensure_ascii=False)

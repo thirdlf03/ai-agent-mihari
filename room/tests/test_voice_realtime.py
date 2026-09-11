@@ -23,7 +23,7 @@ from mihari_room.voice.protocol import (
     EVENT_SESSION_READY,
     EVENT_USER_TEXT,
 )
-from mihari_room.voice.upstream import FakeRealtimeUpstream
+from mihari_room.voice.upstream import FakeRealtimeUpstream, response_create_event
 from tests.recording import RecordingBoard, ScriptedWorker
 
 TOKEN = "room-secret"
@@ -475,6 +475,81 @@ def test_concurrent_stream_rejected(tmp_path: Path) -> None:
             ) as ws2:
                 ws2.receive_json()
         _disconnect_and_idle(ws, client, session_id)
+
+
+def test_websocket_auth_via_query_token(tmp_path: Path) -> None:
+    fake = FakeRealtimeUpstream()
+    client = _make_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    with client.websocket_connect(f"/voice/sessions/{session_id}/stream?token={TOKEN}") as ws:
+        ready = ws.receive_json()
+        assert ready["type"] == EVENT_SESSION_READY
+        _disconnect_and_idle(ws, client, session_id)
+
+
+def test_response_create_uses_text_output_modalities(tmp_path: Path) -> None:
+    fake = FakeRealtimeUpstream()
+    client = _make_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        ws.receive_json()
+        ws.send_json(
+            {
+                "type": "input.image",
+                "image_base64": PNG_1X1,
+                "media_type": "image/png",
+            }
+        )
+        for _ in range(10):
+            frame = ws.receive_json()
+            if frame["type"] == EVENT_ASSISTANT_TEXT and frame.get("done"):
+                break
+        _disconnect_and_idle(ws, client, session_id)
+    creates = [e for e in fake.sent_events() if e.get("type") == "response.create"]
+    assert creates
+    assert all(e.get("response", {}).get("output_modalities") == ["text"] for e in creates)
+    assert response_create_event()["response"]["output_modalities"] == ["text"]
+
+
+def test_upstream_audio_output_counted_not_relayed(tmp_path: Path) -> None:
+    fake = FakeRealtimeUpstream()
+    client = _make_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    probe_audio = base64.b64encode(b"audio-out-probe").decode()
+    client_frames: list[dict] = []
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        ws.receive_json()
+        ws.send_json({"type": "input.audio", "audio_base64": probe_audio})
+        for _ in range(10):
+            frame = ws.receive_json()
+            client_frames.append(frame)
+            if frame["type"] == EVENT_ASSISTANT_TEXT and frame.get("done"):
+                break
+        _disconnect_and_idle(ws, client, session_id)
+    assert all("audio" not in frame.get("type", "") for frame in client_frames)
+    assert any(frame.get("text") == "text-only" for frame in client_frames if frame.get("done"))
+    detail = client.get(f"/voice/sessions/{session_id}", headers=_auth()).json()
+    assert detail["upstream_audio_output_events"] == 2
+
+
+def test_config_reads_openai_key_from_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MIHARI_ROOM_TOKEN", TOKEN)
+    monkeypatch.setenv("MIHARI_ROOM_ROOT", str(tmp_path))
+    monkeypatch.setenv("MIHARI_OPENAI_API_KEY", "sk-from-mihari-env")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    cfg = RoomConfig.from_environment()
+    assert cfg.openai_api_key == "sk-from-mihari-env"
+
+    monkeypatch.delenv("MIHARI_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-openai-env")
+    cfg_fallback = RoomConfig.from_environment()
+    assert cfg_fallback.openai_api_key == "sk-from-openai-env"
 
 
 def test_history_survives_manager_reload(tmp_path: Path) -> None:
