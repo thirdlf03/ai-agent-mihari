@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -11,6 +12,10 @@ from typing import Any
 from mihari_room.config import RoomConfig
 from mihari_room.voice.history import HistoryKind, HistoryMessage, VoiceHistoryStore
 from mihari_room.voice.protocol import SessionStatus
+
+#: session_id は ``secrets.token_urlsafe(16)``（22 文字）を想定。
+#: 履歴ディレクトリのパス連結前に、この形に合わない id を入口で弾く。
+SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 
 class ConcurrentVoiceSessionError(RuntimeError):
@@ -127,6 +132,8 @@ class VoiceSessionManager:
         return session
 
     def get(self, session_id: str) -> VoiceSession | None:
+        if not SESSION_ID_PATTERN.match(session_id):
+            return None
         session = self._sessions.get(session_id)
         if session is not None:
             return session
@@ -146,13 +153,27 @@ class VoiceSessionManager:
     def record_user_text(
         self, session_id: str, text: str, *, kind: HistoryKind = "text"
     ) -> None:
+        if not self._accepts_history(session_id):
+            return
         self._store.record_user_text(session_id, text, kind=kind)
 
     def record_assistant_text(self, session_id: str, text: str) -> None:
+        if not self._accepts_history(session_id):
+            return
         self._store.record_assistant_text(session_id, text)
 
     def record_tool_call(self, session_id: str, *, name: str, arguments: str) -> None:
+        if not self._accepts_history(session_id):
+            return
         self._store.record_tool_call(session_id, name=name, arguments=arguments)
+
+    def _accepts_history(self, session_id: str) -> bool:
+        """CLOSED/ERROR のセッションには履歴を追記しない。"""
+        session = self.get(session_id)
+        return session is not None and session.status not in {
+            SessionStatus.CLOSED,
+            SessionStatus.ERROR,
+        }
 
     async def acquire_stream(self, session_id: str) -> None:
         async with self._stream_lock:
@@ -191,7 +212,12 @@ class VoiceSessionManager:
         self.close_session(session_id, reason=reason)
 
     def note_upstream_audio_output(self, session_id: str) -> None:
-        session = self._require(session_id)
+        session = self.get(session_id)
+        if session is None or session.status in {
+            SessionStatus.CLOSED,
+            SessionStatus.ERROR,
+        }:
+            return
         session.upstream_audio_output_events += 1
         self._persist(session)
 

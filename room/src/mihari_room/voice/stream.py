@@ -23,6 +23,7 @@ from mihari_room.voice.protocol import (
     history_sync_event,
     session_closed_event,
     session_ready_event,
+    user_text_event,
 )
 from mihari_room.voice.sessions import VoiceSessionManager, VoiceStreamBusyError
 from mihari_room.voice.upstream import (
@@ -64,6 +65,7 @@ async def handle_voice_stream(
     upstream = upstream_factory()
     manager.mark_streaming(session_id)
     end_reason = "idle"
+    close_sent = False
     history = manager.get_history(session_id)
     resumed = bool(history)
 
@@ -97,19 +99,38 @@ async def handle_voice_stream(
                 manager=manager,
             )
         )
-        done, pending = await asyncio.wait(
-            {client_task, upstream_task}, return_when=asyncio.FIRST_COMPLETED
+        close_task = asyncio.create_task(
+            _watch_session_close(manager, session_id)
         )
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        for task in done:
-            exc = task.exception()
-            if isinstance(exc, WebSocketDisconnect):
-                end_reason = "client_disconnect"
-            elif exc and not isinstance(exc, asyncio.CancelledError):
-                logger.debug("voice stream task ended: %s", exc)
-                end_reason = "error"
+        try:
+            done, pending = await asyncio.wait(
+                {client_task, upstream_task, close_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                exc = task.exception()
+                if isinstance(exc, WebSocketDisconnect):
+                    end_reason = "client_disconnect"
+                elif exc and not isinstance(exc, asyncio.CancelledError):
+                    logger.debug("voice stream task ended: %s", exc)
+                    end_reason = "error"
+            if close_task in done and close_task.exception() is None:
+                # POST /close 等で外部から CLOSED/ERROR にされた。
+                end_reason = "closed"
+        finally:
+            # ルートタスクが cancel されても子タスクを残さず、例外を回収する。
+            for task in (client_task, upstream_task, close_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                client_task,
+                upstream_task,
+                close_task,
+                return_exceptions=True,
+            )
     except WebSocketDisconnect:
         end_reason = "client_disconnect"
     except Exception as error:
@@ -119,18 +140,32 @@ async def handle_voice_stream(
         try:
             await send_client(error_event(str(error)))
             await send_client(session_closed_event(reason=str(error)))
+            close_sent = True
         except Exception:
             pass
     finally:
         await upstream.close()
         await manager.release_stream(session_id)
         current = manager.get(session_id)
-        if current is None:
-            return
-        if end_reason in {"client_disconnect", "idle"}:
-            manager.mark_idle(session_id)
-        elif end_reason == "error":
-            pass
+        if current is not None:
+            if end_reason in {"client_disconnect", "idle"}:
+                # 外部 close で CLOSED になったセッションを CREATED に巻き戻さない。
+                if current.status is SessionStatus.STREAMING:
+                    manager.mark_idle(session_id)
+            elif end_reason == "error" and current.status is SessionStatus.STREAMING:
+                # タスク側の例外で wait が返り except パスを通っていない場合、
+                # streaming 固着を防ぐため idle に戻して再接続可能にする。
+                logger.warning(
+                    "voice stream %s ended by task error; resetting to idle",
+                    session_id,
+                )
+                manager.mark_idle(session_id)
+        if not close_sent:
+            try:
+                await send_client(session_closed_event())
+                close_sent = True
+            except Exception:
+                pass
 
 
 async def _replay_history_to_upstream(
@@ -155,6 +190,20 @@ async def _replay_history_to_upstream(
                 },
             }
         )
+
+
+async def _watch_session_close(
+    manager: VoiceSessionManager, session_id: str
+) -> None:
+    """POST /close など外部操作で CLOSED/ERROR にされたら戻る。"""
+    while True:
+        await asyncio.sleep(0.2)
+        current = manager.get(session_id)
+        if current is None or current.status in {
+            SessionStatus.CLOSED,
+            SessionStatus.ERROR,
+        }:
+            return
 
 
 async def _client_to_upstream(
@@ -259,6 +308,12 @@ async def _upstream_to_client(
             await send_client(assistant_text_event(text=text, done=True))
         elif event_type == "response.done":
             await _emit_tool_calls(event, send_client, session_id=session_id, manager=manager)
+        elif event_type == "conversation.item.input_audio_transcription.completed":
+            transcript = str(event.get("transcript") or "").strip()
+            if transcript:
+                # ユーザーターンを履歴に残し、history.sync / GET /history で復元できるようにする。
+                manager.record_user_text(session_id, transcript)
+                await send_client(user_text_event(text=transcript))
         elif event_type == "error":
             message = _extract_error_message(event)
             await send_client(error_event(message, code="upstream_error"))
