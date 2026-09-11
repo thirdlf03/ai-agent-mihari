@@ -15,6 +15,7 @@ from mihari_room.contracts import (
     ProgressKind,
 )
 from mihari_room.fakes import InMemoryJobStore
+from mihari_room.job_interactions import append_steer, pending_steers
 from mihari_room.worker.agent import read_session_id
 from mihari_room.worker.hermes import HermesWorker
 
@@ -126,6 +127,25 @@ async def test_queued_followup_is_appended_before_first_run(tmp_path: Path) -> N
     assert FakeAgent.last is not None
     assert "窓もお願い" in FakeAgent.last.prompts[0]
     assert "追記:" in FakeAgent.last.prompts[0]
+
+
+async def test_pending_steer_reaches_turn_prompt_once(tmp_path: Path) -> None:
+    """live 未配信の steer はターンのプロンプトに載り、消費後は再送しない。"""
+    job = _make_job(tmp_path)
+    append_steer(job.directory, "左側を優先して")
+    worker = HermesWorker(agent_factory=_factory, timeout=30)
+
+    async def on_progress(_ev: ProgressEvent) -> None:
+        return None
+
+    await worker.run(job, on_progress)
+    assert FakeAgent.last is not None
+    assert "左側を優先して" in FakeAgent.last.prompts[0]
+    assert "追記:" in FakeAgent.last.prompts[0]
+    assert pending_steers(job) == []
+    # 消費済みなので次ターンでは再送しない。
+    await worker.run(job, on_progress)
+    assert "左側を優先して" not in FakeAgent.last.prompts[-1]
 
 
 async def test_inprocess_failure_returns_failed(tmp_path: Path) -> None:

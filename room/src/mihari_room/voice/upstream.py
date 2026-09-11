@@ -52,7 +52,7 @@ class RealtimeUpstream(ABC):
 
 
 def session_update_event(*, model: str) -> dict[str, Any]:
-    """テキスト出力のみ・手動ターン制御。"""
+    """テキスト出力のみ・手動ターン制御・入力音声の文字起こし有効。"""
     return {
         "type": "session.update",
         "session": {
@@ -60,7 +60,17 @@ def session_update_event(*, model: str) -> dict[str, Any]:
             "model": model,
             "output_modalities": ["text"],
             "tools": [DEMO_TOOL],
-            "turn_detection": None,
+            # GA の RealtimeSessionCreateRequest では音声入力の設定は audio.input 配下。
+            # トップレベルの turn_detection は beta 時代の形で、置いても無視されうる。
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": 24000},
+                    # server VAD を切り、クライアントの commit でターンを確定する。
+                    "turn_detection": None,
+                    # ユーザー発話の文字起こし。user.text 中継と履歴に使う。
+                    "transcription": {"model": "gpt-4o-mini-transcribe"},
+                },
+            },
         },
     }
 
@@ -161,6 +171,14 @@ class FakeRealtimeUpstream(RealtimeUpstream):
                 await self._emit_text("text-only")
             else:
                 await self._emit_text("heard-audio")
+            return
+        if event_type == "input_audio_buffer.commit":
+            await self._queue.put(
+                {
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "transcript": "こんにちは",
+                }
+            )
             return
         if event_type == "conversation.item.create":
             item = event.get("item") or {}

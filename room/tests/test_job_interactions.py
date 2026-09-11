@@ -20,7 +20,13 @@ from mihari_room.contracts import (
     ProgressEvent,
     ProgressKind,
 )
-from mihari_room.job_interactions import JobInteractionHub, list_steers
+from mihari_room.job_interactions import (
+    JobInteractionHub,
+    advance_steer_cursor,
+    append_steer,
+    list_steers,
+    pending_steers,
+)
 from mihari_room.orchestrator import RoomOrchestrator
 from mihari_room.queue.file_queue import FileJobQueue
 from mihari_room.store.file_store import FileJobStore
@@ -81,7 +87,8 @@ class InteractiveWorker:
                 )
 
                 async def answer_later() -> None:
-                    await asyncio.sleep(0.05)
+                    # 待機状態をテスト側のポーリングが確実に観測できるよう猶予を持たせる。
+                    await asyncio.sleep(0.3)
                     self._hub.answer(job, pending.id, "blue")
 
                 asyncio.create_task(answer_later())
@@ -350,3 +357,110 @@ def test_restore_moves_waiting_for_input_to_queued(tmp_path: Path) -> None:
     restored = store.restore_running_to_queued()
     assert len(restored) == 1
     assert store.get(job.id).status is JobStatus.QUEUED
+
+
+def test_pending_steers_follow_cursor(tmp_path: Path) -> None:
+    """ターンで消費した steer は pending から外れる（cursor 前進）。"""
+    store = FileJobStore(tmp_path)
+    job = store.create(CreateJobRequest(title="t", body="b", source=JobSource.PET))
+    append_steer(job.directory, "一段目")
+    append_steer(job.directory, "二段目")
+    assert [item["text"] for item in pending_steers(job)] == ["一段目", "二段目"]
+    advance_steer_cursor(job, [pending_steers(job)[0]])
+    assert [item["text"] for item in pending_steers(job)] == ["二段目"]
+    advance_steer_cursor(job)
+    assert pending_steers(job) == []
+
+
+def test_delivered_steer_not_pending(tmp_path: Path) -> None:
+    """live 配信できた steer は pending_steers に出ない（再送しない）。"""
+    store = FileJobStore(tmp_path)
+    job = store.create(CreateJobRequest(title="t", body="b", source=JobSource.PET))
+    store.set_status(job.id, JobStatus.RUNNING)
+    job = store.get(job.id)
+    hub = JobInteractionHub()
+    hub.register_steer_deliverer(job.id, lambda _job_id, _text: True)
+    record = hub.steer(job, "届く")
+    assert record["delivered"] is True
+    assert pending_steers(job) == []
+    hub.unregister_steer_deliverer(job.id)
+    record2 = hub.steer(job, "届かない")
+    assert record2["delivered"] is False
+    assert [item["text"] for item in pending_steers(job)] == ["届かない"]
+
+
+def test_answer_keeps_waiting_while_other_questions_pending(tmp_path: Path) -> None:
+    """他に pending 質問が残る間は、1 件の回答で running に戻さない。"""
+    gate = asyncio.Event()
+
+    async def hold(_job: Job) -> None:
+        await gate.wait()
+
+    worker = InteractiveWorker(on_start=hold)
+    client, _, store, _ = _make_app(tmp_path, worker=worker)
+    hub: JobInteractionHub = client.app.state.job_interactions  # type: ignore[attr-defined]
+    with client:
+        created = client.post(
+            "/jobs", json={"title": "複数質問", "body": "x", "source": "pet"}, headers=_auth()
+        ).json()
+        job_id = created["job_id"]
+        for _ in range(50):
+            if store.get(job_id).status is JobStatus.RUNNING:
+                break
+            import time
+
+            time.sleep(0.01)
+        job = store.get(job_id)
+        first = hub.register_question(job, "質問1", None)
+        second = hub.register_question(job, "質問2", None)
+        assert store.get(job_id).status is JobStatus.WAITING_FOR_INPUT
+        hub.answer(store.get(job_id), first.id, "a")
+        assert store.get(job_id).status is JobStatus.WAITING_FOR_INPUT
+        hub.answer(store.get(job_id), second.id, "b")
+        assert store.get(job_id).status is JobStatus.RUNNING
+        gate.set()
+
+
+def test_answer_endpoint_404_for_unknown_and_409_for_answered(tmp_path: Path) -> None:
+    """無い qid は 404、回答済みの qid は 409。"""
+    gate = asyncio.Event()
+
+    async def hold(_job: Job) -> None:
+        await gate.wait()
+
+    worker = InteractiveWorker(on_start=hold)
+    client, _, store, _ = _make_app(tmp_path, worker=worker)
+    hub: JobInteractionHub = client.app.state.job_interactions  # type: ignore[attr-defined]
+    with client:
+        created = client.post(
+            "/jobs", json={"title": "分岐", "body": "x", "source": "pet"}, headers=_auth()
+        ).json()
+        job_id = created["job_id"]
+        for _ in range(50):
+            if store.get(job_id).status is JobStatus.RUNNING:
+                break
+            import time
+
+            time.sleep(0.01)
+        job = store.get(job_id)
+        pending = hub.register_question(job, "続ける？", None)
+        assert store.get(job_id).status is JobStatus.WAITING_FOR_INPUT
+        missing = client.post(
+            f"/jobs/{job_id}/questions/no-such-qid/answer",
+            json={"answer": "はい"},
+            headers=_auth(),
+        )
+        assert missing.status_code == 404
+        ok = client.post(
+            f"/jobs/{job_id}/questions/{pending.id}/answer",
+            json={"answer": "はい"},
+            headers=_auth(),
+        )
+        assert ok.status_code == 200
+        again = client.post(
+            f"/jobs/{job_id}/questions/{pending.id}/answer",
+            json={"answer": "もう一度"},
+            headers=_auth(),
+        )
+        assert again.status_code == 409
+        gate.set()
