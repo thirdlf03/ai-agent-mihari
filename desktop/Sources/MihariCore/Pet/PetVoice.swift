@@ -9,18 +9,8 @@ import os
 /// 借りるだけで、検知のセリフが鳴っていれば譲るし、止めるときも検知のセリフには手を出さない。
 @MainActor
 final class PetVoice {
-    /// VOICEVOX エンジンのアドレス。
-    private static let baseURL = URL(string: "http://127.0.0.1:50021")!
-    /// 読み上げに使う話者。冥鳴ひまり(ノーマル)。
-    private static let speakerID = 14
-    /// audio_query の待ち時間(秒)。
-    private static let queryTimeout: TimeInterval = 2
-    /// synthesis の待ち時間(秒)。
-    private static let synthesisTimeout: TimeInterval = 8
     /// 失敗してから次に接続を試みるまでの間隔(秒)。
     private static let retryInterval: TimeInterval = 30
-    /// 合成前にクエリへ載せる調整値。bridge 側と揃えてある。
-    private static let tuning = VoicevoxQueryTuning.standard
 
     private static let logger = Logger(
         subsystem: "com.thirdlf03.mihari",
@@ -29,21 +19,19 @@ final class PetVoice {
 
     /// アプリで唯一の音の出口。検知のセリフと共有する。
     private let player: SpeechPlayer
+    /// VOICEVOX への合成口。§5-1 の会話経路と共有する。
+    private let voicevox: VoicevoxClient
     /// セリフの世代。合成のあいだに次のセリフが来たかを判定するために使う。
     private var generation = 0
     /// この時刻まではエンジンへ接続しに行かない。エンジンが無いときに毎回待たされるのを防ぐ。
     private var unavailableUntil: Date?
 
-    /// 通信に使うセッション。接続できるまで待たず、キャッシュも残さない。
-    private let session: URLSession = {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.waitsForConnectivity = false
-        return URLSession(configuration: configuration)
-    }()
-
-    /// - Parameter player: 音を出す口。検知のセリフと同じものを渡す。
-    init(player: SpeechPlayer) {
+    /// - Parameters:
+    ///   - player: 音を出す口。検知のセリフと同じものを渡す。
+    ///   - voicevox: VOICEVOX 合成クライアント。テストでは差し替え可能。
+    init(player: SpeechPlayer, voicevox: VoicevoxClient = VoicevoxClient()) {
         self.player = player
+        self.voicevox = voicevox
     }
 
     /// セリフを合成して再生する。再生を始められたら音声の長さを返し、鳴らせなければ nil を返す。
@@ -59,9 +47,7 @@ final class PetVoice {
         if let unavailableUntil, Date() < unavailableUntil { return nil }
 
         do {
-            let query = try await audioQuery(text: text)
-            // 既定のクエリのままだと棒読みになるので、抑揚と速さを調整してから合成する。
-            let wave = try await synthesis(query: try Self.tuning.apply(to: query))
+            let wave = try await voicevox.synthesize(text: text)
             // 通信のあいだに次のセリフが来ていたら、古い音声は鳴らさない。
             guard currentGeneration == generation else { return nil }
 
@@ -94,77 +80,5 @@ final class PetVoice {
     func stop() {
         generation += 1
         player.stop(priority: .chatter)
-    }
-
-    /// テキストから音声合成用のクエリ(JSON)を作る。
-    private func audioQuery(text: String) async throws -> Data {
-        let request = try Self.makeRequest(
-            path: "audio_query",
-            queryItems: [
-                URLQueryItem(name: "text", value: text),
-                URLQueryItem(name: "speaker", value: String(Self.speakerID)),
-            ],
-            timeout: Self.queryTimeout
-        )
-        return try await send(request)
-    }
-
-    /// クエリから WAV を合成する。
-    private func synthesis(query: Data) async throws -> Data {
-        var request = try Self.makeRequest(
-            path: "synthesis",
-            queryItems: [URLQueryItem(name: "speaker", value: String(Self.speakerID))],
-            timeout: Self.synthesisTimeout
-        )
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("audio/wav", forHTTPHeaderField: "Accept")
-        request.httpBody = query
-        return try await send(request)
-    }
-
-    /// リクエストを送り、2xx ならボディを返す。
-    private func send(_ request: URLRequest) async throws -> Data {
-        let (body, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw VoiceError.badResponse }
-        guard (200..<300).contains(http.statusCode) else { throw VoiceError.badStatus(http.statusCode) }
-        return body
-    }
-
-    /// エンドポイントとクエリから POST リクエストを組み立てる。
-    private static func makeRequest(
-        path: String,
-        queryItems: [URLQueryItem],
-        timeout: TimeInterval
-    ) throws -> URLRequest {
-        guard var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)
-        else {
-            throw VoiceError.invalidURL
-        }
-        components.queryItems = queryItems
-        // URLComponents は "+" をそのまま残すが、受け取り側では空白と解釈されるのでエスケープする。
-        components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
-        guard let url = components.url else { throw VoiceError.invalidURL }
-
-        var request = URLRequest(url: url, timeoutInterval: timeout)
-        request.httpMethod = "POST"
-        return request
-    }
-
-    /// 読み上げに失敗した理由。ログに出すだけで、UI には出さない。
-    private enum VoiceError: LocalizedError {
-        /// リクエスト URL を組み立てられなかった。
-        case invalidURL
-        /// HTTP のレスポンスとして解釈できなかった。
-        case badResponse
-        /// エンジンが 2xx 以外を返した。
-        case badStatus(Int)
-
-        var errorDescription: String? {
-            switch self {
-            case .invalidURL: return "リクエスト URL を組み立てられなかった"
-            case .badResponse: return "HTTP のレスポンスではなかった"
-            case .badStatus(let code): return "エンジンが HTTP \(code) を返した"
-            }
-        }
     }
 }

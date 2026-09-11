@@ -686,6 +686,12 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         pet.sayFocusStreak()
     }
 
+    public func runVoicevoxRoundTripSmokeTest() {
+        Task {
+            await VoiceConversationSmoke.runRoundTrip(player: speechPlayer)
+        }
+    }
+
     public func runDetectionStep(_ step: DetectionDebugStep) {
         detection.runDebugStep(step)
     }

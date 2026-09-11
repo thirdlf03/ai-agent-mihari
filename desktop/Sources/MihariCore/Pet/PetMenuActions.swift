@@ -69,6 +69,8 @@ public protocol PetMenuActions: AnyObject, ObservableObject {
     func setFastThresholds(_ enabled: Bool)
     /// 集中継続のセリフをその場で喋らせる(デバッグ用)。
     func replayFocusStreak()
+    /// §5-1: 固定短文を VOICEVOX で合成して再生する煙テスト(room / OpenAI 不要)。
+    func runVoicevoxRoundTripSmokeTest()
     /// 検知エンジンを実際に次の段へ進める(デバッグ用)。
     /// 見た目だけの再現と違い、**本物の撮影・投稿が走る。**
     func runDetectionStep(_ step: DetectionDebugStep)
