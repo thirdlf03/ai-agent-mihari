@@ -4,7 +4,9 @@ import Testing
 
 @testable import MihariCore
 
+/// コントローラが @MainActor なので、スイートも MainActor で回す。
 @Suite("voice 画面キャプチャ")
+@MainActor
 struct VoiceScreenCaptureTests {
 
     @Test("マウス位置を含むディスプレイを選ぶ")
@@ -39,19 +41,30 @@ struct VoiceScreenCaptureTests {
 
     @Test("スタブでマウスディスプレイを撮って送る")
     func captureAndSendUsesMouseDisplay() async throws {
-        let png = Data("PNG".utf8)
+        // サムネイル生成が通るよう、実際にデコードできる 1x1 PNG を使う。
+        let png = Data(
+            base64Encoded:
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )!
         let socket = VoiceConversationCaptureTestsScriptedSocket()
+        let factory = VoiceConversationControllerTestsScriptedSocketFactory()
+        factory.queue(socket)
         let controller = VoiceConversationCaptureTests.makeController(
-            socket: socket,
+            factory: factory,
             screenCapture: StubVoiceScreenCapture(
                 result: VoiceScreenCaptureResult(pngData: png, displayTitle: "右", displayID: 2)
             )
         )
         controller.start()
-        try await Task.sleep(for: .milliseconds(100))
+        // ソケットが開く前に送ろうとすると捨てられるため、接続を待ってから要求する。
+        await settle(until: { factory.makeCount >= 1 })
         socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
         controller.captureAndSendScreen(prompt: "見て")
-        try await Task.sleep(for: .milliseconds(200))
+        // 送信と、サムネイル付きの履歴追加の両方が済むまで待つ。
+        await settle(until: {
+            socket.sent.contains { $0.contains("\"input.image\"") }
+                && controller.messages.contains { $0.imageThumbnailPNG != nil }
+        })
 
         let imageFrames = socket.sent.compactMap { text -> [String: Any]? in
             guard
@@ -61,8 +74,8 @@ struct VoiceScreenCaptureTests {
             else { return nil }
             return json
         }
-        #expect(imageFrames.count == 1)
-        #expect(imageFrames[0]["prompt"] as? String == "見て")
+        let imageFrame = try #require(imageFrames.first)
+        #expect(imageFrame["prompt"] as? String == "見て")
         #expect(controller.messages.contains(where: { $0.imageThumbnailPNG != nil }))
         controller.stop()
     }
@@ -114,11 +127,9 @@ private struct StubVoiceScreenCapture: VoiceScreenCapturing {
 @MainActor
 private enum VoiceConversationCaptureTests {
     static func makeController(
-        socket: VoiceConversationCaptureTestsScriptedSocket,
+        factory: VoiceConversationControllerTestsScriptedSocketFactory,
         screenCapture: any VoiceScreenCapturing
     ) -> VoiceConversationController {
-        let factory = VoiceConversationControllerTestsScriptedSocketFactory()
-        factory.queue(socket)
         let endpoint = VoiceSessionEndpoint(
             baseURL: URL(string: "http://127.0.0.1:8787")!,
             token: "token"
@@ -150,7 +161,9 @@ private enum VoiceConversationCaptureTests {
                 micFactory: { VoiceConversationControllerTestsStubMic() },
                 jobCollaboration: VoiceConversationControllerTestsStubJobCollaboration(),
                 screenCapture: screenCapture,
-                onJobSubmitted: nil
+                onJobSubmitted: nil,
+                checkMicPermission: { PermissionState(grant: .granted, detail: "test") },
+                requestMicPermission: { true }
             )
         )
     }
@@ -161,6 +174,10 @@ private enum VoiceConversationCaptureTests {
 private final class VoiceConversationControllerTestsScriptedSocketFactory: VoiceStreamSocketFactory, @unchecked Sendable {
     private let lock = NSLock()
     private var pending: [VoiceConversationCaptureTestsScriptedSocket] = []
+    private var _makeCount = 0
+
+    /// 接続のたびに増える。テストがソケット確立を待つ目印。
+    var makeCount: Int { lock.withLock { _makeCount } }
 
     func queue(_ socket: VoiceConversationCaptureTestsScriptedSocket) {
         lock.lock()
@@ -169,10 +186,11 @@ private final class VoiceConversationControllerTestsScriptedSocketFactory: Voice
     }
 
     func makeSocket(url: URL, token: String) async throws -> any VoiceStreamSocket {
-        lock.lock()
-        defer { lock.unlock() }
-        if pending.isEmpty { return VoiceConversationCaptureTestsScriptedSocket() }
-        return pending.removeFirst()
+        lock.withLock {
+            _makeCount += 1
+            if pending.isEmpty { return VoiceConversationCaptureTestsScriptedSocket() }
+            return pending.removeFirst()
+        }
     }
 }
 

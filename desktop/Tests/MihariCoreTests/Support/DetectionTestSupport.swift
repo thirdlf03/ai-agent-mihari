@@ -196,7 +196,8 @@ func makeDetectionEngine(
 /// 別タスクの決着を待つ。実時間で決め打ちすると、並列実行時の混雑で簡単にフラフラになる。
 @MainActor
 func settle(until condition: () -> Bool) async {
-    for _ in 0..<500 {
+    // 混雑時は各スリープが延びるので、回数の上限は余裕を持たせる。
+    for _ in 0..<2500 {
         if condition() { return }
         try? await Task.sleep(for: .milliseconds(2))
     }

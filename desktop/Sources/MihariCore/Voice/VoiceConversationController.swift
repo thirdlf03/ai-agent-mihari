@@ -28,7 +28,7 @@ public final class VoiceConversationController: ObservableObject {
     /// 会話から依頼した直近の仕事 ID（Hermes job と voice session は別）。
     @Published public private(set) var activeVoiceJobID: String?
 
-    struct Dependencies {
+    public struct Dependencies {
         var connector: VoiceStreamConnector
         var speechPlayer: SpeechPlayer
         var voicevox: VoicevoxClient
@@ -37,8 +37,17 @@ public final class VoiceConversationController: ObservableObject {
         var screenCapture: any VoiceScreenCapturing
         /// 仕事依頼成功時 `(jobID, title)`。`RoomJobMonitor.attach` などへ。
         var onJobSubmitted: (@MainActor (_ jobID: String, _ title: String?) -> Void)?
+        /// マイク権限の照会。テストでは実機の TCC を見ないよう差し替える。
+        var checkMicPermission: @Sendable () -> PermissionState = {
+            PermissionChecker.check(.microphone)
+        }
+        /// マイク権限の要求。許可されたかだけを返す。テストではプロンプトを出さないよう差し替える。
+        var requestMicPermission: @Sendable () async -> Bool = {
+            _ = await PermissionRequester.request(.microphone)
+            return PermissionChecker.check(.microphone).grant == .granted
+        }
 
-        @MainActor static func makeDefault(
+        @MainActor public static func makeDefault(
             speechPlayer: SpeechPlayer,
             onJobSubmitted: (@MainActor (_ jobID: String, _ title: String?) -> Void)? = nil
         ) -> Dependencies {
@@ -65,6 +74,8 @@ public final class VoiceConversationController: ObservableObject {
     private static let silenceDuration: TimeInterval = 0.75
     /// 再接続の最大待ち(秒)。
     private static let maxBackoff: TimeInterval = 30
+    /// 待機中の質問を取り直す間隔(秒)。
+    private static let questionPollInterval: TimeInterval = 8
 
     private let deps: Dependencies
     private var runTask: Task<Void, Never>?
@@ -76,6 +87,14 @@ public final class VoiceConversationController: ObservableObject {
     private var backoffSeconds: TimeInterval = 1
     private var shouldReconnect = false
     private var manualReconnectRequested = false
+
+    /// input.audio などの送信を直列化するチェーン。チャンクごとに Task を並べると
+    /// 到着順が不定になるため、前の送信の完了を待ってから次を送る。
+    private var sendTail: Task<Void, Never>?
+    /// 発話終了の見張り。最後に声を検した時点から無音が続いたらターンを確定する。
+    private var silenceWatchdog: Task<Void, Never>?
+    /// 会話中の質問の取り直しループ。
+    private var questionPollTask: Task<Void, Never>?
 
     /// 再生中はマイク送信を止める（エコー対策）。
     private var echoGuardActive = false
@@ -118,15 +137,20 @@ public final class VoiceConversationController: ObservableObject {
             await self?.runLoop()
         }
         startMic()
+        startQuestionPolling()
     }
 
     /// 会話を終了する。
     public func stop() {
+        // 窓を閉じる操作などからの再入で、終了処理を二度走らせない。
+        guard isActive else { return }
         shouldReconnect = false
         isActive = false
         stopMic()
         runTask?.cancel()
         runTask = nil
+        questionPollTask?.cancel()
+        questionPollTask = nil
         closeSocket()
         playbackGeneration += 1
         deps.speechPlayer.stop(priority: .chatter)
@@ -222,11 +246,22 @@ public final class VoiceConversationController: ObservableObject {
     }
 
     private func sendInputImage(png: Data, prompt: String) async throws {
-        guard let socket = currentSocket else {
-            throw VoiceSessionError.notReady
+        // input.audio と同じ送信チェーンに載せ、音声チャンクとの順序を保つ。
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendTail = Task { [sendTail] in
+                _ = await sendTail?.value
+                do {
+                    guard let socket = currentSocket else {
+                        throw VoiceSessionError.notReady
+                    }
+                    let text = try VoiceOutgoingFrame.inputImage(png: png, prompt: prompt)
+                    try await socket.send(text)
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
         }
-        let text = try VoiceOutgoingFrame.inputImage(png: png, prompt: prompt)
-        try await socket.send(text)
     }
 
     private func performSubmitJob(title: String, body: String) async {
@@ -261,8 +296,17 @@ public final class VoiceConversationController: ObservableObject {
             return
         }
         do {
-            _ = try await deps.jobCollaboration.steer(jobID: targetJobID, instruction: text)
-            appendSystem("仕事 \(targetJobID) へ指示を送った")
+            let response = try await deps.jobCollaboration.steer(
+                jobID: targetJobID,
+                instruction: text
+            )
+            // room は実行中の作業への即時配信を保証しない。届いていなければ
+            // 保存だけ済んで次ターンで読まれる旨をはっきり出す。
+            if response.delivered == false {
+                appendSystem("仕事 \(targetJobID) に指示を保存した（実行中の作業へは未配信・次ターンで読み込まれる）")
+            } else {
+                appendSystem("仕事 \(targetJobID) へ指示を送った")
+            }
             await refreshPendingQuestions(jobID: targetJobID)
         } catch {
             appendSystem("steer に失敗: \(error.localizedDescription)")
@@ -290,7 +334,13 @@ public final class VoiceConversationController: ObservableObject {
 
     private func reportJobStatus(jobID: String, detail: RoomJobDetail? = nil) async {
         do {
-            let resolved = detail ?? (try await deps.jobCollaboration.fetchJob(jobID: jobID))
+            // `??` の自動クロージャは async/throws を包めないので素直に分岐する。
+            let resolved: RoomJobDetail
+            if let detail {
+                resolved = detail
+            } else {
+                resolved = try await deps.jobCollaboration.fetchJob(jobID: jobID)
+            }
             appendSystem(VoiceJobQuestionParser.statusSummary(from: resolved))
             let pending = VoiceJobQuestionParser.pendingQuestions(from: resolved)
             if !pending.isEmpty {
@@ -329,6 +379,21 @@ public final class VoiceConversationController: ObservableObject {
     private func resolvedJobID(_ explicit: String?) -> String? {
         if let explicit, !explicit.isEmpty { return explicit }
         return activeVoiceJobID
+    }
+
+    /// 質問が来てもツール呼び出しが届かない経路があるため、会話から依頼した仕事が
+    /// あるあいだは `pending_questions` を定期的に取り直す。
+    private func startQuestionPolling() {
+        questionPollTask?.cancel()
+        questionPollTask = Task { [weak self] in
+            while let self, !Task.isCancelled, self.isActive {
+                try? await Task.sleep(for: .seconds(Self.questionPollInterval))
+                guard !Task.isCancelled, self.isActive else { break }
+                if let jobID = self.activeVoiceJobID {
+                    await self.refreshPendingQuestions(jobID: jobID)
+                }
+            }
+        }
     }
 
     // MARK: - 接続ループ
@@ -389,7 +454,19 @@ public final class VoiceConversationController: ObservableObject {
             applyHistorySync(entries)
             return false
 
+        case .userText(let text):
+            applyUserTranscript(text)
+            return false
+
         case .assistantText(let delta, let text, let done):
+            // done フレームの text は全文なので、delta の累積へ足すと二重になる。
+            // 全文が届いたら累積を捨てて置き換える。
+            if done, !text.isEmpty {
+                pendingAssistantText = text
+                updateAssistantDraft(text)
+                finalizeAssistantMessage()
+                return false
+            }
             let piece = !delta.isEmpty ? delta : text
             guard !piece.isEmpty else {
                 if done { finalizeAssistantMessage() }
@@ -428,6 +505,33 @@ public final class VoiceConversationController: ObservableObject {
 
     private func startMic() {
         stopMic()
+        switch deps.checkMicPermission().grant {
+        case .granted:
+            beginMicCapture()
+        case .undetermined:
+            // まだ聞いていないので、ここで一度だけプロンプトを出す。結果を見てから開始する。
+            statusText = "マイクの許可を待っている…"
+            Task { [weak self] in
+                guard let self else { return }
+                let granted = await self.deps.requestMicPermission()
+                guard self.isActive else { return }
+                if granted {
+                    self.beginMicCapture()
+                } else {
+                    self.showMicPermissionRequired()
+                }
+            }
+        case .denied:
+            showMicPermissionRequired()
+        }
+    }
+
+    private func showMicPermissionRequired() {
+        statusText = "マイクの利用許可が必要"
+        appendSystem("マイクの利用許可が必要です。システム設定のプライバシーとセキュリティから許可してください")
+    }
+
+    private func beginMicCapture() {
         let capture = deps.micFactory()
         capture.onChunk = { [weak self] data, level in
             Task { @MainActor [weak self] in
@@ -452,6 +556,8 @@ public final class VoiceConversationController: ObservableObject {
         hasStreamedAudioInTurn = false
         isUserSpeaking = false
         lastSpeechTime = nil
+        silenceWatchdog?.cancel()
+        silenceWatchdog = nil
     }
 
     private func handleMicChunk(data: Data, level: Float) {
@@ -473,14 +579,37 @@ public final class VoiceConversationController: ObservableObject {
         if speakingNow {
             isUserSpeaking = true
             lastSpeechTime = Date()
-            hasStreamedAudioInTurn = true
-            sendAudioChunk(data, commit: false, createResponse: false)
-        } else if isUserSpeaking {
-            if let lastSpeechTime,
+            scheduleSilenceWatchdog()
+        }
+
+        if isUserSpeaking {
+            if !speakingNow,
+                let lastSpeechTime,
                 Date().timeIntervalSince(lastSpeechTime) >= Self.silenceDuration
             {
+                // 無音が続いたので発話終了とみなし、このチャンクは送らず確定する。
                 commitUserTurn()
+            } else {
+                // 発話中は語尾の小さい音も欠けないよう、レベルに関係なくすべての
+                // チャンクを送る。空のチャンクは sendAudioChunk 側で捨てられる。
+                hasStreamedAudioInTurn = true
+                sendAudioChunk(data, commit: false, createResponse: false)
             }
+        }
+    }
+
+    /// 最後に声を検した時点から無音が続いたかを見る。チャンクが途絶えても
+    /// ターンが確定するように、発話のたびに仕掛け直す。
+    private func scheduleSilenceWatchdog() {
+        silenceWatchdog?.cancel()
+        silenceWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.silenceDuration))
+            guard let self, !Task.isCancelled else { return }
+            guard self.isUserSpeaking,
+                let lastSpeechTime = self.lastSpeechTime,
+                Date().timeIntervalSince(lastSpeechTime) >= Self.silenceDuration
+            else { return }
+            self.commitUserTurn()
         }
     }
 
@@ -488,6 +617,8 @@ public final class VoiceConversationController: ObservableObject {
         guard isUserSpeaking else { return }
         isUserSpeaking = false
         lastSpeechTime = nil
+        silenceWatchdog?.cancel()
+        silenceWatchdog = nil
 
         // 発話中に送ったチャンクを再送しない。commit + create_response だけ送る。
         if hasStreamedAudioInTurn {
@@ -502,7 +633,10 @@ public final class VoiceConversationController: ObservableObject {
 
     private func sendAudioChunk(_ pcm: Data, commit: Bool, createResponse: Bool) {
         guard let socket = currentSocket, !pcm.isEmpty else { return }
-        Task {
+        let previous = sendTail
+        sendTail = Task {
+            // 前の送信が終わってから送り、フレームの順序を保つ。
+            _ = await previous?.value
             do {
                 let text = try VoiceOutgoingFrame.inputAudio(
                     pcm16: pcm,
@@ -592,8 +726,25 @@ public final class VoiceConversationController: ObservableObject {
 
     // MARK: - 履歴
 
+    /// 発話確定時に履歴へ置く、文字起こし待ちの目印。`user.text` が届いたら書き換える。
+    private static let userPlaceholderText = "（音声を送信）"
+
     private func appendUserPlaceholder() {
-        appendMessage(VoiceConversationMessage(role: .user, text: "（音声を送信）"))
+        appendMessage(VoiceConversationMessage(role: .user, text: Self.userPlaceholderText))
+    }
+
+    /// room が送る入力音声の文字起こし。直前がプレースホルダなら本当の文に差し替え、
+    /// そうでなければ新しい user 行として追加する。
+    private func applyUserTranscript(_ text: String) {
+        guard !text.isEmpty else { return }
+        if let last = messages.last,
+            last.role == .user,
+            last.text == Self.userPlaceholderText
+        {
+            messages[messages.count - 1].text = text
+        } else {
+            appendMessage(VoiceConversationMessage(role: .user, text: text))
+        }
     }
 
     private func updateAssistantDraft(_ text: String) {
@@ -633,6 +784,7 @@ public final class VoiceConversationController: ObservableObject {
     private func closeSocket() {
         let socket = currentSocket
         currentSocket = nil
+        sendTail = nil
         if let socket {
             Task { await socket.close() }
         }
@@ -673,5 +825,6 @@ public final class VoiceConversationController: ObservableObject {
     private func clearSession() {
         sessionID = nil
         streamPath = nil
+        sendTail = nil
     }
 }

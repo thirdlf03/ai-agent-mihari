@@ -5,7 +5,7 @@ import Foundation
 /// 既定のままだと抑揚が乏しく機械的に聞こえるので、少し速く・抑揚を強めにして、
 /// 前後の無音と句読点の間を詰める。bridge 側(`voicevox.py` の `VoiceTuning`)と同じ値を使い、
 /// どちらの経路で喋っても声の印象を揃える。
-struct VoicevoxQueryTuning {
+struct VoicevoxQueryTuning: Equatable {
     /// 話す速さ。1.0 が既定。
     let speed: Double
     /// 抑揚の強さ。大きいほど高低の差がつく。

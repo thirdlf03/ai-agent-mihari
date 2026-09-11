@@ -187,7 +187,7 @@ struct RoomJobMonitorTests {
     }
 
     /// 条件が満たされるまで少しずつ待つ。
-    private func eventually(_ what: String, timeout: Duration = .seconds(5), _ condition: () -> Bool) async throws {
+    private func eventually(_ what: String, timeout: Duration = .seconds(10), _ condition: () -> Bool) async throws {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while ContinuousClock.now < deadline {
             if condition() { return }
@@ -524,7 +524,7 @@ struct RoomJobMonitorTests {
         try await eventually("SSE が開かれる") {
             access.openedCursors.count >= 1
         }
-        #expect(access.openedCursors[0] == "9")
+        #expect(try #require(access.openedCursors.first) == "9")
 
         // 配信に「すでに見た位相の speech」が流れても喋らない(検出済みの再送)。
         access.streamsForOpen = [
@@ -673,7 +673,7 @@ struct RoomJobMonitorTests {
         try await eventually("SSE が開かれる") {
             access.openedCursors.count >= 1
         }
-        #expect(access.openedCursors[0] == "9")
+        #expect(try #require(access.openedCursors.first) == "9")
     }
 
     @Test("rollback は部屋へ送って成果物を引き直す")
