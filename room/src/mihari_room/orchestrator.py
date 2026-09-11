@@ -31,6 +31,13 @@ from mihari_room.events import (
     kind_from_progress,
     sanitize_text,
 )
+from mihari_room.job_interactions import (
+    AnswerNotAllowed,
+    JobInteractionHub,
+    QuestionNotFound,
+    QuestionNotPending,
+    SteerNotAllowed,
+)
 from mihari_room.persona import (
     accepted_line,
     artifact_placed_private_line,
@@ -41,10 +48,12 @@ from mihari_room.persona import (
     followup_again_line,
     followup_queued_line,
     publish_failed_line,
+    question_waiting_line,
     restart_line,
     screenshot_followup_posted_line,
     screenshot_posted_line,
     start_line,
+    steer_received_line,
     temp_deploy_posted_line,
     thread_create_failed_line,
 )
@@ -84,6 +93,8 @@ class RoomOrchestrator:
         self._publisher = publisher
         self._wake = asyncio.Event()
         self._pump_task: asyncio.Task[None] | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._interactions: JobInteractionHub | None = None
         #: 依頼の中断を横取りするフック（Mac 操作の失効など）。
         self._cancel_listeners: list[Callable[[str], None]] = []
 
@@ -111,9 +122,43 @@ class RoomOrchestrator:
         """成果物の公開口を後付けする。cli は store を先に作るので。"""
         self._publisher = publisher
 
+    def attach_interactions(self, hub: JobInteractionHub) -> None:
+        """steer / 質問回答 hub を後付けする。"""
+        self._interactions = hub
+        hub.add_status_callback(self._on_interaction_status)
+        attach = getattr(self._worker, "attach_interactions", None)
+        if callable(attach):
+            attach(hub)
+
+    @property
+    def interactions(self) -> JobInteractionHub | None:
+        return self._interactions
+
     @property
     def store(self) -> JobStore:
         return self._store
+
+    def _on_interaction_status(self, job_id: str, status: JobStatus) -> None:
+        """worker thread からの状態遷移（waiting_for_input ↔ running）。"""
+        try:
+            job = self._store.get(job_id)
+        except JobNotFound:
+            return
+        if job.status is status:
+            return
+        if status is JobStatus.RUNNING and job.status not in (
+            JobStatus.RUNNING,
+            JobStatus.WAITING_FOR_INPUT,
+        ):
+            return
+        if status is JobStatus.WAITING_FOR_INPUT and job.status is not JobStatus.RUNNING:
+            return
+        self._store.set_status(job_id, status)
+        if self._loop is not None and job.thread_id is not None:
+            asyncio.run_coroutine_threadsafe(
+                self._board.set_tag(job.thread_id, status),
+                self._loop,
+            )
 
     def _journal(self, job_id: str) -> EventJournal:
         return EventJournal.for_job(self._store.job_dir(job_id))
@@ -138,6 +183,7 @@ class RoomOrchestrator:
 
     def start_pump(self) -> None:
         """待ち行列を回すループを立てる。テストでも本番でも同じ。"""
+        self._loop = asyncio.get_running_loop()
         if self._pump_task is None or self._pump_task.done():
             self._pump_task = asyncio.create_task(self._pump(), name="mihari-room-pump")
 
@@ -233,7 +279,7 @@ class RoomOrchestrator:
             saved_shots,
             note=screenshot_followup_posted_line(len(saved_shots)),
         )
-        if current.status is JobStatus.RUNNING:
+        if current.status in (JobStatus.RUNNING, JobStatus.WAITING_FOR_INPUT):
             (self._store.job_dir(job.id) / REQUEUE_FILENAME).write_text("1", encoding="utf-8")
             return current
         if current.status is JobStatus.CANCELLED and self._worker_running(job_id):
@@ -254,8 +300,51 @@ class RoomOrchestrator:
             self.wake()
         return self._store.get(job.id)
 
+    async def steer_job(self, job_id: str, text: str) -> dict[str, Any]:
+        """実行中ジョブへ steer 指示を足す。"""
+        if self._interactions is None:
+            raise RuntimeError("job interactions hub is not configured")
+        job = self._store.get(job_id)
+        try:
+            record = self._interactions.steer(job, text)
+        except SteerNotAllowed as error:
+            raise ValueError(str(error)) from error
+        self._journal(job_id).append(
+            job_id=job_id,
+            phase=EventPhase.RESEARCHING,
+            kind=JournalKind.STEER,
+            text=steer_received_line(text),
+        )
+        return record
+
+    async def answer_question(self, job_id: str, qid: str, answer: str) -> dict[str, Any]:
+        """waiting_for_input 中の質問に答える。"""
+        if self._interactions is None:
+            raise RuntimeError("job interactions hub is not configured")
+        job = self._store.get(job_id)
+        try:
+            resolved = self._interactions.answer(job, qid, answer)
+        except QuestionNotFound as error:
+            raise LookupError(str(error)) from error
+        except QuestionNotPending as error:
+            raise ValueError(str(error)) from error
+        except AnswerNotAllowed as error:
+            raise ValueError(str(error)) from error
+        self._journal(job_id).append(
+            job_id=job_id,
+            phase=EventPhase.WAITING,
+            kind=JournalKind.LOG,
+            text=f"質問 {qid} に答えた",
+        )
+        return resolved.to_dict()
+
     async def cancel(self, job_id: str, *, by: str) -> Job:
         job = self._queue.cancel(job_id, by=by)
+        if self._interactions is not None:
+            try:
+                self._interactions.cancel_questions(job.directory)
+            except Exception:
+                logger.debug("cancel questions failed job=%s", job_id, exc_info=True)
         # 実行中の worker thread があれば実際に interrupt する（status flag だけにしない）。
         # thread 終了は _run_job 側が待つ。ここでは届けただけにする。
         try:

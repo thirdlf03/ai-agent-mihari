@@ -1,4 +1,4 @@
-"""OpenAI Realtime voice セッション（§5-1）の room 側最小検証。"""
+"""OpenAI Realtime voice セッション（§5-1 / §5-2）の room 側検証。"""
 
 from __future__ import annotations
 
@@ -18,6 +18,8 @@ from mihari_room.store.file_store import FileJobStore
 from mihari_room.voice.protocol import (
     EVENT_ASSISTANT_TEXT,
     EVENT_ASSISTANT_TOOL_CALL,
+    EVENT_HISTORY_SYNC,
+    EVENT_SESSION_CLOSED,
     EVENT_SESSION_READY,
     EVENT_USER_TEXT,
 )
@@ -327,3 +329,237 @@ def test_user_transcript_relayed_as_user_text(tmp_path: Path) -> None:
                 break
         assert transcript == "こんにちは"
         _disconnect_and_idle(ws, client, session_id)
+
+
+def test_history_persists_text_not_audio(tmp_path: Path) -> None:
+    fake = FakeRealtimeUpstream()
+    client = _make_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01\x02").decode()
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        ws.receive_json()
+        ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+        for _ in range(10):
+            frame = ws.receive_json()
+            if frame["type"] == EVENT_ASSISTANT_TEXT and frame.get("done"):
+                break
+        ws.send_json(
+            {
+                "type": "input.image",
+                "image_base64": PNG_1X1,
+                "media_type": "image/png",
+                "prompt": "look here",
+            }
+        )
+        for _ in range(10):
+            frame = ws.receive_json()
+            if frame["type"] == EVENT_ASSISTANT_TEXT and frame.get("done"):
+                break
+        _disconnect_and_idle(ws, client, session_id)
+    history = client.get(f"/voice/sessions/{session_id}/history", headers=_auth()).json()
+    assert history["session_id"] == session_id
+    user_messages = [message for message in history["messages"] if message["role"] == "user"]
+    image_prompts = [m for m in user_messages if m.get("kind") == "image_prompt"]
+    assert len(image_prompts) == 1
+    assert image_prompts[0]["text"] == "look here"
+    # 音声入力の文字起こしも user ターンとして履歴に残る。
+    assert any(m["text"] == "こんにちは" for m in user_messages)
+    assert any(message["role"] == "assistant" for message in history["messages"])
+    history_path = tmp_path / "voice" / "sessions" / session_id / "history.jsonl"
+    assert history_path.is_file()
+    raw = history_path.read_text(encoding="utf-8")
+    assert audio_b64 not in raw
+    audio_files = list(tmp_path.rglob("*.wav")) + list(tmp_path.rglob("*.pcm"))
+    assert audio_files == []
+
+
+def test_disconnect_and_reconnect_continues_session(tmp_path: Path) -> None:
+    fake = FakeRealtimeUpstream()
+    client = _make_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        ready = ws.receive_json()
+        assert ready["type"] == EVENT_SESSION_READY
+        assert ready.get("resumed") is False
+        ws.send_json(
+            {
+                "type": "input.image",
+                "image_base64": PNG_1X1,
+                "media_type": "image/png",
+                "prompt": "first turn",
+            }
+        )
+        for _ in range(10):
+            frame = ws.receive_json()
+            if frame["type"] == EVENT_ASSISTANT_TEXT and frame.get("done"):
+                break
+        _disconnect_and_idle(ws, client, session_id)
+    detail = client.get(f"/voice/sessions/{session_id}", headers=_auth()).json()
+    assert detail["status"] == "created"
+
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        ready = ws.receive_json()
+        assert ready["type"] == EVENT_SESSION_READY
+        assert ready.get("resumed") is True
+        sync = ws.receive_json()
+        assert sync["type"] == EVENT_HISTORY_SYNC
+        assert len(sync["messages"]) >= 2
+        replay_count = sum(
+            1 for event in fake.sent_events() if event.get("type") == "conversation.item.create"
+        )
+        assert replay_count >= 2
+        ws.send_json(
+            {
+                "type": "input.image",
+                "image_base64": PNG_1X1,
+                "media_type": "image/png",
+                "prompt": "second turn",
+            }
+        )
+        done_text = ""
+        for _ in range(10):
+            frame = ws.receive_json()
+            if frame["type"] == EVENT_ASSISTANT_TEXT and frame.get("done"):
+                done_text = frame.get("text", "")
+                break
+        assert done_text == "saw-image"
+        _disconnect_and_idle(ws, client, session_id)
+    history = client.get(f"/voice/sessions/{session_id}/history", headers=_auth()).json()
+    user_prompts = [
+        message["text"]
+        for message in history["messages"]
+        if message["role"] == "user" and message.get("kind") == "image_prompt"
+    ]
+    assert user_prompts == ["first turn", "second turn"]
+
+
+def test_concurrent_session_guard(tmp_path: Path) -> None:
+    client = _make_app(tmp_path)
+    first = client.post("/voice/sessions", headers=_auth())
+    assert first.status_code == 200
+    second = client.post("/voice/sessions", headers=_auth())
+    assert second.status_code == 409
+
+
+def test_close_session_allows_new_call(tmp_path: Path) -> None:
+    client = _make_app(tmp_path)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    closed = client.post(f"/voice/sessions/{session_id}/close", headers=_auth())
+    assert closed.status_code == 200
+    assert closed.json()["status"] == "closed"
+    detail = client.get(f"/voice/sessions/{session_id}", headers=_auth()).json()
+    assert detail["status"] == "closed"
+    created = client.post("/voice/sessions", headers=_auth())
+    assert created.status_code == 200
+    assert created.json()["session_id"] != session_id
+
+
+def test_concurrent_stream_rejected(tmp_path: Path) -> None:
+    fake = FakeRealtimeUpstream()
+    client = _make_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        ws.receive_json()
+        with pytest.raises((RuntimeError, WebSocketDisconnect)):
+            with client.websocket_connect(
+                f"/voice/sessions/{session_id}/stream", headers=_auth()
+            ) as ws2:
+                ws2.receive_json()
+        _disconnect_and_idle(ws, client, session_id)
+
+
+def test_history_survives_manager_reload(tmp_path: Path) -> None:
+    fake = FakeRealtimeUpstream()
+    client = _make_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        ws.receive_json()
+        ws.send_json(
+            {
+                "type": "input.image",
+                "image_base64": PNG_1X1,
+                "media_type": "image/png",
+                "prompt": "persist me",
+            }
+        )
+        for _ in range(10):
+            frame = ws.receive_json()
+            if frame["type"] == EVENT_ASSISTANT_TEXT and frame.get("done"):
+                break
+        _disconnect_and_idle(ws, client, session_id)
+    reloaded = _make_app(tmp_path, upstream_factory=lambda: fake)
+    history = reloaded.get(f"/voice/sessions/{session_id}/history", headers=_auth()).json()
+    assert any(message.get("text") == "persist me" for message in history["messages"])
+    detail = reloaded.get(f"/voice/sessions/{session_id}", headers=_auth()).json()
+    assert detail["status"] == "created"
+
+
+def test_close_endpoint_ends_live_stream(tmp_path: Path) -> None:
+    """接続中のストリームは POST /close で終わり、client に session.closed が届く。"""
+    fake = FakeRealtimeUpstream()
+    client = _make_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        closed = client.post(f"/voice/sessions/{session_id}/close", headers=_auth())
+        assert closed.status_code == 200
+        for _ in range(20):
+            frame = ws.receive_json()
+            if frame["type"] == EVENT_SESSION_CLOSED:
+                break
+        else:
+            raise AssertionError("session.closed was not delivered")
+    detail = client.get(f"/voice/sessions/{session_id}", headers=_auth()).json()
+    assert detail["status"] == "closed"
+
+
+def test_audio_transcript_recorded_in_history(tmp_path: Path) -> None:
+    """音声→commit の文字起こしが user ロールで履歴に残る。"""
+    fake = FakeRealtimeUpstream()
+    client = _make_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01").decode()
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        ws.receive_json()
+        ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+        for _ in range(10):
+            frame = ws.receive_json()
+            if frame["type"] == EVENT_USER_TEXT:
+                break
+        _disconnect_and_idle(ws, client, session_id)
+    history = client.get(f"/voice/sessions/{session_id}/history", headers=_auth()).json()
+    transcripts = [
+        m for m in history["messages"] if m["role"] == "user" and m.get("kind") == "text"
+    ]
+    assert any(m["text"] == "こんにちは" for m in transcripts)
+
+
+def test_invalid_session_id_rejected(tmp_path: Path) -> None:
+    """パス連結に使えない session_id は 404 / WS 4404 で拒否する。"""
+    client = _make_app(tmp_path)
+    for bad_id in ("..", "%2E%2E", "bad..id", "bad id", "x" * 65):
+        response = client.get(f"/voice/sessions/{bad_id}", headers=_auth())
+        assert response.status_code == 404
+        response = client.post(f"/voice/sessions/{bad_id}/close", headers=_auth())
+        assert response.status_code == 404
+    with client.websocket_connect(
+        "/voice/sessions/bad..id/stream", headers=_auth()
+    ) as ws:
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            ws.receive_json()
+        assert excinfo.value.code == 4404

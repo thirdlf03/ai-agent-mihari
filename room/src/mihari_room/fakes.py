@@ -55,6 +55,9 @@ class InMemoryJobStore:
     def list_running(self) -> Sequence[Job]:
         return tuple(job for job in self._jobs.values() if job.status is JobStatus.RUNNING)
 
+    def list_active(self) -> Sequence[Job]:
+        return tuple(job for job in self._jobs.values() if job.status.occupies_desk())
+
     def find_by_thread_id(self, thread_id: int) -> Job | None:
         for job in self._jobs.values():
             if job.thread_id == thread_id:
@@ -74,7 +77,7 @@ class InMemoryJobStore:
     def restore_running_to_queued(self) -> Sequence[Job]:
         restored: list[Job] = []
         for job_id, job in list(self._jobs.items()):
-            if job.status is JobStatus.RUNNING:
+            if job.status.occupies_desk():
                 restored.append(self.set_status(job_id, JobStatus.QUEUED))
         return tuple(restored)
 

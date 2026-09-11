@@ -50,10 +50,15 @@ from mihari_room.contracts import (
     ProgressEvent,
     ProgressKind,
 )
+from mihari_room.job_interactions import (
+    advance_steer_cursor,
+    pending_steers,
+)
 from mihari_room.persona import (
     confirm_alone_line,
     ensure_room_soul,
     memory_candidate_line,
+    question_waiting_line,
     temp_deploy_posted_line,
 )
 from mihari_room.worker.progress import format_tool_progress
@@ -396,20 +401,27 @@ def resolve_image_native_mode() -> tuple[bool, str]:
 image_native_check = resolve_image_native_mode
 
 
-def build_turn_prompt(job: Job) -> str:
-    """初回は題と本文＋待機中 followup があれば末尾に追記。
+def _pending_notes(job: Job) -> str:
+    """未実行の followup と未消費の steer を次ターンへ載せる文面にまとめる。"""
+    parts = [path.read_text(encoding="utf-8") for path in pending_followups(job)]
+    parts.extend(str(item["text"]) for item in pending_steers(job))
+    return "\n---\n".join(parts)
 
-    続きは未実行の followup 全部を同じセッションの次ターンとして渡す。
+
+def build_turn_prompt(job: Job) -> str:
+    """初回は題と本文＋待機中 followup/steer があれば末尾に追記。
+
+    続きは未実行の followup/steer 全部を同じセッションの次ターンとして渡す。
     """
     from mihari_room.worker.hermes import build_prompt
 
-    pending = pending_followups(job)
-    if read_session_id(job) and pending:
-        notes = "\n---\n".join(path.read_text(encoding="utf-8") for path in pending)
+    notes = _pending_notes(job)
+    if read_session_id(job) and notes:
         return (
             f"続きの依頼:\n{notes}\n\n"
             "作業内容は上の続きです。"
-            f"`{INPUT_DIRNAME}/followup-*.txt` にも同じ追記があります。"
+            f"`{INPUT_DIRNAME}/followup-*.txt` や `{INPUT_DIRNAME}/steer/*.txt`"
+            " にも同じ追記があります。"
             f"`{INPUT_DIRNAME}/` に他の添付が無くても正常です。無いファイルを探さないでください。"
             f"結果は `{OUTPUT_DIRNAME}/` に書き出してください。"
             "プレビュー CSP は `script-src 'self'`。"
@@ -417,8 +429,7 @@ def build_turn_prompt(job: Job) -> str:
             "必要な説明は標準出力の最後に 1〜数行で書いてください。"
         )
     base = build_prompt(job)
-    if pending:
-        notes = "\n---\n".join(path.read_text(encoding="utf-8") for path in pending)
+    if notes:
         return f"{base}\n\n追記:\n{notes}"
     return base
 
@@ -1055,6 +1066,26 @@ class InProcessHermes:
         self._live_lock = threading.Lock()
         #: Mac 操作の hub。無ければ mac_* ツールを載せない。
         self._mac_control = mac_control
+        self._interactions: Any = None
+
+    def attach_interactions(self, hub: Any) -> None:
+        self._interactions = hub
+
+    def deliver_steer(self, job_id: str, text: str) -> bool:
+        """live agent へ steer を届ける。届けられなければ False。"""
+        agent = self._live.get(job_id)
+        if agent is None:
+            return False
+        for method_name in ("steer", "inject_user_message", "add_user_message", "add_message"):
+            method = getattr(agent, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                method(text)
+                return True
+            except Exception:
+                logger.debug("deliver_steer via %s failed", method_name, exc_info=True)
+        return False
 
     def request_cancel(self, job_id: str) -> bool:
         """実行中の agent に interrupt を届ける。届けば True。"""
@@ -1109,10 +1140,59 @@ class InProcessHermes:
                 )
 
         def clarify_callback(question: str, choices: Any = None, multi_select: bool = False) -> str:
+            hub = self._interactions
+            safe_question = sanitize_preview(question) or question
+            if hub is not None:
+                from mihari_room.job_interactions import DEFAULT_QUESTION_TIMEOUT_SEC
+
+                choice_list: list[str] | None = None
+                if choices:
+                    if isinstance(choices, (list, tuple)):
+                        choice_list = [str(c) for c in choices]
+                    else:
+                        choice_list = [str(choices)]
+                emit(
+                    ProgressEvent(
+                        kind=ProgressKind.LOG,
+                        text=question_waiting_line(safe_question),
+                        phase="waiting",
+                    )
+                )
+                try:
+                    from mihari_room.events import EventJournal, EventPhase, JournalKind
+
+                    EventJournal.for_job(job.directory).append(
+                        job_id=job.id,
+                        phase=EventPhase.WAITING,
+                        kind=JournalKind.QUESTION,
+                        text=safe_question,
+                    )
+                except Exception:
+                    pass
+                pending = hub.register_question(
+                    job,
+                    safe_question,
+                    choice_list,
+                    multi_select=multi_select,
+                )
+                try:
+                    answer = hub.wait_for_answer(
+                        job.id,
+                        pending.id,
+                        timeout=min(self._timeout, DEFAULT_QUESTION_TIMEOUT_SEC),
+                    )
+                except Exception:
+                    hub.cleanup_question(pending.id)
+                    hub.resume_running(job.id)
+                    raise
+                finally:
+                    hub.cleanup_question(pending.id)
+                hub.resume_running(job.id)
+                return answer
             emit(
                 ProgressEvent(
                     kind=ProgressKind.LOG,
-                    text=confirm_alone_line(sanitize_preview(question)),
+                    text=confirm_alone_line(safe_question),
                 )
             )
             if choices:
@@ -1124,6 +1204,9 @@ class InProcessHermes:
             return "[unattended room: make the most reasonable assumption and continue.]"
 
         pending = pending_followups(job) if read_session_id(job) else []
+        # 未消費の steer。ターンのプロンプトに載せた分だけ成功後にカーソルを進める
+        # （live 配信済みは hub.steer 時点で mark_steer_delivered 済みなので出ない）。
+        steers = pending_steers(job)
         # 未配信のスクショ（1 ターンの上限まで）。配信成功でカーソルが進む。
         screenshots = undelivered_screenshots(job)[:MAX_SCREENSHOTS_PER_TURN]
         # 古い失敗理由は次の仕事に持ち越さない。
@@ -1240,6 +1323,10 @@ class InProcessHermes:
                     )
                     holder.append(agent)
                     self._live[job.id] = agent
+                    if self._interactions is not None:
+                        self._interactions.register_steer_deliverer(
+                            job.id, self.deliver_steer
+                        )
                     # セッション ID は早めに残す（中断時も拾えるように）。
                     _persist_session_best_effort(job, getattr(agent, "session_id", None))
                     try:
@@ -1314,6 +1401,8 @@ class InProcessHermes:
                         except Exception:
                             pass
                     self._live.pop(job.id, None)
+                    if self._interactions is not None:
+                        self._interactions.unregister_steer_deliverer(job.id)
                     # 中断時も ID があれば残す。
                     try:
                         if holder:
@@ -1412,6 +1501,12 @@ class InProcessHermes:
                 advance_followup_cursor(job, pending)
         except Exception:
             logger.debug("followup cursor advance failed", exc_info=True)
+        # ターンのプロンプトに載せた steer も同様にカーソルを進める。
+        try:
+            if steers:
+                advance_steer_cursor(job, steers)
+        except Exception:
+            logger.debug("steer cursor advance failed", exc_info=True)
         # 配信したスクショも同様にカーソルを進める。
         try:
             if screenshots:

@@ -47,6 +47,14 @@ from mihari_room.contracts import (
 )
 from mihari_room.discord.board import MAX_TITLE_LEN
 from mihari_room.events import EventJournal, EventPhase, JournalKind
+from mihari_room.job_interactions import (
+    AnswerNotAllowed,
+    QuestionNotFound,
+    QuestionNotPending,
+    SteerNotAllowed,
+    list_pending_questions,
+    list_questions,
+)
 from mihari_room.orchestrator import RoomOrchestrator
 from mihari_room.queue.file_queue import CancelNotAllowed
 from mihari_room.store.file_store import JobNotFound
@@ -168,6 +176,28 @@ class FollowupBody(BaseModel):
 
 class CancelBody(BaseModel):
     by: str | None = None
+
+
+class SteerBody(BaseModel):
+    text: str
+
+    @field_validator("text")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("text is empty")
+        return value
+
+
+class QuestionAnswerBody(BaseModel):
+    answer: str
+
+    @field_validator("answer")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("answer is empty")
+        return value
 
 
 def _decode_screenshots(screenshots: list[ScreenshotBody] | None) -> list[ScreenshotAttachment]:
@@ -391,6 +421,9 @@ def _job_detail(orchestrator: RoomOrchestrator, job: Job) -> dict[str, Any]:
         "artifacts": artifacts,
         "temp_deploys": temp_deploys_for(job.directory),
         "screenshots": _screenshot_details(job),
+        "pending_questions": [
+            q.to_dict() for q in list_pending_questions(job.directory)
+        ],
         "latest_event": journal.latest(),
     }
 
@@ -708,8 +741,13 @@ def create_app(
     except Exception:
         pass
 
+    from mihari_room.job_interactions import JobInteractionHub
     from mihari_room.voice.protocol import PROTOCOL_VERSION as VOICE_PROTOCOL_VERSION
     from mihari_room.voice.routes import register_voice_routes
+
+    interactions = JobInteractionHub()
+    app.state.job_interactions = interactions
+    orchestrator.attach_interactions(interactions)
 
     register_voice_routes(app, upstream_factory=voice_upstream_factory)
 
@@ -721,6 +759,8 @@ def create_app(
             "attachment_upload": True,
             "job_list": True,
             "job_history": True,
+            "job_steer": True,
+            "job_questions": True,
             "mac_control": True,
             "mac_control_protocol": PROTOCOL_VERSION,
             "voice_realtime": voice_manager.voice_enabled(),
@@ -826,9 +866,8 @@ def create_app(
     @app.get("/jobs/running", dependencies=[Depends(verify_token)])
     def list_running(request: Request) -> dict[str, Any]:
         orchestrator = request.app.state.orchestrator
-        return {
-            "jobs": [_job_detail(orchestrator, job) for job in orchestrator.store.list_running()]
-        }
+        list_active = getattr(orchestrator.store, "list_active", orchestrator.store.list_running)
+        return {"jobs": [_job_detail(orchestrator, job) for job in list_active()]}
 
     # 履歴を含む一覧。待ち・実行中・完了・失敗・中断と Discord 作成を全部返す（新しい順）。
     @app.get("/jobs", dependencies=[Depends(verify_token)])
@@ -868,6 +907,63 @@ def create_app(
             thread_id=job.thread_id,
             status=job.status.value,
         )
+
+    @app.post("/jobs/{job_id}/steer", dependencies=[Depends(verify_token)])
+    async def steer_job(request: Request, job_id: str, body: SteerBody) -> dict[str, Any]:
+        orchestrator = request.app.state.orchestrator
+        try:
+            orchestrator.store.get(job_id)
+        except JobNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="仕事がない"
+            ) from error
+        try:
+            record = await orchestrator.steer_job(job_id, body.text)
+        except ValueError as error:
+            message = str(error)
+            if "not steerable" in message:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=message) from error
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=message) from error
+        except SteerNotAllowed as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        return {"job_id": job_id, **record}
+
+    @app.get("/jobs/{job_id}/questions", dependencies=[Depends(verify_token)])
+    def job_questions(request: Request, job_id: str) -> dict[str, Any]:
+        orchestrator = request.app.state.orchestrator
+        try:
+            job = orchestrator.store.get(job_id)
+        except JobNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="仕事がない"
+            ) from error
+        return {"questions": [q.to_dict() for q in list_questions(job.directory)]}
+
+    @app.post(
+        "/jobs/{job_id}/questions/{qid}/answer",
+        dependencies=[Depends(verify_token)],
+    )
+    async def answer_job_question(
+        request: Request, job_id: str, qid: str, body: QuestionAnswerBody
+    ) -> dict[str, Any]:
+        orchestrator = request.app.state.orchestrator
+        try:
+            orchestrator.store.get(job_id)
+        except JobNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="仕事がない"
+            ) from error
+        try:
+            resolved = await orchestrator.answer_question(job_id, qid, body.answer)
+        except LookupError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+        except QuestionNotPending as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except (AnswerNotAllowed, ValueError) as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except QuestionNotFound as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+        return {"job_id": job_id, "question": resolved}
 
     @app.post("/jobs/{job_id}/cancel", dependencies=[Depends(verify_token)])
     async def cancel_job(
@@ -1059,7 +1155,7 @@ def create_app(
         """
         job, publisher = _artifact_target(request, job_id)
         latest = request.app.state.orchestrator.store.get(job_id)
-        if latest.status is JobStatus.RUNNING:
+        if latest.status.occupies_desk():
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail="実行中の仕事は復元できない"
             )

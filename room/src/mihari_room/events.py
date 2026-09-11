@@ -57,6 +57,10 @@ class JournalKind(StrEnum):
     MEMORY_CANDIDATE = "memory_candidate"
     #: wrangler --temporary の workers.dev。claim URL は本文に載せない。
     TEMP_DEPLOY = "temp_deploy"
+    #: Hermes clarify 等でユーザー入力待ち。phase は WAITING。
+    QUESTION = "question"
+    #: 実行中ジョブへの steer 指示。
+    STEER = "steer"
 
 
 def kind_from_progress(kind: ProgressKind) -> JournalKind:

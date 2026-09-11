@@ -146,6 +146,8 @@ class FakeRealtimeUpstream(RealtimeUpstream):
 
     async def connect(self) -> None:
         self._connected = True
+        self._closed = False
+        self._queue = asyncio.Queue()
         await self.send(session_update_event(model="gpt-realtime-2.1-mini"))
         await self._queue.put({"type": "session.created", "session": {"model": "fake"}})
 
@@ -190,12 +192,18 @@ class FakeRealtimeUpstream(RealtimeUpstream):
             return
 
     async def receive(self) -> dict[str, Any]:
+        if self._closed:
+            raise RuntimeError("upstream closed")
         if not self._connected:
             raise RuntimeError("upstream not connected")
         return await self._queue.get()
 
     async def close(self) -> None:
         self._closed = True
+        try:
+            self._queue.put_nowait({"type": "session.closed"})
+        except asyncio.QueueFull:
+            pass
 
     def audio_output_events_seen(self) -> int:
         return self._audio_output_events

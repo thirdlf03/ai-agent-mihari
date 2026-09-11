@@ -89,6 +89,12 @@ class FileJobStore:
         """作業中の机。ふつうは 0 か 1 件。古い順。"""
         return tuple(job for _, job in self._iter_jobs_sorted() if job.status is JobStatus.RUNNING)
 
+    def list_active(self) -> Sequence[Job]:
+        """机を占有している仕事（running / waiting_for_input）。古い順。"""
+        return tuple(
+            job for _, job in self._iter_jobs_sorted() if job.status.occupies_desk()
+        )
+
     def list_all(self) -> Sequence[Job]:
         """全仕事を新しい順に。待ち・実行中・終端・Discord 作成を全部含む。"""
         return tuple(job for _, job in reversed(self._iter_jobs_sorted()))
@@ -113,10 +119,10 @@ class FileJobStore:
         return self._job_from_meta(meta)
 
     def restore_running_to_queued(self) -> Sequence[Job]:
-        """落ちていた机を片づける。running は全部 queued に戻す。"""
+        """落ちていた机を片づける。running / waiting_for_input は queued に戻す。"""
         restored: list[Job] = []
         for _, job in self._iter_jobs_sorted():
-            if job.status is JobStatus.RUNNING:
+            if job.status.occupies_desk():
                 restored.append(self.set_status(job.id, JobStatus.QUEUED))
         return tuple(restored)
 

@@ -27,7 +27,7 @@ class FileJobQueue:
 
     def dequeue(self) -> Job | None:
         """一番古い待ちを作業中に。机が埋まっているか空なら None。"""
-        if self.running() is not None:
+        if self.active() is not None:
             return None
         queued = self._store.list_queued()
         if not queued:
@@ -38,6 +38,14 @@ class FileJobQueue:
         """今作業中の仕事。なければ None。"""
         found = self._store.list_running()
         return found[0] if found else None
+
+    def active(self) -> Job | None:
+        """机を占有している仕事（running または waiting_for_input）。"""
+        getter = getattr(self._store, "list_active", None)
+        if callable(getter):
+            found = getter()
+            return found[0] if found else None
+        return self.running()
 
     def cancel(self, job_id: str, *, by: str) -> Job:
         """頼んだ人か持ち主だけ取り消せる。作業中なら机が空く。"""

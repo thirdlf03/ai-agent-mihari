@@ -17,6 +17,7 @@ class JobStatus(StrEnum):
 
     QUEUED = "queued"
     RUNNING = "running"
+    WAITING_FOR_INPUT = "waiting_for_input"
     DONE = "done"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -25,10 +26,15 @@ class JobStatus(StrEnum):
         return {
             JobStatus.QUEUED: "待ち",
             JobStatus.RUNNING: "作業中",
+            JobStatus.WAITING_FOR_INPUT: "入力待ち",
             JobStatus.DONE: "完了",
             JobStatus.FAILED: "失敗",
             JobStatus.CANCELLED: "中断",
         }[self]
+
+    def occupies_desk(self) -> bool:
+        """机を占有する状態（同時 RUNNING は 1 件の制約）。"""
+        return self in (JobStatus.RUNNING, JobStatus.WAITING_FOR_INPUT)
 
 
 class JobSource(StrEnum):

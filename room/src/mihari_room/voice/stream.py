@@ -12,6 +12,7 @@ from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from mihari_room.voice.history import HistoryMessage
 from mihari_room.voice.protocol import (
     EVENT_INPUT_AUDIO,
     EVENT_INPUT_IMAGE,
@@ -19,11 +20,12 @@ from mihari_room.voice.protocol import (
     assistant_text_event,
     assistant_tool_call_event,
     error_event,
+    history_sync_event,
     session_closed_event,
     session_ready_event,
     user_text_event,
 )
-from mihari_room.voice.sessions import VoiceSessionManager
+from mihari_room.voice.sessions import VoiceSessionManager, VoiceStreamBusyError
 from mihari_room.voice.upstream import (
     UPSTREAM_AUDIO_OUTPUT_EVENTS,
     RealtimeUpstream,
@@ -47,25 +49,47 @@ async def handle_voice_stream(
     if session is None:
         await websocket.close(code=4404)
         return
-    if session.status is SessionStatus.CLOSED:
+    if session.status in {SessionStatus.CLOSED, SessionStatus.ERROR}:
         await websocket.close(code=4409)
+        return
+
+    try:
+        await manager.acquire_stream(session_id)
+    except VoiceStreamBusyError:
+        await websocket.close(code=4409)
+        return
+    except KeyError:
+        await websocket.close(code=4404)
         return
 
     upstream = upstream_factory()
     manager.mark_streaming(session_id)
+    end_reason = "idle"
     close_sent = False
+    history = manager.get_history(session_id)
+    resumed = bool(history)
 
     async def send_client(frame: dict[str, Any]) -> None:
         await websocket.send_text(json.dumps(frame, ensure_ascii=False))
 
     try:
         await upstream.connect()
+        if history:
+            await _replay_history_to_upstream(upstream, history)
         await send_client(
-            session_ready_event(session_id=session_id, model=session.model)
+            session_ready_event(session_id=session_id, model=session.model, resumed=resumed)
         )
+        if history:
+            await send_client(history_sync_event(messages=manager.history_to_dicts(session_id)))
 
         client_task = asyncio.create_task(
-            _client_to_upstream(websocket, upstream, send_client)
+            _client_to_upstream(
+                websocket,
+                upstream,
+                send_client,
+                session_id=session_id,
+                manager=manager,
+            )
         )
         upstream_task = asyncio.create_task(
             _upstream_to_client(
@@ -75,27 +99,43 @@ async def handle_voice_stream(
                 manager=manager,
             )
         )
+        close_task = asyncio.create_task(
+            _watch_session_close(manager, session_id)
+        )
         try:
             done, pending = await asyncio.wait(
-                {client_task, upstream_task}, return_when=asyncio.FIRST_COMPLETED
+                {client_task, upstream_task, close_task},
+                return_when=asyncio.FIRST_COMPLETED,
             )
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
             for task in done:
                 exc = task.exception()
-                if exc and not isinstance(exc, WebSocketDisconnect):
+                if isinstance(exc, WebSocketDisconnect):
+                    end_reason = "client_disconnect"
+                elif exc and not isinstance(exc, asyncio.CancelledError):
                     logger.debug("voice stream task ended: %s", exc)
+                    end_reason = "error"
+            if close_task in done and close_task.exception() is None:
+                # POST /close 等で外部から CLOSED/ERROR にされた。
+                end_reason = "closed"
         finally:
             # ルートタスクが cancel されても子タスクを残さず、例外を回収する。
-            for task in (client_task, upstream_task):
+            for task in (client_task, upstream_task, close_task):
                 if not task.done():
                     task.cancel()
             await asyncio.gather(
-                client_task, upstream_task, return_exceptions=True
+                client_task,
+                upstream_task,
+                close_task,
+                return_exceptions=True,
             )
+    except WebSocketDisconnect:
+        end_reason = "client_disconnect"
     except Exception as error:
         logger.exception("voice stream failed for %s", session_id)
+        end_reason = "error"
         manager.mark_closed(session_id, reason=str(error))
         try:
             await send_client(error_event(str(error)))
@@ -105,23 +145,82 @@ async def handle_voice_stream(
             pass
     finally:
         await upstream.close()
+        await manager.release_stream(session_id)
         current = manager.get(session_id)
-        if current is not None and current.status is not SessionStatus.ERROR:
-            manager.mark_closed(session_id)
+        if current is not None:
+            if end_reason in {"client_disconnect", "idle"}:
+                # 外部 close で CLOSED になったセッションを CREATED に巻き戻さない。
+                if current.status is SessionStatus.STREAMING:
+                    manager.mark_idle(session_id)
+            elif end_reason == "error" and current.status is SessionStatus.STREAMING:
+                # タスク側の例外で wait が返り except パスを通っていない場合、
+                # streaming 固着を防ぐため idle に戻して再接続可能にする。
+                logger.warning(
+                    "voice stream %s ended by task error; resetting to idle",
+                    session_id,
+                )
+                manager.mark_idle(session_id)
         if not close_sent:
             try:
                 await send_client(session_closed_event())
+                close_sent = True
             except Exception:
                 pass
+
+
+async def _replay_history_to_upstream(
+    upstream: RealtimeUpstream,
+    messages: list[HistoryMessage],
+) -> None:
+    """切断復旧時、テキスト履歴だけ upstream コンテキストへ再注入する。"""
+    for message in messages:
+        if message.kind == "tool_call":
+            continue
+        text = message.text.strip()
+        if not text:
+            continue
+        content_type = "input_text" if message.role == "user" else "output_text"
+        await upstream.send(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": message.role,
+                    "content": [{"type": content_type, "text": text}],
+                },
+            }
+        )
+
+
+async def _watch_session_close(
+    manager: VoiceSessionManager, session_id: str
+) -> None:
+    """POST /close など外部操作で CLOSED/ERROR にされたら戻る。"""
+    while True:
+        await asyncio.sleep(0.2)
+        current = manager.get(session_id)
+        if current is None or current.status in {
+            SessionStatus.CLOSED,
+            SessionStatus.ERROR,
+        }:
+            return
 
 
 async def _client_to_upstream(
     websocket: WebSocket,
     upstream: RealtimeUpstream,
     send_client: Any,
+    *,
+    session_id: str,
+    manager: VoiceSessionManager,
 ) -> None:
     while True:
-        raw = await websocket.receive_text()
+        message = await websocket.receive()
+        if message.get("type") == "websocket.disconnect":
+            raise WebSocketDisconnect()
+        raw = message.get("text")
+        if raw is None:
+            continue
         try:
             frame = json.loads(raw)
         except (ValueError, TypeError):
@@ -133,7 +232,7 @@ async def _client_to_upstream(
             if frame_type == EVENT_INPUT_AUDIO:
                 await _forward_audio(frame, upstream)
             elif frame_type == EVENT_INPUT_IMAGE:
-                await _forward_image(frame, upstream)
+                await _forward_image(frame, upstream, session_id=session_id, manager=manager)
             else:
                 await send_client(error_event(f"未知のイベント: {frame_type}", code="bad_event"))
         except (ValueError, binascii.Error) as error:
@@ -144,7 +243,7 @@ async def _forward_audio(frame: dict[str, Any], upstream: RealtimeUpstream) -> N
     audio_b64 = frame.get("audio_base64") or frame.get("audio") or ""
     if not isinstance(audio_b64, str) or not audio_b64:
         raise ValueError("input.audio には audio_base64 が必要")
-    # 形式チェックのみ。中身は OpenAI へそのまま渡す。
+    # 形式チェックのみ。中身は OpenAI へそのまま渡し、ディスクには書かない。
     base64.b64decode(audio_b64, validate=True)
     await upstream.send({"type": "input_audio_buffer.append", "audio": audio_b64})
     if frame.get("commit", True):
@@ -153,7 +252,13 @@ async def _forward_audio(frame: dict[str, Any], upstream: RealtimeUpstream) -> N
         await upstream.send(response_create_event())
 
 
-async def _forward_image(frame: dict[str, Any], upstream: RealtimeUpstream) -> None:
+async def _forward_image(
+    frame: dict[str, Any],
+    upstream: RealtimeUpstream,
+    *,
+    session_id: str,
+    manager: VoiceSessionManager,
+) -> None:
     image_b64 = frame.get("image_base64") or frame.get("image") or ""
     media_type = frame.get("media_type") or "image/png"
     prompt = frame.get("prompt") or frame.get("text") or "Describe this image."
@@ -162,6 +267,7 @@ async def _forward_image(frame: dict[str, Any], upstream: RealtimeUpstream) -> N
     base64.b64decode(image_b64, validate=True)
     if not isinstance(media_type, str) or not media_type.startswith("image/"):
         raise ValueError("input.image の media_type が不正")
+    manager.record_user_text(session_id, str(prompt), kind="image_prompt")
     content: list[dict[str, Any]] = [
         {
             "type": "input_image",
@@ -197,21 +303,33 @@ async def _upstream_to_client(
                 await send_client(assistant_text_event(delta=delta, done=False))
         elif event_type == "response.output_text.done":
             text = event.get("text") or ""
+            if text:
+                manager.record_assistant_text(session_id, str(text))
             await send_client(assistant_text_event(text=text, done=True))
         elif event_type == "response.done":
-            await _emit_tool_calls(event, send_client)
+            await _emit_tool_calls(event, send_client, session_id=session_id, manager=manager)
         elif event_type == "conversation.item.input_audio_transcription.completed":
             transcript = str(event.get("transcript") or "").strip()
             if transcript:
+                # ユーザーターンを履歴に残し、history.sync / GET /history で復元できるようにする。
+                manager.record_user_text(session_id, transcript)
                 await send_client(user_text_event(text=transcript))
         elif event_type == "error":
             message = _extract_error_message(event)
             await send_client(error_event(message, code="upstream_error"))
-        elif event_type in {"session.updated", "session.created"}:
+        elif event_type in {"session.updated", "session.created", "session.closed"}:
+            if event_type == "session.closed":
+                return
             continue
 
 
-async def _emit_tool_calls(event: dict[str, Any], send_client: Any) -> None:
+async def _emit_tool_calls(
+    event: dict[str, Any],
+    send_client: Any,
+    *,
+    session_id: str,
+    manager: VoiceSessionManager,
+) -> None:
     response = event.get("response") or {}
     output = response.get("output") or []
     if not isinstance(output, list):
@@ -221,11 +339,14 @@ async def _emit_tool_calls(event: dict[str, Any], send_client: Any) -> None:
             continue
         if item.get("type") != "function_call":
             continue
+        name = str(item.get("name") or "")
+        arguments = str(item.get("arguments") or "{}")
+        manager.record_tool_call(session_id, name=name, arguments=arguments)
         await send_client(
             assistant_tool_call_event(
-                name=str(item.get("name") or ""),
+                name=name,
                 call_id=str(item.get("call_id") or ""),
-                arguments=str(item.get("arguments") or "{}"),
+                arguments=arguments,
             )
         )
 

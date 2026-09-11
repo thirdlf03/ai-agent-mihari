@@ -11,9 +11,16 @@ from mihari_room.fakes import InMemoryJobStore
 def test_status_tags_match_the_spec() -> None:
     assert JobStatus.QUEUED.discord_tag() == "待ち"
     assert JobStatus.RUNNING.discord_tag() == "作業中"
+    assert JobStatus.WAITING_FOR_INPUT.discord_tag() == "入力待ち"
     assert JobStatus.DONE.discord_tag() == "完了"
     assert JobStatus.FAILED.discord_tag() == "失敗"
     assert JobStatus.CANCELLED.discord_tag() == "中断"
+
+
+def test_waiting_for_input_occupies_desk() -> None:
+    assert JobStatus.RUNNING.occupies_desk()
+    assert JobStatus.WAITING_FOR_INPUT.occupies_desk()
+    assert not JobStatus.QUEUED.occupies_desk()
 
 
 def test_in_memory_store_creates_job_dirs(tmp_path: Path) -> None:

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, statu
 
 from mihari_room.auth import verify_token, verify_ws_token
 from mihari_room.voice.protocol import PROTOCOL_VERSION
-from mihari_room.voice.sessions import VoiceSessionManager
+from mihari_room.voice.sessions import ConcurrentVoiceSessionError, VoiceSessionManager
 from mihari_room.voice.stream import UpstreamFactory, handle_voice_stream
 from mihari_room.voice.upstream import OpenAIRealtimeUpstream, RealtimeUpstream
 
@@ -31,7 +31,13 @@ def build_voice_router(
         manager: VoiceSessionManager = request.app.state.voice
         if not manager.voice_enabled():
             raise _voice_unavailable()
-        session = manager.create_session()
+        try:
+            session = manager.create_session()
+        except ConcurrentVoiceSessionError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(error),
+            ) from error
         return {
             "session_id": session.id,
             "model": session.model,
@@ -47,6 +53,26 @@ def build_voice_router(
         if session is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
         return session.to_dict()
+
+    @router.get("/sessions/{session_id}/history", dependencies=[Depends(verify_token)])
+    def get_voice_session_history(request: Request, session_id: str) -> dict[str, Any]:
+        manager: VoiceSessionManager = request.app.state.voice
+        session = manager.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+        return {
+            "session_id": session_id,
+            "messages": manager.history_to_dicts(session_id),
+        }
+
+    @router.post("/sessions/{session_id}/close", dependencies=[Depends(verify_token)])
+    def close_voice_session(request: Request, session_id: str) -> dict[str, Any]:
+        manager: VoiceSessionManager = request.app.state.voice
+        session = manager.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+        manager.close_session(session_id)
+        return {"session_id": session_id, "status": "closed"}
 
     @router.websocket("/sessions/{session_id}/stream")
     async def voice_stream(websocket: WebSocket, session_id: str) -> None:
