@@ -81,6 +81,37 @@ struct VoiceConversationControllerTests {
         }
     }
 
+    private struct StubJobCollaboration: VoiceJobCollaborating {
+        func submitJob(title: String, body: String) async throws -> JobRequestResponse {
+            JobRequestResponse(jobID: "job-test", status: "queued")
+        }
+        func steer(jobID: String, instruction: String) async throws -> JobSteerResponse {
+            JobSteerResponse(jobID: jobID, seq: 1, text: instruction, delivered: true)
+        }
+        func answerQuestion(jobID: String, questionID: String, answer: String) async throws -> JobQuestionAnswerResponse {
+            JobQuestionAnswerResponse(
+                jobID: jobID,
+                question: RoomPendingQuestion(id: questionID, question: "?", status: "answered", answer: answer)
+            )
+        }
+        func fetchJob(jobID: String) async throws -> RoomJobDetail {
+            RoomJobDetail(jobID: jobID, status: "running")
+        }
+        func listRunning() async throws -> [RoomJobDetail] { [] }
+    }
+
+    private struct StubScreenCapture: VoiceScreenCapturing {
+        /// サムネイル生成が通るよう、実際にデコードできる 1x1 PNG を返す。
+        func captureMouseDisplayPNG() async throws -> VoiceScreenCaptureResult {
+            VoiceScreenCaptureResult(pngData: Self.tinyPNG, displayTitle: "Main", displayID: 1)
+        }
+
+        private static let tinyPNG = Data(
+            base64Encoded:
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )!
+    }
+
     private func makeController(
         socket: ScriptedSocket,
         player: SpeechPlayer = SpeechPlayer(),
@@ -129,6 +160,9 @@ struct VoiceConversationControllerTests {
                     session: session
                 ),
                 micFactory: { stubMic },
+                jobCollaboration: StubJobCollaboration(),
+                screenCapture: StubScreenCapture(),
+                onJobSubmitted: nil,
                 checkMicPermission: { PermissionState(grant: micPermission, detail: "test") },
                 requestMicPermission: { micPermission == .granted }
             )
@@ -183,6 +217,36 @@ struct VoiceConversationControllerTests {
         #expect(controller.messages.map(\.text) == ["以前の質問", "以前の回答"])
         #expect(!controller.messages.contains(where: { $0.text == "会話を開始した" }))
         #expect(controller.statusText.contains("履歴を同期"))
+
+        controller.stop()
+    }
+
+    @Test("capture_screen ツールで input.image を送る")
+    func handlesCaptureScreenToolCall() async throws {
+        let socket = ScriptedSocket()
+        let (controller, _, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        socket.feed(
+            #"{"type":"assistant.tool_call","name":"capture_screen","call_id":"c1","arguments":"{\"prompt\":\"見て\"}"}"#
+        )
+
+        await waitUntil {
+            socket.sent.contains { $0.contains("\"input.image\"") }
+                && controller.messages.contains { $0.imageThumbnailPNG != nil }
+        }
+
+        let sentImage = socket.sent.contains { text in
+            guard
+                let data = text.data(using: .utf8),
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return false }
+            return json["type"] as? String == "input.image"
+        }
+        #expect(sentImage)
+        #expect(controller.messages.contains(where: { $0.imageThumbnailPNG != nil }))
 
         controller.stop()
     }
@@ -439,8 +503,8 @@ struct VoiceConversationControllerTests {
     }
 }
 
-/// VoiceConversationControllerTests 用の HTTP スタブ。
-private final class VoiceSessionClientTestsURLProtocol: URLProtocol, @unchecked Sendable {
+/// VoiceConversationControllerTests 用の HTTP スタブ。VoiceScreenCaptureTests からも使う。
+final class VoiceSessionClientTestsURLProtocol: URLProtocol, @unchecked Sendable {
     enum ResponseKind {
         case create(sessionID: String)
         case status(String)

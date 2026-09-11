@@ -23,12 +23,20 @@ public final class VoiceConversationController: ObservableObject {
     @Published public private(set) var isActive = false
     /// マイクが有効か（エコー対策で一時停止中は false）。
     @Published public private(set) var isMicLive = false
+    /// `pending_questions` の未回答分。会話 UI で回答する。
+    @Published public private(set) var pendingQuestions: [VoicePendingQuestion] = []
+    /// 会話から依頼した直近の仕事 ID（Hermes job と voice session は別）。
+    @Published public private(set) var activeVoiceJobID: String?
 
     public struct Dependencies {
         var connector: VoiceStreamConnector
         var speechPlayer: SpeechPlayer
         var voicevox: VoicevoxClient
         var micFactory: @MainActor () -> any MicCapturing
+        var jobCollaboration: any VoiceJobCollaborating
+        var screenCapture: any VoiceScreenCapturing
+        /// 仕事依頼成功時 `(jobID, title)`。`RoomJobMonitor.attach` などへ。
+        var onJobSubmitted: (@MainActor (_ jobID: String, _ title: String?) -> Void)?
         /// マイク権限の照会。テストでは実機の TCC を見ないよう差し替える。
         var checkMicPermission: @Sendable () -> PermissionState = {
             PermissionChecker.check(.microphone)
@@ -39,12 +47,18 @@ public final class VoiceConversationController: ObservableObject {
             return PermissionChecker.check(.microphone).grant == .granted
         }
 
-        @MainActor public static func makeDefault(speechPlayer: SpeechPlayer) -> Dependencies {
+        @MainActor public static func makeDefault(
+            speechPlayer: SpeechPlayer,
+            onJobSubmitted: (@MainActor (_ jobID: String, _ title: String?) -> Void)? = nil
+        ) -> Dependencies {
             Dependencies(
                 connector: VoiceStreamConnector(),
                 speechPlayer: speechPlayer,
                 voicevox: VoicevoxClient(),
-                micFactory: { AVAudioMicCapture() }
+                micFactory: { AVAudioMicCapture() },
+                jobCollaboration: LiveVoiceJobCollaboration.makeFromEnvironment(),
+                screenCapture: LiveVoiceScreenCapture(),
+                onJobSubmitted: onJobSubmitted
             )
         }
     }
@@ -60,6 +74,8 @@ public final class VoiceConversationController: ObservableObject {
     private static let silenceDuration: TimeInterval = 0.75
     /// 再接続の最大待ち(秒)。
     private static let maxBackoff: TimeInterval = 30
+    /// 待機中の質問を取り直す間隔(秒)。
+    private static let questionPollInterval: TimeInterval = 8
 
     private let deps: Dependencies
     private var runTask: Task<Void, Never>?
@@ -77,6 +93,8 @@ public final class VoiceConversationController: ObservableObject {
     private var sendTail: Task<Void, Never>?
     /// 発話終了の見張り。最後に声を検した時点から無音が続いたらターンを確定する。
     private var silenceWatchdog: Task<Void, Never>?
+    /// 会話中の質問の取り直しループ。
+    private var questionPollTask: Task<Void, Never>?
 
     /// 再生中はマイク送信を止める（エコー対策）。
     private var echoGuardActive = false
@@ -109,6 +127,7 @@ public final class VoiceConversationController: ObservableObject {
         manualReconnectRequested = false
         backoffSeconds = 1
         messages = []
+        pendingQuestions = []
         connectionState = .connecting
         statusText = "接続中…"
         appendSystem("会話を開始した")
@@ -118,6 +137,7 @@ public final class VoiceConversationController: ObservableObject {
             await self?.runLoop()
         }
         startMic()
+        startQuestionPolling()
     }
 
     /// 会話を終了する。
@@ -129,6 +149,8 @@ public final class VoiceConversationController: ObservableObject {
         stopMic()
         runTask?.cancel()
         runTask = nil
+        questionPollTask?.cancel()
+        questionPollTask = nil
         closeSocket()
         playbackGeneration += 1
         deps.speechPlayer.stop(priority: .chatter)
@@ -145,6 +167,233 @@ public final class VoiceConversationController: ObservableObject {
         manualReconnectRequested = true
         clearSession()
         closeSocket()
+    }
+
+    /// 「画面見て」: マウスがあるディスプレイ 1 枚を撮って `input.image` で送る（確認なし）。
+    public func captureAndSendScreen(prompt: String = "この画面を見て状況を説明して。") {
+        guard isActive else { return }
+        Task { await performCaptureAndSend(prompt: prompt) }
+    }
+
+    /// 表示中の質問へ回答する。
+    public func submitPendingQuestionAnswer(_ answer: String, questionID: String) {
+        let trimmed = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+            let question = pendingQuestions.first(where: { $0.questionID == questionID })
+        else {
+            return
+        }
+        pendingQuestions.removeAll(where: { $0.questionID == questionID })
+        appendMessage(VoiceConversationMessage(role: .user, text: trimmed))
+        Task {
+            do {
+                _ = try await deps.jobCollaboration.answerQuestion(
+                    jobID: question.jobID,
+                    questionID: question.questionID,
+                    answer: trimmed
+                )
+                appendSystem("回答を送った（\(question.questionID)）")
+                await refreshPendingQuestions(jobID: question.jobID)
+            } catch {
+                appendSystem("回答を送れなかった: \(error.localizedDescription)")
+                mergePendingQuestions([question])
+            }
+        }
+    }
+
+    // MARK: - §5-3 ツール・仕事・画面
+
+    private func handleToolCall(name: String, arguments: String) {
+        let action = VoiceToolCallHandler.action(for: name, arguments: arguments)
+        Task {
+            switch action {
+            case .captureScreen(let prompt):
+                await performCaptureAndSend(prompt: prompt)
+            case .submitJob(let title, let body):
+                await performSubmitJob(title: title, body: body)
+            case .steerJob(let jobID, let instruction):
+                await performSteer(jobID: jobID, instruction: instruction)
+            case .getJobStatus(let jobID):
+                await performGetJobStatus(jobID: jobID)
+            case .showQuestion(let jobID, let questionID, let prompt):
+                mergePendingQuestions([
+                    VoicePendingQuestion(jobID: jobID, questionID: questionID, prompt: prompt),
+                ])
+            case .unsupported:
+                break
+            }
+        }
+    }
+
+    private func performCaptureAndSend(prompt: String) async {
+        statusText = "画面を撮影中…"
+        do {
+            let capture = try await deps.screenCapture.captureMouseDisplayPNG()
+            try await sendInputImage(png: capture.pngData, prompt: prompt)
+            let thumbnail = VoiceScreenThumbnail.png(from: capture.pngData)
+            appendMessage(
+                VoiceConversationMessage(
+                    role: .user,
+                    text: "（\(capture.displayTitle) の画面を送信）",
+                    imageThumbnailPNG: thumbnail
+                )
+            )
+            statusText = connectionState == .ready ? "話しかけてください" : statusText
+        } catch {
+            appendSystem("画面を送れなかった: \(error.localizedDescription)")
+            statusText = error.localizedDescription
+        }
+    }
+
+    private func sendInputImage(png: Data, prompt: String) async throws {
+        // input.audio と同じ送信チェーンに載せ、音声チャンクとの順序を保つ。
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendTail = Task { [sendTail] in
+                _ = await sendTail?.value
+                do {
+                    guard let socket = currentSocket else {
+                        throw VoiceSessionError.notReady
+                    }
+                    let text = try VoiceOutgoingFrame.inputImage(png: png, prompt: prompt)
+                    try await socket.send(text)
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func performSubmitJob(title: String, body: String) async {
+        let resolvedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !resolvedBody.isEmpty else {
+            appendSystem("仕事依頼: 本文が空だった")
+            return
+        }
+        do {
+            let response = try await deps.jobCollaboration.submitJob(title: title, body: resolvedBody)
+            if let jobID = response.jobID, !jobID.isEmpty {
+                activeVoiceJobID = jobID
+                deps.onJobSubmitted?(jobID, JobRequestClient.resolveTitle(title: title, body: resolvedBody))
+                appendSystem("仕事を依頼した（\(jobID)）")
+                await refreshPendingQuestions(jobID: jobID)
+            } else {
+                appendSystem("仕事を依頼した（ID 不明）")
+            }
+        } catch {
+            appendSystem("仕事を依頼できなかった: \(error.localizedDescription)")
+        }
+    }
+
+    private func performSteer(jobID: String?, instruction: String) async {
+        let text = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            appendSystem("steer: 指示が空だった")
+            return
+        }
+        guard let targetJobID = resolvedJobID(jobID) else {
+            appendSystem("steer: 対象の仕事が無い")
+            return
+        }
+        do {
+            let response = try await deps.jobCollaboration.steer(
+                jobID: targetJobID,
+                instruction: text
+            )
+            // room は実行中の作業への即時配信を保証しない。届いていなければ
+            // 保存だけ済んで次ターンで読まれる旨をはっきり出す。
+            if response.delivered == false {
+                appendSystem("仕事 \(targetJobID) に指示を保存した（実行中の作業へは未配信・次ターンで読み込まれる）")
+            } else {
+                appendSystem("仕事 \(targetJobID) へ指示を送った")
+            }
+            await refreshPendingQuestions(jobID: targetJobID)
+        } catch {
+            appendSystem("steer に失敗: \(error.localizedDescription)")
+        }
+    }
+
+    private func performGetJobStatus(jobID: String?) async {
+        if let targetJobID = resolvedJobID(jobID) {
+            await reportJobStatus(jobID: targetJobID)
+            return
+        }
+        do {
+            let running = try await deps.jobCollaboration.listRunning()
+            if running.isEmpty {
+                appendSystem("走っている仕事は無い")
+                return
+            }
+            for detail in running {
+                await reportJobStatus(jobID: detail.jobID, detail: detail)
+            }
+        } catch {
+            appendSystem("進捗を取得できなかった: \(error.localizedDescription)")
+        }
+    }
+
+    private func reportJobStatus(jobID: String, detail: RoomJobDetail? = nil) async {
+        do {
+            // `??` の自動クロージャは async/throws を包めないので素直に分岐する。
+            let resolved: RoomJobDetail
+            if let detail {
+                resolved = detail
+            } else {
+                resolved = try await deps.jobCollaboration.fetchJob(jobID: jobID)
+            }
+            appendSystem(VoiceJobQuestionParser.statusSummary(from: resolved))
+            let pending = VoiceJobQuestionParser.pendingQuestions(from: resolved)
+            if !pending.isEmpty {
+                mergePendingQuestions(pending)
+            }
+            if resolved.status == RoomJobStatus.running.rawValue
+                || resolved.status == RoomJobStatus.waitingForInput.rawValue
+            {
+                activeVoiceJobID = resolved.jobID
+            }
+        } catch {
+            appendSystem("仕事 \(jobID) の状態を読めなかった: \(error.localizedDescription)")
+        }
+    }
+
+    private func refreshPendingQuestions(jobID: String) async {
+        guard let detail = try? await deps.jobCollaboration.fetchJob(jobID: jobID) else { return }
+        let pending = VoiceJobQuestionParser.pendingQuestions(from: detail)
+        pendingQuestions.removeAll(where: { $0.jobID == jobID })
+        mergePendingQuestions(pending)
+    }
+
+    private func mergePendingQuestions(_ incoming: [VoicePendingQuestion]) {
+        for question in incoming {
+            guard !question.jobID.isEmpty, !question.questionID.isEmpty, !question.prompt.isEmpty else {
+                continue
+            }
+            if pendingQuestions.contains(where: { $0.questionID == question.questionID }) {
+                continue
+            }
+            pendingQuestions.append(question)
+            appendSystem("質問: \(question.prompt)")
+        }
+    }
+
+    private func resolvedJobID(_ explicit: String?) -> String? {
+        if let explicit, !explicit.isEmpty { return explicit }
+        return activeVoiceJobID
+    }
+
+    /// 質問が来てもツール呼び出しが届かない経路があるため、会話から依頼した仕事が
+    /// あるあいだは `pending_questions` を定期的に取り直す。
+    private func startQuestionPolling() {
+        questionPollTask?.cancel()
+        questionPollTask = Task { [weak self] in
+            while let self, !Task.isCancelled, self.isActive {
+                try? await Task.sleep(for: .seconds(Self.questionPollInterval))
+                guard !Task.isCancelled, self.isActive else { break }
+                if let jobID = self.activeVoiceJobID {
+                    await self.refreshPendingQuestions(jobID: jobID)
+                }
+            }
+        }
     }
 
     // MARK: - 接続ループ
@@ -230,8 +479,9 @@ public final class VoiceConversationController: ObservableObject {
             }
             return false
 
-        case .assistantToolCall(let name, _, _):
+        case .assistantToolCall(let name, _, let arguments):
             appendSystem("ツール呼び出し: \(name)")
+            handleToolCall(name: name, arguments: arguments)
             return false
 
         case .error(_, let message):
@@ -505,7 +755,8 @@ public final class VoiceConversationController: ObservableObject {
                 id: id,
                 role: .assistant,
                 text: text,
-                timestamp: messages[index].timestamp
+                timestamp: messages[index].timestamp,
+                imageThumbnailPNG: messages[index].imageThumbnailPNG
             )
         } else {
             let message = VoiceConversationMessage(role: .assistant, text: text)

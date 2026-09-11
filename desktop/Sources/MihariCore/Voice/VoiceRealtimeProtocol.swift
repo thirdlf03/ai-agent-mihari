@@ -166,7 +166,7 @@ enum VoiceIncomingFrame: Equatable, Sendable {
     }
 }
 
-/// client → room の `input.audio` を組み立てる。
+/// client → room の outbound フレームを組み立てる。
 enum VoiceOutgoingFrame {
     static func inputAudio(
         pcm16: Data,
@@ -179,6 +179,27 @@ enum VoiceOutgoingFrame {
             "commit": commit,
             "create_response": createResponse,
         ]
+        return try encode(payload)
+    }
+
+    /// マウスがあるディスプレイ 1 枚を room へ送る `input.image`。
+    static func inputImage(
+        png: Data,
+        prompt: String,
+        createResponse: Bool = true,
+        mediaType: String = "image/png"
+    ) throws -> String {
+        let payload: [String: Any] = [
+            "type": VoiceRealtimeProtocol.EventType.inputImage,
+            "image_base64": png.base64EncodedString(),
+            "media_type": mediaType,
+            "prompt": prompt,
+            "create_response": createResponse,
+        ]
+        return try encode(payload)
+    }
+
+    private static func encode(_ payload: [String: Any]) throws -> String {
         let data = try JSONSerialization.data(withJSONObject: payload)
         guard let text = String(data: data, encoding: .utf8) else {
             throw VoiceSessionError.encodingFailed
@@ -200,12 +221,54 @@ public struct VoiceConversationMessage: Identifiable, Equatable, Sendable {
     /// `user.text` の文字起こしでプレースホルダを書き換えるため var にする。
     public var text: String
     public let timestamp: Date
+    /// 画面送信時のサムネイル（PNG）。音声ファイルは保存しない。
+    public let imageThumbnailPNG: Data?
 
-    public init(id: UUID = UUID(), role: Role, text: String, timestamp: Date = Date()) {
+    public init(
+        id: UUID = UUID(),
+        role: Role,
+        text: String,
+        timestamp: Date = Date(),
+        imageThumbnailPNG: Data? = nil
+    ) {
         self.id = id
         self.role = role
         self.text = text
         self.timestamp = timestamp
+        self.imageThumbnailPNG = imageThumbnailPNG
+    }
+}
+
+/// 仕事が `waiting_for_input` のとき、会話 UI に出す質問。
+public struct VoicePendingQuestion: Equatable, Sendable, Identifiable {
+    public let jobID: String
+    public let questionID: String
+    public let prompt: String
+    public let choices: [String]
+    public let multiSelect: Bool
+
+    public var id: String { questionID }
+
+    public init(
+        jobID: String,
+        questionID: String,
+        prompt: String,
+        choices: [String] = [],
+        multiSelect: Bool = false
+    ) {
+        self.jobID = jobID
+        self.questionID = questionID
+        self.prompt = prompt
+        self.choices = choices
+        self.multiSelect = multiSelect
+    }
+
+    init(room: RoomPendingQuestion, jobID: String) {
+        self.jobID = jobID
+        self.questionID = room.id
+        self.prompt = room.question
+        self.choices = room.choices ?? []
+        self.multiSelect = room.multiSelect
     }
 }
 

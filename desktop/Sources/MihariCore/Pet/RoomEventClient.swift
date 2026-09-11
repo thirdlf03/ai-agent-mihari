@@ -43,6 +43,10 @@ public protocol RoomAccess: Sendable {
     func detail(jobID: String) async throws -> RoomJobDetail
     /// `POST /jobs/{id}/followup`。仕事へ追記する。
     func followup(jobID: String, body: String, requestedBy: String?) async throws -> JobRequestResponse
+    /// `POST /jobs/{id}/steer`。実行中の仕事へ指示を足す（#40 想定）。
+    func steer(jobID: String, instruction: String) async throws -> JobSteerResponse
+    /// `POST /jobs/{id}/questions/{qid}/answer`。`waiting_for_input` への回答（#40 想定）。
+    func answerQuestion(jobID: String, questionID: String, answer: String) async throws -> JobQuestionAnswerResponse
     /// `POST /jobs/{id}/cancel`。仕事を中断する。
     func cancel(jobID: String) async throws -> JobRequestResponse
     /// `GET /jobs/{id}/memory`。承認待ちを含む記憶の候補の一覧。
@@ -165,6 +169,26 @@ public struct RoomEventClient: Sendable, RoomAccess {
 
     public func cancel(jobID: String) async throws -> JobRequestResponse {
         try await post("jobs/\(jobID)/cancel", body: RoomCancelBody())
+    }
+
+    /// 実行中の仕事へ steer する。room #40 未デプロイ時は HTTP 404 等で失敗する。
+    public func steer(jobID: String, instruction: String) async throws -> JobSteerResponse {
+        try await post(
+            "jobs/\(jobID)/steer",
+            body: RoomSteerBody(instruction: instruction)
+        )
+    }
+
+    /// `waiting_for_input` の質問へ回答する。room #40 未デプロイ時は HTTP 404 等で失敗する。
+    public func answerQuestion(
+        jobID: String,
+        questionID: String,
+        answer: String
+    ) async throws -> JobQuestionAnswerResponse {
+        try await post(
+            "jobs/\(jobID)/questions/\(questionID)/answer",
+            body: RoomQuestionAnswerBody(answer: answer)
+        )
     }
 
     public func listMemory(jobID: String) async throws -> [RoomMemoryCandidate] {
@@ -338,6 +362,20 @@ public struct RoomEventClient: Sendable, RoomAccess {
 
     /// `POST /jobs/{id}/cancel` の本文。中身は無いが、JSON の `{}` は送る。
     private struct RoomCancelBody: Encodable {}
+
+    /// `POST /jobs/{id}/steer` の本文（room #47: `text` キー）。
+    private struct RoomSteerBody: Encodable {
+        let text: String
+
+        init(instruction: String) {
+            text = instruction
+        }
+    }
+
+    /// `POST /jobs/{id}/questions/{qid}/answer` の本文（#40 想定）。
+    private struct RoomQuestionAnswerBody: Encodable {
+        let answer: String
+    }
 
     /// 記憶の承認・却下の本文。部屋側は本文を要しないが、JSON の `{}` は送る。
     private struct RoomEmptyBody: Encodable {}

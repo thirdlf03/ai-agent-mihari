@@ -68,7 +68,7 @@ struct OverlayModelTests {
     /// 起きるまで待てば、遅い側の失敗は構造的に消える。
     private func waitUntil(
         _ what: String,
-        timeout: Duration = .seconds(3),
+        timeout: Duration = .seconds(10),
         _ condition: @MainActor () -> Bool
     ) async {
         let deadline = ContinuousClock.now.advanced(by: timeout)

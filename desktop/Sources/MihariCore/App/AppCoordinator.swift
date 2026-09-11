@@ -716,7 +716,9 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
     /// §5-2 会話コントローラを組み立て、`SpeechPlayer` の完了通知を既存とチェーンする。
     private func makeVoiceConversation() -> VoiceConversationController {
         let controller = VoiceConversationController(
-            deps: .makeDefault(speechPlayer: speechPlayer)
+            deps: .makeDefault(speechPlayer: speechPlayer) { [weak self] jobID, title in
+                self?.room.attach(jobID: jobID, title: title)
+            }
         )
         let previousHandler = speechPlayer.onPlaybackFinished
         speechPlayer.onPlaybackFinished = { [weak controller] priority in

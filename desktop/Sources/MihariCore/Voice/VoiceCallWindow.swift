@@ -67,12 +67,17 @@ private final class VoiceCallWindowDelegate: NSObject, NSWindowDelegate {
 
 struct VoiceCallView: View {
     @ObservedObject var controller: VoiceConversationController
+    @State private var answerDrafts: [String: String] = [:]
 
     var body: some View {
         VStack(spacing: 0) {
             statusBar
             Divider()
             messageList
+            if !controller.pendingQuestions.isEmpty {
+                Divider()
+                questionBar
+            }
             Divider()
             controlBar
         }
@@ -132,12 +137,60 @@ struct VoiceCallView: View {
         }
     }
 
+    private var questionBar: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("仕事からの質問（\(controller.pendingQuestions.count) 件）")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(controller.pendingQuestions) { question in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(question.prompt)
+                        .font(.subheadline)
+                        .textSelection(.enabled)
+                    if !question.choices.isEmpty {
+                        Text(question.choices.joined(separator: " / "))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        TextField("回答を入力", text: answerBinding(for: question.questionID))
+                            .textFieldStyle(.roundedBorder)
+                        Button("送信") {
+                            let draft = answerDrafts[question.questionID] ?? ""
+                            controller.submitPendingQuestionAnswer(draft, questionID: question.questionID)
+                            answerDrafts[question.questionID] = ""
+                        }
+                        .disabled(
+                            (answerDrafts[question.questionID] ?? "")
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                                .isEmpty
+                        )
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(Color.orange.opacity(0.08))
+    }
+
+    private func answerBinding(for questionID: String) -> Binding<String> {
+        Binding(
+            get: { answerDrafts[questionID] ?? "" },
+            set: { answerDrafts[questionID] = $0 }
+        )
+    }
+
     private var controlBar: some View {
         HStack {
             Button("再接続") {
                 controller.reconnect()
             }
             .disabled(!controller.isActive)
+
+            Button("画面見て") {
+                controller.captureAndSendScreen()
+            }
+            .disabled(!controller.isActive || controller.connectionState != .ready)
 
             Spacer()
 
@@ -161,6 +214,15 @@ private struct VoiceMessageRow: View {
                 Text(roleLabel)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                if let thumbnail = message.imageThumbnailPNG,
+                    let image = NSImage(data: thumbnail)
+                {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 200, maxHeight: 120)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
                 Text(message.text)
                     .font(.body)
                     .textSelection(.enabled)
