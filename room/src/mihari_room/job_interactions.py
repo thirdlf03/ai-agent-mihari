@@ -163,6 +163,52 @@ def list_steers(job_dir: Path) -> list[dict[str, Any]]:
     return out
 
 
+#: steer の消費カーソル。live 配信済み・ターン消費済みの seq まで進める。
+#: ``input/followup-*.txt`` の followup_cursor と同じ仕組み。
+STEER_CURSOR_FILENAME = "steer_cursor"
+
+
+def _steer_cursor_path(job_dir: Path) -> Path:
+    return job_dir / INPUT_DIRNAME / STEER_CURSOR_FILENAME
+
+
+def _read_steer_cursor(job_dir: Path) -> int:
+    path = _steer_cursor_path(job_dir)
+    if not path.is_file():
+        return 0
+    try:
+        return max(0, int(path.read_text(encoding="utf-8").strip()))
+    except (OSError, ValueError):
+        return 0
+
+
+def _write_steer_cursor(job_dir: Path, seq: int) -> None:
+    try:
+        _steer_cursor_path(job_dir).write_text(f"{max(0, seq)}\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def pending_steers(job: Job) -> list[dict[str, Any]]:
+    """未消費の steer。カーソルより後の seq だけ（live 配信・ターン消費済みは除く）。"""
+    delivered = _read_steer_cursor(job.directory)
+    return [item for item in list_steers(job.directory) if int(item["seq"]) > delivered]
+
+
+def advance_steer_cursor(job: Job, executed: list[dict[str, Any]] | None = None) -> None:
+    """ターンで消費した steer 分だけカーソルを進める。失敗時は呼ばない。"""
+    steers = executed if executed is not None else list_steers(job.directory)
+    if not steers:
+        return
+    _write_steer_cursor(job.directory, max(int(item["seq"]) for item in steers))
+
+
+def mark_steer_delivered(job_dir: Path, seq: int) -> None:
+    """live worker へ届いた steer。次ターンで再送しないようカーソルを進める。"""
+    if seq > _read_steer_cursor(job_dir):
+        _write_steer_cursor(job_dir, seq)
+
+
 StatusCallback = Callable[[str, JobStatus], None]
 
 
@@ -173,7 +219,6 @@ class JobInteractionHub:
         self._lock = threading.Lock()
         self._answer_events: dict[str, threading.Event] = {}
         self._answers: dict[str, str] = {}
-        self._cancelled: set[str] = set()
         self._status_callbacks: list[StatusCallback] = []
         self._steer_deliverers: dict[str, Callable[[str, str], bool]] = {}
 
@@ -210,6 +255,9 @@ class JobInteractionHub:
                 delivered = bool(deliverer(job.id, text))
             except Exception:
                 delivered = False
+        if delivered:
+            # live 配信できた steer は次ターンの pending に出さない。
+            mark_steer_delivered(job.directory, int(record["seq"]))
         record["delivered"] = delivered
         return record
 
@@ -247,16 +295,12 @@ class JobInteractionHub:
         timeout: float = DEFAULT_QUESTION_TIMEOUT_SEC,
     ) -> str:
         with self._lock:
-            if qid in self._cancelled:
-                raise RuntimeError("question cancelled")
             event = self._answer_events.get(qid)
         if event is None:
             raise QuestionNotFound(qid)
         if not event.wait(timeout=timeout):
             raise TimeoutError(f"question {qid} timed out")
         with self._lock:
-            if qid in self._cancelled:
-                raise RuntimeError("question cancelled")
             answer = self._answers.get(qid)
         if answer is None:
             raise QuestionNotFound(qid)
@@ -266,7 +310,9 @@ class JobInteractionHub:
         trimmed = answer.strip()
         if not trimmed:
             raise ValueError("answer is empty")
-        if not any(q.id == qid for q in list_pending_questions(job.directory)):
+        # qid の存在は回答済み・取消済みも含めた全件で見る。
+        # 存在するが PENDING でない場合はロック内のチェックが 409 にする。
+        if not any(q.id == qid for q in _read_questions(job.directory)):
             if job.status is not JobStatus.WAITING_FOR_INPUT:
                 raise AnswerNotAllowed(f"job {job.id} is not waiting for input")
             raise QuestionNotFound(qid)
@@ -298,21 +344,14 @@ class JobInteractionHub:
             event = self._answer_events.get(qid)
             if event is not None:
                 event.set()
+        # 他に pending 質問が残る間は worker はまだ待ち中。running 表示に戻さない。
+        if any(item.status is QuestionStatus.PENDING for item in updated):
+            return found
         self._notify_status(job.id, JobStatus.RUNNING)
         return found
 
     def resume_running(self, job_id: str) -> None:
         self._notify_status(job_id, JobStatus.RUNNING)
-
-    def cancel_job(self, job_id: str) -> None:
-        """中断時に待ち中の質問を起こす。"""
-        with self._lock:
-            self._cancelled.add(job_id)
-            for qid, event in list(self._answer_events.items()):
-                if qid.startswith(job_id):
-                    event.set()
-            # qid は job 非依存 hex なので、job_dir から pending を cancel する。
-        # job_dir は呼び出し側で処理
 
     def cancel_questions(self, job_dir: Path) -> None:
         with self._lock:
