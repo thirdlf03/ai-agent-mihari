@@ -1,23 +1,30 @@
 """Markdown → PDF の専用レンダラー。
 
-同梱の日本語フォント（IPAexGothic、IPA Font License v1.0）を埋め込み、
-表・コード・画像・出典リンクを含む Markdown を A4 PDF にする。
+既定はプレビューと同じ HTML（markdown-it）を Chromium で印刷する（Playwright）。
+Playwright / Chromium が無い環境では、同梱 IPAexGothic の fpdf2 レイアウトに倒す。
 
-- レイアウト（折り返し・ページ分割・表・コード）はこのモジュールが持つ
-- フォントは埋め込み（サブセット化）されるので、開く側にフォントを要求しない
-- 生 HTML は無効。外部フォント・CDN は使わない
+- 生 HTML は無効。外部フォント・CDN は読みに行かない（HTML 側の方針と同じ）
+- Chromium は PDF 1 件ごとに起動し、常駐させない
+- 開くのは生成した file:// の HTML だけ
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from mihari_room.documents.markdown_render import markdown_renderer
+from mihari_room.documents.markdown_render import markdown_renderer, render_to_page
 
 logger = logging.getLogger("mihari_room")
+
+#: Chromium は systemd の NoNewPrivileges 下ではサンドボックスを落とせない。
+_CHROMIUM_ARGS = ("--no-sandbox", "--disable-dev-shm-usage")
+_PLAYWRIGHT_TIMEOUT_MS = 120_000
+_playwright_available_cached: bool | None = None
 
 #: ページ余白（mm）。A4。
 MARGIN_LEFT = 18.0
@@ -43,6 +50,10 @@ class RenderError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+class PlaywrightUnavailable(Exception):
+    """Playwright / Chromium がこの環境に無い。fpdf2 へ倒す合図。"""
 
 
 def bundled_font_path() -> Path:
@@ -437,6 +448,98 @@ def _split_to_fit(content: str, size: float, layout: _Layout) -> list[str]:
     return pieces or [""]
 
 
+def playwright_pdf_available() -> bool:
+    """Chromium 印刷ができるか。結果はプロセス内でキャッシュする。"""
+    global _playwright_available_cached
+    if _playwright_available_cached is not None:
+        return _playwright_available_cached
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            executable = playwright.chromium.executable_path
+        _playwright_available_cached = bool(executable) and Path(executable).is_file()
+    except Exception:
+        _playwright_available_cached = False
+    return _playwright_available_cached
+
+
+def _wanted_engine() -> str:
+    raw = (os.environ.get("MIHARI_PDF_ENGINE") or "auto").strip().lower()
+    if raw in ("playwright", "fpdf2", "auto"):
+        return raw
+    return "auto"
+
+
+def _render_playwright_pdf(
+    markdown_text: str,
+    out_path: Path,
+    *,
+    title: str | None = None,
+    base_dir: Path | None = None,
+) -> dict[str, Any]:
+    """プレビュー HTML を Chromium の印刷で A4 PDF にする。"""
+    from pypdf import PdfReader
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise PlaywrightUnavailable("playwright が入っていない") from exc
+
+    html = render_to_page(markdown_text, title=title)
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    html_dir = Path(base_dir) if base_dir is not None else out.parent
+    html_dir.mkdir(parents=True, exist_ok=True)
+    html_file = html_dir / f".mihari-print-{uuid.uuid4().hex}.html"
+    try:
+        html_file.write_text(html, encoding="utf-8")
+        try:
+            playwright = sync_playwright().start()
+        except Exception as exc:
+            raise PlaywrightUnavailable(f"playwright を起動できない: {exc}") from exc
+        browser = None
+        try:
+            try:
+                browser = playwright.chromium.launch(args=list(_CHROMIUM_ARGS))
+            except Exception as exc:
+                raise PlaywrightUnavailable(f"Chromium を起動できない: {exc}") from exc
+            page = browser.new_page()
+            page.set_default_timeout(_PLAYWRIGHT_TIMEOUT_MS)
+            # 生成した file:// だけを開く。ユーザー指定の URL は辿らない。
+            page.goto(html_file.resolve().as_uri(), wait_until="load")
+            page.emulate_media(media="print")
+            page.pdf(
+                path=str(out),
+                format="A4",
+                print_background=True,
+                margin={
+                    "top": "16mm",
+                    "bottom": "16mm",
+                    "left": "16mm",
+                    "right": "16mm",
+                },
+            )
+        finally:
+            try:
+                if browser is not None:
+                    browser.close()
+            finally:
+                playwright.stop()
+    finally:
+        html_file.unlink(missing_ok=True)
+
+    if not out.is_file() or out.stat().st_size == 0:
+        raise RenderError("pdf_failed", "Playwright が空の PDF を返した")
+    pages = len(PdfReader(str(out)).pages)
+    return {
+        "pages": pages,
+        "path": str(out),
+        "size_bytes": out.stat().st_size,
+        "engine": "playwright",
+    }
+
+
 def render_markdown_pdf(
     markdown_text: str,
     out_path: Path,
@@ -446,6 +549,41 @@ def render_markdown_pdf(
     font_path: Path | None = None,
 ) -> dict[str, Any]:
     """Markdown を PDF に変換する。戻り値はページ数と書き出し先。"""
+    wanted = _wanted_engine()
+    if wanted != "fpdf2":
+        try:
+            return _render_playwright_pdf(
+                markdown_text,
+                out_path,
+                title=title,
+                base_dir=base_dir,
+            )
+        except PlaywrightUnavailable as exc:
+            if wanted == "playwright":
+                raise RenderError("missing_playwright", str(exc)) from exc
+            logger.info("Playwright PDF を使えないため fpdf2 に倒す: %s", exc)
+        except Exception as exc:
+            if wanted == "playwright":
+                raise
+            logger.warning("Playwright PDF が失敗したため fpdf2 に倒す: %s", exc)
+    return _render_fpdf2(
+        markdown_text,
+        out_path,
+        title=title,
+        base_dir=base_dir,
+        font_path=font_path,
+    )
+
+
+def _render_fpdf2(
+    markdown_text: str,
+    out_path: Path,
+    *,
+    title: str | None = None,
+    base_dir: Path | None = None,
+    font_path: Path | None = None,
+) -> dict[str, Any]:
+    """同梱フォントの fpdf2 レイアウト。Playwright が無いときの控え。"""
     from fpdf import FPDF
 
     font = Path(font_path) if font_path is not None else bundled_font_path()
@@ -506,7 +644,12 @@ def render_markdown_pdf(
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     pdf.output(str(out))
-    return {"pages": len(pdf.pages), "path": str(out), "size_bytes": out.stat().st_size}
+    return {
+        "pages": len(pdf.pages),
+        "path": str(out),
+        "size_bytes": out.stat().st_size,
+        "engine": "fpdf2",
+    }
 
 
 def convert_markdown_file(

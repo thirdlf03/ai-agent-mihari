@@ -123,6 +123,13 @@ def accepted_line(title: str) -> str:
     return f"受け付けたよ。{title}"
 
 
+#: ペットから届いたスクショを Forum スレッドへ添付したとき。
+def screenshot_posted_line(count: int) -> str:
+    if count <= 1:
+        return "依頼のスクショだよ"
+    return f"依頼のスクショだよ（{count} 枚）"
+
+
 #: 進捗の開始。仕事を机で回し始めた。
 def start_line(title: str) -> str:
     return f"はじめるね。{title}"
@@ -136,6 +143,13 @@ def restart_line(title: str) -> str:
 #: 続きが来て、同じ仕事が待ちに並び直した。
 def followup_queued_line(title: str) -> str:
     return f"続きが来た。{title} はまた待ちに並んだ。"
+
+
+#: 追記で届いたスクショを Forum スレッドへ添付したとき。
+def screenshot_followup_posted_line(count: int) -> str:
+    if count <= 1:
+        return "追記のスクショだよ"
+    return f"追記のスクショだよ（{count} 枚）"
 
 
 #: 続きの印が残っていたので、もう一度回す。

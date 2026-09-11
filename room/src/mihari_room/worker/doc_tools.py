@@ -4,7 +4,7 @@ Hermes に PDF・Markdown の読み書きを渡す。連携は discord_* と同�
 ``mihari_room`` toolset の実 registry 登録で行う。
 
 - PDF: ページ単位テキスト抽出（pypdf）・ページ画像化（Poppler）・OCR（Tesseract 日本語+英語）
-- Markdown: 同梱フォントの専用レンダラーで PDF を生成
+- Markdown: プレビューと同じ HTML を Chromium 印刷して PDF にする（無ければ fpdf2）
 - 初期上限: 最大 100 ページ・処理 120 秒。超過・破損・暗号化は明示エラー
 - すべて固定引数の呼び出し。shell（``-c`` 等）は一切使わない
 """
@@ -197,7 +197,7 @@ def pdf_ocr_impl(job: Any, image_path: str, lang: str | None = None) -> str:
 
 
 def markdown_pdf_impl(job: Any, md_path: str, out_path: str | None = None) -> str:
-    """Markdown を同梱フォントの専用レンダラーで PDF にする。"""
+    """Markdown をプレビュー HTML の印刷、または控えの fpdf2 で PDF にする。"""
     root = Path(job.directory)
 
     def _go() -> dict[str, Any]:
@@ -372,8 +372,8 @@ _SCHEMAS: dict[str, dict[str, Any]] = {
         "function": {
             "name": "markdown_pdf",
             "description": (
-                "Markdown を同梱日本語フォントで PDF に変換して書き出す。"
-                "表・コード・画像・リンクに対応。生 HTML は無効。"
+                "Markdown をプレビューと同じ HTML から PDF に変換して書き出す。"
+                "表・リスト・コード・画像・リンクの見た目を保つ。生 HTML は無効。"
                 "入力は output/ の .md、出力は同じ場所の .pdf（既定）。"
             ),
             "parameters": {
