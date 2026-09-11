@@ -13,6 +13,7 @@ dependencies = [
     "pypdf>=5.1.0",
     "markdown-it-py>=3.0,<4",
     "fpdf2>=2.8,<3",
+    "websockets>=14.0",
     "playwright>=1.49,<2",
 ]
 

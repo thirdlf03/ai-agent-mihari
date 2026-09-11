@@ -663,6 +663,7 @@ def create_app(
     discord_starter: Any = None,
     discord_stopper: Any = None,
     start_pump: bool = True,
+    voice_upstream_factory: Any = None,
 ) -> FastAPI:
     app = FastAPI(
         title="Mihari room",
@@ -707,15 +708,23 @@ def create_app(
     except Exception:
         pass
 
+    from mihari_room.voice.protocol import PROTOCOL_VERSION as VOICE_PROTOCOL_VERSION
+    from mihari_room.voice.routes import register_voice_routes
+
+    register_voice_routes(app, upstream_factory=voice_upstream_factory)
+
     @app.get("/capabilities", dependencies=[Depends(verify_token)])
-    def capabilities() -> dict[str, Any]:
+    def capabilities(request: Request) -> dict[str, Any]:
         """旧バックエンドと見分けるための対応機能一覧。desktop はこれを見て UI を出す。"""
+        voice_manager = request.app.state.voice
         return {
             "attachment_upload": True,
             "job_list": True,
             "job_history": True,
             "mac_control": True,
             "mac_control_protocol": PROTOCOL_VERSION,
+            "voice_realtime": voice_manager.voice_enabled(),
+            "voice_realtime_protocol": VOICE_PROTOCOL_VERSION,
             "tools": [
                 "mac_capture",
                 "mac_click",
