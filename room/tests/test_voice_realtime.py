@@ -485,6 +485,7 @@ def test_websocket_auth_via_query_token(tmp_path: Path) -> None:
     with client.websocket_connect(f"/voice/sessions/{session_id}/stream?token={TOKEN}") as ws:
         ready = ws.receive_json()
         assert ready["type"] == EVENT_SESSION_READY
+        _disconnect_and_idle(ws, client, session_id)
 
 
 def test_response_create_uses_text_output_modalities(tmp_path: Path) -> None:
@@ -506,6 +507,7 @@ def test_response_create_uses_text_output_modalities(tmp_path: Path) -> None:
             frame = ws.receive_json()
             if frame["type"] == EVENT_ASSISTANT_TEXT and frame.get("done"):
                 break
+        _disconnect_and_idle(ws, client, session_id)
     creates = [e for e in fake.sent_events() if e.get("type") == "response.create"]
     assert creates
     assert all(e.get("response", {}).get("output_modalities") == ["text"] for e in creates)
@@ -528,6 +530,7 @@ def test_upstream_audio_output_counted_not_relayed(tmp_path: Path) -> None:
             client_frames.append(frame)
             if frame["type"] == EVENT_ASSISTANT_TEXT and frame.get("done"):
                 break
+        _disconnect_and_idle(ws, client, session_id)
     assert all("audio" not in frame.get("type", "") for frame in client_frames)
     assert any(frame.get("text") == "text-only" for frame in client_frames if frame.get("done"))
     detail = client.get(f"/voice/sessions/{session_id}", headers=_auth()).json()
