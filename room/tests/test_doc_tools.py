@@ -24,6 +24,7 @@ import pytest
 from mihari_room.contracts import CreateJobRequest, JobSource
 from mihari_room.documents import ocr as ocr_mod
 from mihari_room.documents.markdown_render import render_to_fragment, render_to_page
+from mihari_room.documents.pdf_gen import bundled_font_path, playwright_pdf_available
 from mihari_room.documents.pdf_reader import extract_pdf_text
 from mihari_room.documents.pdf_render import poppler_bin
 from mihari_room.fakes import InMemoryJobStore
@@ -44,6 +45,9 @@ MARKDOWN_SAMPLE = """# 資料タイトル
 
 日本語の段落です。表・コード・リンクを含むサンプル。
 
+- 箇条書きの甲
+- 箇条書きの乙
+
 | 項目 | 説明 |
 |---|---|
 | PDF 抽出 | pypdf ページ単位 |
@@ -55,6 +59,16 @@ print("hello")
 
 [出典リンク](https://example.com/source)
 """
+
+
+def _can_render_markdown_pdf() -> bool:
+    """Playwright の Chromium か、同梱フォントの fpdf2 のどちらかがあれば PDF を書ける。"""
+    if playwright_pdf_available():
+        return True
+    try:
+        return bundled_font_path().is_file()
+    except Exception:
+        return False
 
 
 def _make_job(tmp_path: Path) -> Any:
@@ -374,9 +388,10 @@ def test_scanned_pdf_pages_to_ocr_end_to_end(tmp_path: Path) -> None:
     assert "みはり" in ocr_result["text"]
 
 
-# -- markdown → PDF（同梱フォント・専用レンダラー） -----------------------
+# -- markdown → PDF（プレビュー HTML の印刷、無ければ fpdf2） -------------
 
 
+@pytest.mark.skipif(not _can_render_markdown_pdf(), reason="Playwright も同梱フォントも無い")
 def test_markdown_pdf_roundtrip_japanese_without_mojibake(tmp_path: Path) -> None:
     """日本語 PDF 出力の文字化け・欠けを自動検証する。
 
@@ -394,6 +409,7 @@ def test_markdown_pdf_roundtrip_japanese_without_mojibake(tmp_path: Path) -> Non
     md.write_text(MARKDOWN_SAMPLE, encoding="utf-8")
     payload = json.loads(markdown_pdf_impl(job, "output/report.md"))
     assert payload["success"] is True, payload
+    assert payload["engine"] in ("playwright", "fpdf2")
     pdf_path = Path(job.directory) / payload["path"]
     assert pdf_path.name == "report.pdf"
     assert pdf_path.is_file()
@@ -411,6 +427,9 @@ def test_markdown_pdf_roundtrip_japanese_without_mojibake(tmp_path: Path) -> Non
         "出典リンク",
     ):
         assert expect in text, f"PDF に {expect!r} が欠けている:\n{text}"
+    if payload["engine"] == "playwright":
+        for expect in ("箇条書きの甲", "箇条書きの乙"):
+            assert expect in text, f"Playwright PDF に {expect!r} が欠けている:\n{text}"
     # 置換文字・豆腐の目印（U+FFFD）が出ないこと。
     assert "\ufffd" not in text
 
@@ -441,6 +460,7 @@ def test_markdown_pdf_roundtrip_japanese_without_mojibake(tmp_path: Path) -> Non
         assert dark > 100, "ページ画像に文字のインクがほぼ無い（描画欠けの可能性）"
 
 
+@pytest.mark.skipif(not _can_render_markdown_pdf(), reason="Playwright も同梱フォントも無い")
 def test_markdown_pdf_to_named_output_and_errors(tmp_path: Path) -> None:
     job = _make_job(tmp_path)
     md = job.directory / "output" / "report.md"
@@ -478,6 +498,7 @@ def test_markdown_render_tables_code_links_images() -> None:
     assert "<pre><code" in fragment
     assert '<a href="https://example.com/source">出典リンク</a>' in fragment
     assert "<img" not in fragment  # このサンプルには画像が無い
+    assert "<ul>" in fragment and "箇条書きの甲" in fragment
 
 
 def test_markdown_render_disables_raw_html_and_cdn() -> None:
@@ -492,6 +513,7 @@ def test_markdown_render_disables_raw_html_and_cdn() -> None:
     assert "http://" not in page
     assert "https://fonts" not in page
     assert "example.com/a" in page
+    assert "@media print" in page
 
 
 def test_markdown_render_image_with_relative_src(tmp_path: Path) -> None:

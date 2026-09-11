@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
 from mihari_room.contracts import Job, JobStatus, ProgressEvent
@@ -16,6 +16,7 @@ class RecordingBoard:
         self.speech: list[tuple[int, str]] = []
         self.logs: list[tuple[int, str]] = []
         self.files: list[tuple[int, Path]] = []
+        self.file_notes: list[tuple[int, str]] = []
         self.summaries: list[tuple[int, str]] = []
 
     async def create_thread(self, job: Job) -> int:
@@ -33,7 +34,21 @@ class RecordingBoard:
         self.logs.append((thread_id, text))
 
     async def post_file(self, thread_id: int, path: Path) -> None:
-        self.files.append((thread_id, path))
+        await self.post_files(thread_id, [path])
+
+    async def post_files(
+        self,
+        thread_id: int,
+        paths: Sequence[Path],
+        *,
+        note: str = "",
+        filenames: Sequence[str] | None = None,
+    ) -> None:
+        del filenames
+        if note:
+            self.file_notes.append((thread_id, note))
+        for path in paths:
+            self.files.append((thread_id, path))
 
     async def post_summary(self, thread_id: int, text: str) -> None:
         self.summaries.append((thread_id, text))

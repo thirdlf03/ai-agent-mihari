@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from pathlib import Path
 
 from mihari_room.contracts import (
@@ -12,6 +13,7 @@ from mihari_room.contracts import (
     JobStatus,
     ProgressEvent,
     ProgressKind,
+    ScreenshotAttachment,
 )
 from mihari_room.discord.board import BoundForumBoard
 from mihari_room.listener import IncomingMessage, handle_incoming
@@ -116,6 +118,73 @@ async def test_follow_up_requeues_same_folder(tmp_path: Path) -> None:
     follow = store.input_dir(job.id) / "followup-01.txt"
     assert follow.read_text(encoding="utf-8") == "もう一度"
     assert "待ち" in [tag for _, tag in board.tags]
+
+
+async def test_submit_posts_screenshots_to_forum(tmp_path: Path) -> None:
+    orch, store, board, _ = _make_room(tmp_path)
+    job = await orch.submit(
+        CreateJobRequest(title="見て", body="画面を見て", source=JobSource.PET),
+        screenshots=[
+            ScreenshotAttachment(
+                filename="Memo.png",
+                data=b"\x89PNG\r\n\x1a\n",
+                metadata={"source_title": "Memo"},
+            )
+        ],
+    )
+    await orch.aclose()
+    assert job.thread_id == 1001
+    assert board.file_notes == [(1001, "依頼のスクショだよ")]
+    assert len(board.files) == 1
+    attached = board.files[0][1]
+    assert attached.suffix == ".png"
+    assert attached.read_bytes().startswith(b"\x89PNG")
+    saved = store.input_dir(job.id) / "screenshots"
+    assert (saved / "0001.png").is_file()
+
+
+async def test_followup_posts_new_screenshots_to_forum(tmp_path: Path) -> None:
+    orch, _store, board, _ = _make_room(tmp_path)
+    job = await orch.submit(
+        CreateJobRequest(title="見て", body="一度", source=JobSource.PET, requested_by="hana")
+    )
+    await orch.follow_up_job(
+        job.id,
+        "これも見て",
+        requested_by="hana",
+        screenshots=[ScreenshotAttachment(filename="follow.jpg", data=b"jpeg-bytes")],
+    )
+    await orch.aclose()
+    notes = [text for _, text in board.file_notes]
+    assert "追記のスクショだよ" in notes
+    assert any(path.name.endswith(".jpg") for _, path in board.files)
+
+
+async def test_forum_screenshot_failure_does_not_drop_job(tmp_path: Path) -> None:
+    class BoomFilesBoard(RecordingBoard):
+        async def post_files(
+            self,
+            thread_id: int,
+            paths: Sequence[Path],
+            *,
+            note: str = "",
+            filenames: Sequence[str] | None = None,
+        ) -> None:
+            raise RuntimeError("discord full")
+
+    store = FileJobStore(tmp_path)
+    board = BoomFilesBoard()
+    worker = ScriptedWorker([ProgressEvent(kind=ProgressKind.SUMMARY, text="ok")])
+    orch = RoomOrchestrator(store, FileJobQueue(store), board, worker)
+    job = await orch.submit(
+        CreateJobRequest(title="見て", body="画面", source=JobSource.PET),
+        screenshots=[ScreenshotAttachment(filename="a.png", data=b"png")],
+    )
+    await orch.aclose()
+    latest = store.get(job.id)
+    assert latest.status is JobStatus.QUEUED
+    assert latest.thread_id == 1001
+    assert board.logs[-1][1] == "スクショをスレッドに載せられなかったよ"
 
 
 async def test_forum_starter_becomes_a_job(tmp_path: Path) -> None:
