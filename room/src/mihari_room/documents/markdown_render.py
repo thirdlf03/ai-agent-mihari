@@ -13,7 +13,8 @@ from typing import Any
 #: 埋め込み CSS。外部ファイル・フォントは参照しない。
 _STYLE = """
 :root { color-scheme: light dark; }
-body { font-family: -apple-system, "Hiragino Sans", "Noto Sans CJK JP", sans-serif;
+body { font-family: -apple-system, "Hiragino Sans", "Hiragino Kaku Gothic ProN",
+       "Noto Sans CJK JP", "Noto Sans JP", "IPAGothic", "IPAexGothic", sans-serif;
        line-height: 1.7; margin: 0 auto; max-width: 46em; padding: 2em 1.5em;
        color: #222; background: #fff; }
 @media (prefers-color-scheme: dark) {
@@ -24,7 +25,7 @@ h1, h2, h3, h4, h5, h6 { line-height: 1.3; margin-top: 1.6em; }
 h1 { border-bottom: 1px solid #ccc; padding-bottom: .2em; }
 a { color: #065fb8; }
 pre { background: #f5f5f5; padding: .8em 1em; overflow-x: auto; border-radius: 6px; }
-code { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+code { font-family: ui-monospace, "SF Mono", Menlo, "Noto Sans Mono CJK JP", monospace; }
 pre code { background: transparent; padding: 0; }
 table { border-collapse: collapse; margin: 1em 0; width: 100%; }
 th, td { border: 1px solid #bbb; padding: .4em .7em; text-align: left; }
@@ -32,6 +33,21 @@ th { background: #f0f0f0; }
 img { max-width: 100%; height: auto; }
 blockquote { border-left: 4px solid #ccc; margin: 1em 0; padding: 0 1em; color: #555; }
 hr { border: 0; border-top: 1px solid #ccc; margin: 2em 0; }
+@media print {
+  :root { color-scheme: light; }
+  body {
+    color: #222;
+    background: #fff;
+    max-width: none;
+    margin: 0;
+    padding: 0;
+    font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans CJK JP",
+                 "Noto Sans JP", "IPAGothic", "IPAexGothic", sans-serif;
+  }
+  pre, table { background: #f5f5f5; }
+  pre { white-space: pre-wrap; overflow: visible; }
+  a { color: #065fb8; }
+}
 """
 
 

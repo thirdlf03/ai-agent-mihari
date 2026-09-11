@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -22,6 +22,8 @@ MAX_TITLE_LEN = 100
 #: Discord 1 メッセージの上限。余裕を見て切り詰める。
 MESSAGE_LIMIT = 2000
 MESSAGE_HEADROOM = 100
+#: Discord 1 通に載せられる添付の上限。
+MAX_FILES_PER_MESSAGE = 10
 #: typing 表示は約 10 秒しか持たないので、本家 Gateway と同じく打ち直す。
 TYPING_INTERVAL_SEC = 8.0
 
@@ -182,16 +184,44 @@ class DiscordForumBoard:
         await self._publish_progress(thread_id, bubble)
 
     async def post_file(self, thread_id: int, path: Path) -> None:
-        """ファイルを添付して投げる。"""
+        """ファイルを 1 つ添付して投げる。"""
+        await self.post_files(thread_id, [path])
+
+    async def post_files(
+        self,
+        thread_id: int,
+        paths: Sequence[Path],
+        *,
+        note: str = "",
+        filenames: Sequence[str] | None = None,
+    ) -> None:
+        """複数ファイルを添付して投げる。1 通あたり Discord の上限枚数まで。"""
+        existing = [path for path in paths if path.is_file()]
+        if not existing:
+            return
         self._seal_progress(thread_id)
         thread = await self._thread(thread_id)
+        names = list(filenames) if filenames is not None else [path.name for path in existing]
+        if len(names) < len(existing):
+            names.extend(path.name for path in existing[len(names) :])
         try:
             import discord  # type: ignore[import-not-found]
-
-            attached = discord.File(str(path))
         except ImportError:  # pragma: no cover - テスト時は discord 有り
-            attached = str(path)  # type: ignore[assignment]
-        await thread.send(file=attached)
+            await thread.send(content=note or None, files=[str(path) for path in existing])
+            return
+        caption = note.strip()
+        for offset in range(0, len(existing), MAX_FILES_PER_MESSAGE):
+            chunk = existing[offset : offset + MAX_FILES_PER_MESSAGE]
+            attached = [
+                discord.File(str(path), filename=_safe_filename(name, path))
+                for path, name in zip(
+                    chunk,
+                    names[offset : offset + MAX_FILES_PER_MESSAGE],
+                    strict=False,
+                )
+            ]
+            await thread.send(content=caption or None, files=attached)
+            caption = ""
 
     async def post_summary(self, thread_id: int, text: str) -> None:
         """最後に 1 通だけまとめて投げる。"""
@@ -226,6 +256,12 @@ class DiscordForumBoard:
                 pass
 
 
+def _safe_filename(name: str, fallback: Path) -> str:
+    """Discord 添付名。パス区切りは落とす。空なら実ファイル名。"""
+    cleaned = Path(name or "").name.strip()
+    return cleaned or fallback.name
+
+
 class BoundForumBoard:
     """Discord が起きるまで Forum 口を待たせる。"""
 
@@ -258,6 +294,16 @@ class BoundForumBoard:
 
     async def post_file(self, thread_id: int, path: Path) -> None:
         await self._get().post_file(thread_id, path)
+
+    async def post_files(
+        self,
+        thread_id: int,
+        paths: Sequence[Path],
+        *,
+        note: str = "",
+        filenames: Sequence[str] | None = None,
+    ) -> None:
+        await self._get().post_files(thread_id, paths, note=note, filenames=filenames)
 
     async def post_summary(self, thread_id: int, text: str) -> None:
         await self._get().post_summary(thread_id, text)
