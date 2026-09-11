@@ -60,6 +60,7 @@ public struct RoomJobTrackedJob: Equatable, Sendable, Identifiable {
         artifacts: [RoomArtifact] = [],
         tempDeploys: [RoomTempDeploy] = [],
         lastError: String? = nil,
+        operationError: String? = nil,
         memories: [RoomMemoryCandidate] = [],
         memoryError: String? = nil,
         directive: RoomPhaseDirective? = nil,
@@ -73,6 +74,7 @@ public struct RoomJobTrackedJob: Equatable, Sendable, Identifiable {
         self.artifacts = artifacts
         self.tempDeploys = tempDeploys
         self.lastError = lastError
+        self.operationError = operationError
         self.memories = memories
         self.memoryError = memoryError
         self.directive = directive
