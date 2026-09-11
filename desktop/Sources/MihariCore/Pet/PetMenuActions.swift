@@ -69,6 +69,12 @@ public protocol PetMenuActions: AnyObject, ObservableObject {
     func setFastThresholds(_ enabled: Bool)
     /// 集中継続のセリフをその場で喋らせる(デバッグ用)。
     func replayFocusStreak()
+    /// §5-2: room voice 会話が有効か。メニューの「会話を開始 / 終了」表示に使う。
+    var isVoiceConversationActive: Bool { get }
+    /// §5-2: room voice 会話を開始する（通話 UI を開く）。
+    func startVoiceConversation()
+    /// §5-2: room voice 会話を終了する。
+    func endVoiceConversation()
     /// §5-1: 固定短文を VOICEVOX で合成して再生する煙テスト(room / OpenAI 不要)。
     func runVoicevoxRoundTripSmokeTest()
     /// 検知エンジンを実際に次の段へ進める(デバッグ用)。
