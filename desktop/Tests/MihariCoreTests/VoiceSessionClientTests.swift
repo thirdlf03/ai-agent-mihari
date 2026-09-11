@@ -121,4 +121,25 @@ struct VoiceSessionClientTests {
         #expect(status.status == "closed")
         #expect(status.isReconnectable == false)
     }
+
+    @Test("HTTP 401 は requestFailed になる")
+    func httpErrorThrowsRequestFailed() async {
+        let client = makeClient()
+        StubURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 401,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            let body = """
+            {"detail":"合言葉が違う"}
+            """
+            return (response, Data(body.utf8))
+        }
+
+        await #expect(throws: VoiceSessionError.self) {
+            _ = try await client.createSession()
+        }
+    }
 }

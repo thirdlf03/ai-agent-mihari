@@ -27,6 +27,17 @@ struct VoiceScreenCaptureTests {
         #expect(MouseDisplaySelector.displayID(at: CGPoint(x: -50, y: -50), displays: displays) == 10)
     }
 
+    @Test("display は bounds と title を返す")
+    func selectsDisplayBounds() {
+        let displays = [
+            MouseDisplayBounds(displayID: 1, bounds: CGRect(x: 0, y: 0, width: 1920, height: 1080), title: "左"),
+            MouseDisplayBounds(displayID: 2, bounds: CGRect(x: 1920, y: 0, width: 1920, height: 1080), title: "右"),
+        ]
+        let selected = MouseDisplaySelector.display(at: CGPoint(x: 2000, y: 500), displays: displays)
+        #expect(selected?.displayID == 2)
+        #expect(selected?.title == "右")
+    }
+
     @Test("input.image フレームを契約どおり組み立てる")
     func buildsInputImageFrame() throws {
         let png = Data([0x89, 0x50, 0x4E, 0x47])

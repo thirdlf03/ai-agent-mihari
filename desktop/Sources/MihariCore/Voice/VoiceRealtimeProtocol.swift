@@ -90,9 +90,11 @@ struct VoiceHistorySyncEntry: Equatable, Sendable {
 
     /// 会話 UI 用の 1 行に写す。room の履歴が正。
     func asConversationMessage() -> VoiceConversationMessage? {
+        // 空白だけの行は発言として扱わない。
+        let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         switch role {
         case "user":
-            guard !text.isEmpty else { return nil }
+            guard hasText else { return nil }
             return VoiceConversationMessage(role: .user, text: text, timestamp: timestamp)
         case "assistant":
             if kind == "tool_call" {
@@ -103,7 +105,7 @@ struct VoiceHistorySyncEntry: Equatable, Sendable {
                     timestamp: timestamp
                 )
             }
-            guard !text.isEmpty else { return nil }
+            guard hasText else { return nil }
             return VoiceConversationMessage(role: .assistant, text: text, timestamp: timestamp)
         default:
             return nil
