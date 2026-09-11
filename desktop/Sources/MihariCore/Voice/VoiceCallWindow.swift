@@ -8,6 +8,8 @@ public final class VoiceCallWindowController {
 
     private var window: NSWindow?
     private var controller: VoiceConversationController?
+    /// `window.delegate` は弱参照なので、ここで保持する。
+    private var windowDelegate: VoiceCallWindowDelegate?
 
     public init() {}
 
@@ -30,6 +32,13 @@ public final class VoiceCallWindowController {
         window.title = "みはりちゃんと会話"
         window.isReleasedWhenClosed = false
         window.contentViewController = NSHostingController(rootView: AnyView(view))
+        // 赤ボタンで窓を閉じられても会話が残らないよう、閉鎖で stop を呼ぶ。
+        let delegate = VoiceCallWindowDelegate()
+        delegate.onWillClose = { [weak controller] in
+            controller?.stop()
+        }
+        window.delegate = delegate
+        windowDelegate = delegate
         window.center()
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
@@ -43,6 +52,16 @@ public final class VoiceCallWindowController {
 
     var isVisibleForTesting: Bool {
         window?.isVisible ?? false
+    }
+}
+
+/// 会話窓の閉鎖をコントローラへ伝えるだけのデリゲート。
+@MainActor
+private final class VoiceCallWindowDelegate: NSObject, NSWindowDelegate {
+    var onWillClose: (() -> Void)?
+
+    func windowWillClose(_ notification: Notification) {
+        onWillClose?()
     }
 }
 

@@ -9,6 +9,7 @@ enum VoiceRealtimeProtocol {
         static let historySync = "history.sync"
         static let inputAudio = "input.audio"
         static let inputImage = "input.image"
+        static let userText = "user.text"
         static let assistantText = "assistant.text"
         static let assistantToolCall = "assistant.tool_call"
         static let error = "error"
@@ -114,6 +115,7 @@ struct VoiceHistorySyncEntry: Equatable, Sendable {
 enum VoiceIncomingFrame: Equatable, Sendable {
     case sessionReady(sessionID: String, model: String)
     case historySync(messages: [VoiceHistorySyncEntry])
+    case userText(text: String)
     case assistantText(delta: String, text: String, done: Bool)
     case assistantToolCall(name: String, callID: String, arguments: String)
     case error(code: String, message: String)
@@ -137,6 +139,8 @@ enum VoiceIncomingFrame: Equatable, Sendable {
             let rawMessages = json["messages"] as? [[String: Any]] ?? []
             let messages = rawMessages.compactMap(VoiceHistorySyncEntry.parse(from:))
             return .historySync(messages: messages)
+        case VoiceRealtimeProtocol.EventType.userText:
+            return .userText(text: json["text"] as? String ?? "")
         case VoiceRealtimeProtocol.EventType.assistantText:
             return .assistantText(
                 delta: json["delta"] as? String ?? "",
@@ -184,19 +188,20 @@ enum VoiceOutgoingFrame {
 }
 
 /// 会話履歴の 1 行。マイク音声ファイルは保存しない。
-struct VoiceConversationMessage: Identifiable, Equatable, Sendable {
-    enum Role: String, Sendable {
+public struct VoiceConversationMessage: Identifiable, Equatable, Sendable {
+    public enum Role: String, Sendable {
         case user
         case assistant
         case system
     }
 
-    let id: UUID
-    let role: Role
-    let text: String
-    let timestamp: Date
+    public let id: UUID
+    public let role: Role
+    /// `user.text` の文字起こしでプレースホルダを書き換えるため var にする。
+    public var text: String
+    public let timestamp: Date
 
-    init(id: UUID = UUID(), role: Role, text: String, timestamp: Date = Date()) {
+    public init(id: UUID = UUID(), role: Role, text: String, timestamp: Date = Date()) {
         self.id = id
         self.role = role
         self.text = text

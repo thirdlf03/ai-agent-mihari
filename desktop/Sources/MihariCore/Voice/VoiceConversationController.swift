@@ -24,13 +24,22 @@ public final class VoiceConversationController: ObservableObject {
     /// マイクが有効か（エコー対策で一時停止中は false）。
     @Published public private(set) var isMicLive = false
 
-    struct Dependencies {
+    public struct Dependencies {
         var connector: VoiceStreamConnector
         var speechPlayer: SpeechPlayer
         var voicevox: VoicevoxClient
         var micFactory: @MainActor () -> any MicCapturing
+        /// マイク権限の照会。テストでは実機の TCC を見ないよう差し替える。
+        var checkMicPermission: @Sendable () -> PermissionState = {
+            PermissionChecker.check(.microphone)
+        }
+        /// マイク権限の要求。許可されたかだけを返す。テストではプロンプトを出さないよう差し替える。
+        var requestMicPermission: @Sendable () async -> Bool = {
+            _ = await PermissionRequester.request(.microphone)
+            return PermissionChecker.check(.microphone).grant == .granted
+        }
 
-        @MainActor static func makeDefault(speechPlayer: SpeechPlayer) -> Dependencies {
+        @MainActor public static func makeDefault(speechPlayer: SpeechPlayer) -> Dependencies {
             Dependencies(
                 connector: VoiceStreamConnector(),
                 speechPlayer: speechPlayer,
@@ -62,6 +71,12 @@ public final class VoiceConversationController: ObservableObject {
     private var backoffSeconds: TimeInterval = 1
     private var shouldReconnect = false
     private var manualReconnectRequested = false
+
+    /// input.audio などの送信を直列化するチェーン。チャンクごとに Task を並べると
+    /// 到着順が不定になるため、前の送信の完了を待ってから次を送る。
+    private var sendTail: Task<Void, Never>?
+    /// 発話終了の見張り。最後に声を検した時点から無音が続いたらターンを確定する。
+    private var silenceWatchdog: Task<Void, Never>?
 
     /// 再生中はマイク送信を止める（エコー対策）。
     private var echoGuardActive = false
@@ -107,6 +122,8 @@ public final class VoiceConversationController: ObservableObject {
 
     /// 会話を終了する。
     public func stop() {
+        // 窓を閉じる操作などからの再入で、終了処理を二度走らせない。
+        guard isActive else { return }
         shouldReconnect = false
         isActive = false
         stopMic()
@@ -188,7 +205,19 @@ public final class VoiceConversationController: ObservableObject {
             applyHistorySync(entries)
             return false
 
+        case .userText(let text):
+            applyUserTranscript(text)
+            return false
+
         case .assistantText(let delta, let text, let done):
+            // done フレームの text は全文なので、delta の累積へ足すと二重になる。
+            // 全文が届いたら累積を捨てて置き換える。
+            if done, !text.isEmpty {
+                pendingAssistantText = text
+                updateAssistantDraft(text)
+                finalizeAssistantMessage()
+                return false
+            }
             let piece = !delta.isEmpty ? delta : text
             guard !piece.isEmpty else {
                 if done { finalizeAssistantMessage() }
@@ -226,6 +255,33 @@ public final class VoiceConversationController: ObservableObject {
 
     private func startMic() {
         stopMic()
+        switch deps.checkMicPermission().grant {
+        case .granted:
+            beginMicCapture()
+        case .undetermined:
+            // まだ聞いていないので、ここで一度だけプロンプトを出す。結果を見てから開始する。
+            statusText = "マイクの許可を待っている…"
+            Task { [weak self] in
+                guard let self else { return }
+                let granted = await self.deps.requestMicPermission()
+                guard self.isActive else { return }
+                if granted {
+                    self.beginMicCapture()
+                } else {
+                    self.showMicPermissionRequired()
+                }
+            }
+        case .denied:
+            showMicPermissionRequired()
+        }
+    }
+
+    private func showMicPermissionRequired() {
+        statusText = "マイクの利用許可が必要"
+        appendSystem("マイクの利用許可が必要です。システム設定のプライバシーとセキュリティから許可してください")
+    }
+
+    private func beginMicCapture() {
         let capture = deps.micFactory()
         capture.onChunk = { [weak self] data, level in
             Task { @MainActor [weak self] in
@@ -250,6 +306,8 @@ public final class VoiceConversationController: ObservableObject {
         hasStreamedAudioInTurn = false
         isUserSpeaking = false
         lastSpeechTime = nil
+        silenceWatchdog?.cancel()
+        silenceWatchdog = nil
     }
 
     private func handleMicChunk(data: Data, level: Float) {
@@ -271,14 +329,37 @@ public final class VoiceConversationController: ObservableObject {
         if speakingNow {
             isUserSpeaking = true
             lastSpeechTime = Date()
-            hasStreamedAudioInTurn = true
-            sendAudioChunk(data, commit: false, createResponse: false)
-        } else if isUserSpeaking {
-            if let lastSpeechTime,
+            scheduleSilenceWatchdog()
+        }
+
+        if isUserSpeaking {
+            if !speakingNow,
+                let lastSpeechTime,
                 Date().timeIntervalSince(lastSpeechTime) >= Self.silenceDuration
             {
+                // 無音が続いたので発話終了とみなし、このチャンクは送らず確定する。
                 commitUserTurn()
+            } else {
+                // 発話中は語尾の小さい音も欠けないよう、レベルに関係なくすべての
+                // チャンクを送る。空のチャンクは sendAudioChunk 側で捨てられる。
+                hasStreamedAudioInTurn = true
+                sendAudioChunk(data, commit: false, createResponse: false)
             }
+        }
+    }
+
+    /// 最後に声を検した時点から無音が続いたかを見る。チャンクが途絶えても
+    /// ターンが確定するように、発話のたびに仕掛け直す。
+    private func scheduleSilenceWatchdog() {
+        silenceWatchdog?.cancel()
+        silenceWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.silenceDuration))
+            guard let self, !Task.isCancelled else { return }
+            guard self.isUserSpeaking,
+                let lastSpeechTime = self.lastSpeechTime,
+                Date().timeIntervalSince(lastSpeechTime) >= Self.silenceDuration
+            else { return }
+            self.commitUserTurn()
         }
     }
 
@@ -286,6 +367,8 @@ public final class VoiceConversationController: ObservableObject {
         guard isUserSpeaking else { return }
         isUserSpeaking = false
         lastSpeechTime = nil
+        silenceWatchdog?.cancel()
+        silenceWatchdog = nil
 
         // 発話中に送ったチャンクを再送しない。commit + create_response だけ送る。
         if hasStreamedAudioInTurn {
@@ -300,7 +383,10 @@ public final class VoiceConversationController: ObservableObject {
 
     private func sendAudioChunk(_ pcm: Data, commit: Bool, createResponse: Bool) {
         guard let socket = currentSocket, !pcm.isEmpty else { return }
-        Task {
+        let previous = sendTail
+        sendTail = Task {
+            // 前の送信が終わってから送り、フレームの順序を保つ。
+            _ = await previous?.value
             do {
                 let text = try VoiceOutgoingFrame.inputAudio(
                     pcm16: pcm,
@@ -390,8 +476,25 @@ public final class VoiceConversationController: ObservableObject {
 
     // MARK: - 履歴
 
+    /// 発話確定時に履歴へ置く、文字起こし待ちの目印。`user.text` が届いたら書き換える。
+    private static let userPlaceholderText = "（音声を送信）"
+
     private func appendUserPlaceholder() {
-        appendMessage(VoiceConversationMessage(role: .user, text: "（音声を送信）"))
+        appendMessage(VoiceConversationMessage(role: .user, text: Self.userPlaceholderText))
+    }
+
+    /// room が送る入力音声の文字起こし。直前がプレースホルダなら本当の文に差し替え、
+    /// そうでなければ新しい user 行として追加する。
+    private func applyUserTranscript(_ text: String) {
+        guard !text.isEmpty else { return }
+        if let last = messages.last,
+            last.role == .user,
+            last.text == Self.userPlaceholderText
+        {
+            messages[messages.count - 1].text = text
+        } else {
+            appendMessage(VoiceConversationMessage(role: .user, text: text))
+        }
     }
 
     private func updateAssistantDraft(_ text: String) {
@@ -430,6 +533,7 @@ public final class VoiceConversationController: ObservableObject {
     private func closeSocket() {
         let socket = currentSocket
         currentSocket = nil
+        sendTail = nil
         if let socket {
             Task { await socket.close() }
         }
@@ -470,5 +574,6 @@ public final class VoiceConversationController: ObservableObject {
     private func clearSession() {
         sessionID = nil
         streamPath = nil
+        sendTail = nil
     }
 }

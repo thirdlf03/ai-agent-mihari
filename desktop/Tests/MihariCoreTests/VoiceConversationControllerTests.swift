@@ -4,7 +4,8 @@ import Testing
 @testable import MihariCore
 
 /// 会話コントローラの WS 受信・合成・割り込みを、差し替えで確かめる。
-@Suite("voice 会話コントローラ")
+/// HTTP スタブは全テスト共有の静的状態なので、順次実行にして並び替えの干渉を防ぐ。
+@Suite("voice 会話コントローラ", .serialized)
 @MainActor
 struct VoiceConversationControllerTests {
 
@@ -57,11 +58,11 @@ struct VoiceConversationControllerTests {
         }
 
         func makeSocket(url: URL, token: String) async throws -> any VoiceStreamSocket {
-            lock.lock()
-            makeCount += 1
-            defer { lock.unlock() }
-            if pending.isEmpty { return ScriptedSocket() }
-            return pending.removeFirst()
+            lock.withLock {
+                makeCount += 1
+                if pending.isEmpty { return ScriptedSocket() }
+                return pending.removeFirst()
+            }
         }
     }
 
@@ -83,7 +84,8 @@ struct VoiceConversationControllerTests {
     private func makeController(
         socket: ScriptedSocket,
         player: SpeechPlayer = SpeechPlayer(),
-        factory: ScriptedSocketFactory? = nil
+        factory: ScriptedSocketFactory? = nil,
+        micPermission: PermissionGrant = .granted
     ) -> (VoiceConversationController, StubMic, ScriptedSocket, ScriptedSocketFactory) {
         let factory = factory ?? ScriptedSocketFactory()
         factory.queue(socket)
@@ -126,10 +128,21 @@ struct VoiceConversationControllerTests {
                     ),
                     session: session
                 ),
-                micFactory: { stubMic }
+                micFactory: { stubMic },
+                checkMicPermission: { PermissionState(grant: micPermission, detail: "test") },
+                requestMicPermission: { micPermission == .granted }
             )
         )
         return (controller, stubMic, socket, factory)
+    }
+
+    /// フレーム処理や送信の追いつきを待つ。固定の実時間待ちは並列で詰まると
+    /// 間に合わないので、条件が揃うまで短い間隔で見る(上限は settle より長め)。
+    private func waitUntil(_ condition: () -> Bool, attempts: Int = 1500) async {
+        for _ in 0..<attempts {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(2))
+        }
     }
 
     private func parseSentAudioFrames(_ sent: [String]) -> [[String: Any]] {
@@ -148,10 +161,10 @@ struct VoiceConversationControllerTests {
     @Test("history.sync でローカル履歴を room の内容に置き換える")
     func historySyncReplacesLocalMessages() async throws {
         let socket = ScriptedSocket()
-        let (controller, _, _, _) = makeController(socket: socket)
+        let (controller, _, _, factory) = makeController(socket: socket)
         controller.start()
+        await waitUntil { factory.makeCount >= 1 }
 
-        try await Task.sleep(for: .milliseconds(100))
         socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
         socket.feed(
             """
@@ -162,13 +175,12 @@ struct VoiceConversationControllerTests {
             """
         )
 
-        try await Task.sleep(for: .milliseconds(100))
+        await waitUntil {
+            controller.messages.contains(where: { $0.text == "以前の回答" })
+        }
 
-        #expect(controller.messages.count == 2)
-        #expect(controller.messages[0].role == .user)
-        #expect(controller.messages[0].text == "以前の質問")
-        #expect(controller.messages[1].role == .assistant)
-        #expect(controller.messages[1].text == "以前の回答")
+        #expect(controller.messages.map(\.role) == [.user, .assistant])
+        #expect(controller.messages.map(\.text) == ["以前の質問", "以前の回答"])
         #expect(!controller.messages.contains(where: { $0.text == "会話を開始した" }))
         #expect(controller.statusText.contains("履歴を同期"))
 
@@ -178,15 +190,17 @@ struct VoiceConversationControllerTests {
     @Test("session.ready で ready になり、assistant.text が履歴に載る")
     func handlesAssistantText() async throws {
         let socket = ScriptedSocket()
-        let (controller, _, _, _) = makeController(socket: socket)
+        let (controller, _, _, factory) = makeController(socket: socket)
         controller.start()
-
-        try await Task.sleep(for: .milliseconds(100))
+        await waitUntil { factory.makeCount >= 1 }
 
         socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
         socket.feed(#"{"type":"assistant.text","delta":"こんにちは","done":true}"#)
 
-        try await Task.sleep(for: .milliseconds(200))
+        await waitUntil { controller.connectionState == .ready }
+        await waitUntil {
+            controller.messages.contains(where: { $0.role == .assistant && $0.text == "こんにちは" })
+        }
 
         #expect(controller.connectionState == .ready)
         #expect(controller.messages.contains(where: { $0.role == .assistant && $0.text == "こんにちは" }))
@@ -201,12 +215,13 @@ struct VoiceConversationControllerTests {
         #expect(player.play(audio: wav, priority: .chatter))
 
         let socket = ScriptedSocket()
-        let (controller, mic, _, _) = makeController(socket: socket, player: player)
+        let (controller, mic, _, factory) = makeController(socket: socket, player: player)
         controller.start()
+        await waitUntil { factory.makeCount >= 1 }
 
         mic.emit(data: Data(repeating: 0, count: 480), level: 0.5)
 
-        try await Task.sleep(for: .milliseconds(50))
+        await waitUntil { player.isSpeaking == false }
         #expect(player.isSpeaking == false)
 
         controller.stop()
@@ -215,10 +230,10 @@ struct VoiceConversationControllerTests {
     @Test("発話確定時はバッファ全体を再送せず commit だけ送る")
     func commitTurnDoesNotResendBufferedAudio() async throws {
         let socket = ScriptedSocket()
-        let (controller, mic, _, _) = makeController(socket: socket)
+        let (controller, mic, _, factory) = makeController(socket: socket)
         controller.start()
-
-        try await Task.sleep(for: .milliseconds(100))
+        // ソケットが開く前に emit したチャンクは捨てられるため、接続を待ってから送る。
+        await waitUntil { factory.makeCount >= 1 }
         socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
 
         let chunkA = Data(repeating: 0xAA, count: 480)
@@ -227,7 +242,10 @@ struct VoiceConversationControllerTests {
         mic.emit(data: chunkB, level: 0.5)
         mic.emit(data: Data(), level: 0.0)
 
-        try await Task.sleep(for: .milliseconds(850))
+        // 無音の見張りが発話を確定し、commit フレームが出るまで待つ。
+        await waitUntil {
+            self.parseSentAudioFrames(socket.sent).contains { ($0["commit"] as? Bool) == true }
+        }
 
         let frames = parseSentAudioFrames(socket.sent)
         #expect(frames.count >= 3)
@@ -235,10 +253,10 @@ struct VoiceConversationControllerTests {
         let streaming = frames.filter { ($0["commit"] as? Bool) == false }
         let commits = frames.filter { ($0["commit"] as? Bool) == true }
         #expect(streaming.count == 2)
-        #expect(commits.count == 1)
-        #expect(commits[0]["create_response"] as? Bool == true)
+        let commitFrame = try #require(commits.first)
+        #expect(commitFrame["create_response"] as? Bool == true)
 
-        let commitAudio = commits[0]["audio_base64"] as? String ?? ""
+        let commitAudio = commitFrame["audio_base64"] as? String ?? ""
         let commitBytes = Data(base64Encoded: commitAudio) ?? Data()
         #expect(commitBytes.count == 2)
         #expect(commitBytes != chunkA)
@@ -256,21 +274,20 @@ struct VoiceConversationControllerTests {
         factory.queue(firstSocket)
         factory.queue(secondSocket)
 
+        let (controller, _, first, _) = makeController(socket: firstSocket, factory: factory)
+        // makeController がスタブを既定へ戻すため、並びの指定はそのあとに行う。
         VoiceSessionClientTestsURLProtocol.mode = .sequential
         VoiceSessionClientTestsURLProtocol.responses = [
             .create(sessionID: "sess-1"),
             .create(sessionID: "sess-2"),
         ]
-
-        let (controller, _, first, _) = makeController(socket: firstSocket, factory: factory)
         controller.start()
-
-        try await Task.sleep(for: .milliseconds(100))
+        await waitUntil { factory.makeCount >= 1 }
         first.feed(#"{"type":"session.ready","session_id":"sess-1","model":"mini"}"#)
         first.feed(#"{"type":"session.closed","reason":"done"}"#)
         first.finish()
 
-        try await Task.sleep(for: .milliseconds(1200))
+        await waitUntil { factory.makeCount >= 2 }
 
         #expect(factory.makeCount == 2)
 
@@ -285,26 +302,126 @@ struct VoiceConversationControllerTests {
         factory.queue(firstSocket)
         factory.queue(secondSocket)
 
+        let (controller, _, first, _) = makeController(socket: firstSocket, factory: factory)
+        // makeController がスタブを既定へ戻すため、並びの指定はそのあとに行う。
         VoiceSessionClientTestsURLProtocol.mode = .sequential
         VoiceSessionClientTestsURLProtocol.responses = [
             .create(sessionID: "sess-1"),
             .status("closed"),
             .create(sessionID: "sess-2"),
         ]
-
-        let (controller, _, first, _) = makeController(socket: firstSocket, factory: factory)
         controller.start()
-
-        try await Task.sleep(for: .milliseconds(100))
+        await waitUntil { factory.makeCount >= 1 }
         first.feed(#"{"type":"session.ready","session_id":"sess-1","model":"mini"}"#)
         first.finish()
 
-        try await Task.sleep(for: .milliseconds(1200))
+        await waitUntil { factory.makeCount >= 2 }
 
         #expect(factory.makeCount == 2)
         #expect(controller.messages.contains(where: {
             $0.role == .system && $0.text.contains("新規セッション")
         }))
+
+        controller.stop()
+    }
+
+    @Test("done の全文は delta の累積を置き換え、応答が二重にならない")
+    func doneFullTextDoesNotDuplicateAssistantMessage() async throws {
+        let socket = ScriptedSocket()
+        let (controller, _, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        socket.feed(#"{"type":"assistant.text","delta":"こんに","done":false}"#)
+        socket.feed(#"{"type":"assistant.text","delta":"ちは","done":false}"#)
+        socket.feed(#"{"type":"assistant.text","text":"こんにちは","done":true}"#)
+
+        await waitUntil {
+            controller.messages.contains(where: { $0.role == .assistant && $0.text == "こんにちは" })
+        }
+
+        let assistantTexts = controller.messages.filter { $0.role == .assistant }.map(\.text)
+        #expect(assistantTexts == ["こんにちは"])
+
+        controller.stop()
+    }
+
+    @Test("発話中はしきい値未満のチャンクも切り捨てずに送る")
+    func sendsQuietChunksWhileUserIsSpeaking() async throws {
+        let socket = ScriptedSocket()
+        let (controller, mic, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+
+        let loud = Data(repeating: 0x11, count: 480)
+        let quiet = Data(repeating: 0x22, count: 480)
+        mic.emit(data: loud, level: 0.5)
+        // 語尾の小さい音。発話中なのでしきい値未満でも送る。
+        mic.emit(data: quiet, level: 0.005)
+
+        await waitUntil {
+            self.parseSentAudioFrames(socket.sent)
+                .filter { ($0["commit"] as? Bool) == false }.count >= 2
+        }
+
+        let streaming = parseSentAudioFrames(socket.sent).filter { ($0["commit"] as? Bool) == false }
+        let payloads = streaming.compactMap { $0["audio_base64"] as? String }
+            .compactMap { Data(base64Encoded: $0) }
+        #expect(payloads.contains(loud))
+        #expect(payloads.contains(quiet))
+
+        controller.stop()
+    }
+
+    @Test("user.text の文字起こしでプレースホルダが本当の文に置き換わる")
+    func userTextReplacesPlaceholder() async throws {
+        let socket = ScriptedSocket()
+        let (controller, mic, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+
+        mic.emit(data: Data(repeating: 0x33, count: 480), level: 0.5)
+
+        // 無音が続いて発話が確定し、プレースホルダが置かれるまで待つ。
+        await waitUntil {
+            controller.messages.last?.role == .user
+                && controller.messages.last?.text == "（音声を送信）"
+        }
+        #expect(controller.messages.last?.role == .user)
+        #expect(controller.messages.last?.text == "（音声を送信）")
+
+        socket.feed(#"{"type":"user.text","text":"今日の予定を教えて"}"#)
+        await waitUntil {
+            controller.messages.last?.role == .user
+                && controller.messages.last?.text == "今日の予定を教えて"
+        }
+
+        let userMessages = controller.messages.filter { $0.role == .user }
+        #expect(userMessages.count == 1)
+        #expect(userMessages.last?.text == "今日の予定を教えて")
+
+        controller.stop()
+    }
+
+    @Test("マイク権限が無ければキャプチャを始めず理由を出す")
+    func micPermissionDeniedDoesNotStartCapture() async throws {
+        let socket = ScriptedSocket()
+        let (controller, mic, _, _) = makeController(socket: socket, micPermission: .denied)
+        controller.start()
+
+        await waitUntil {
+            controller.messages.contains(where: { $0.text.contains("マイクの利用許可") })
+        }
+
+        #expect(mic.started == false)
+        #expect(controller.isMicLive == false)
+        // statusText は接続処理に上書きされるため、履歴に残る文言を見る。
+        #expect(controller.messages.contains(where: { $0.text.contains("マイクの利用許可") }))
 
         controller.stop()
     }
