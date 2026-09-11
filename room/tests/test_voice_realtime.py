@@ -12,7 +12,6 @@ from starlette.websockets import WebSocketDisconnect
 
 from mihari_room.app import create_app
 from mihari_room.config import TOKEN_HEADER, RoomConfig
-from mihari_room.voice.upstream import response_create_event
 from mihari_room.orchestrator import RoomOrchestrator
 from mihari_room.queue.file_queue import FileJobQueue
 from mihari_room.store.file_store import FileJobStore
@@ -24,7 +23,7 @@ from mihari_room.voice.protocol import (
     EVENT_SESSION_READY,
     EVENT_USER_TEXT,
 )
-from mihari_room.voice.upstream import FakeRealtimeUpstream
+from mihari_room.voice.upstream import FakeRealtimeUpstream, response_create_event
 from tests.recording import RecordingBoard, ScriptedWorker
 
 TOKEN = "room-secret"
