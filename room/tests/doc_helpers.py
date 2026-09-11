@@ -3,7 +3,7 @@
 - ASCII の素の PDF（pypdf が書ける Type1 Helvetica）
 - ページ数を指定できる複数ページ PDF
 - 暗号化・破損・ページ数超過の PDF
-- 日本語 PDF は同梱レンダラー（markdown_pdf）で作れば確実に本文が読める
+- 日本語 PDF は markdown_pdf（Playwright 印刷、無ければ fpdf2）で作れば本文が読める
 """
 
 from __future__ import annotations

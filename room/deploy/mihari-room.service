@@ -37,6 +37,7 @@ KillMode=control-group
 # umask 0077: デーモンが作るファイルは既定 600/700。ログやバックアップに映らない。
 UMask=0077
 Environment=PYTHONUNBUFFERED=1
+Environment=PLAYWRIGHT_BROWSERS_PATH=/var/lib/mihari/pw-browsers
 
 # --- サンドボックス ---
 # Hermes を in-process で回す。つまり:

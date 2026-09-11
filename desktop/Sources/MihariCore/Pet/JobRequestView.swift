@@ -41,7 +41,7 @@ public enum JobRequestExample: String, CaseIterable, Sendable, Identifiable {
 /// 走っている仕事への「追記」にも同じ窓を使う(タイトル欄を隠して「追記する」になる)。
 /// 添付は送信前のプレビューと削除ができ、上限・形式は追加時に検証する。本文・添付・設定は
 /// 下書きとしてローカル保存し、失敗時は保持、成功時は消して当該ジョブの詳細を開く。
-/// ディスプレイ・ウィンドウを選んでスクショを撮り、添付確認・削除を経て送る（#22）。
+/// システムの対象選びで画面またはウィンドウを 1 枚撮り、添付確認・削除を経て送る（#22）。
 /// スクショはバイト列（base64）で部屋へ送られ、成果物の公開対象にはならない。
 public struct JobRequestView: View {
     @StateObject private var model: JobRequestViewModel
@@ -52,11 +52,8 @@ public struct JobRequestView: View {
         client: JobRequestClient,
         onSubmitted: @escaping @MainActor (String, String) -> Void = { _, _ in },
         draftStore: (any JobRequestDraftStoring)? = DiskJobRequestDraftStore(),
-        listTargets: @escaping @Sendable () async throws -> [ScreenshotTarget] = {
-            try await ScreenshotCaptureService.availableTargets()
-        },
-        capture: @escaping @Sendable (ScreenshotTarget) async throws -> ScreenshotCapture = {
-            try await ScreenshotCaptureService.capturePNG(of: $0)
+        pickScreenshot: @escaping @Sendable () async throws -> ScreenshotCapture = {
+            try await SystemScreenshotPicker.pick()
         }
     ) {
         _model = StateObject(
@@ -64,8 +61,7 @@ public struct JobRequestView: View {
                 client: client,
                 onSubmitted: onSubmitted,
                 draftStore: draftStore,
-                listTargets: listTargets,
-                capture: capture
+                pickScreenshot: pickScreenshot
             )
         )
     }
@@ -74,19 +70,15 @@ public struct JobRequestView: View {
     public init(
         followupClient: RoomEventClient,
         jobID: String,
-        listTargets: @escaping @Sendable () async throws -> [ScreenshotTarget] = {
-            try await ScreenshotCaptureService.availableTargets()
-        },
-        capture: @escaping @Sendable (ScreenshotTarget) async throws -> ScreenshotCapture = {
-            try await ScreenshotCaptureService.capturePNG(of: $0)
+        pickScreenshot: @escaping @Sendable () async throws -> ScreenshotCapture = {
+            try await SystemScreenshotPicker.pick()
         }
     ) {
         _model = StateObject(
             wrappedValue: JobRequestViewModel(
                 followupClient: followupClient,
                 jobID: jobID,
-                listTargets: listTargets,
-                capture: capture
+                pickScreenshot: pickScreenshot
             )
         )
     }
@@ -194,7 +186,7 @@ public struct JobRequestView: View {
         }
     }
 
-    /// スクショの添付欄。撮影対象を選ぶメニューと、撮った分の確認・削除。
+    /// スクショの添付欄。システムピッカーで画面またはウィンドウを選び、撮った分の確認・削除。
     @ViewBuilder
     private var screenshotSection: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -202,33 +194,25 @@ public struct JobRequestView: View {
                 Text("スクショ")
                     .font(.headline)
                 Spacer()
-                if model.isLoadingTargets {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-                Menu {
-                    if model.screenshotTargets.isEmpty {
-                        Text("対象が見つからない")
-                    } else {
-                        ForEach(model.screenshotTargets) { target in
-                            Button(target.title) {
-                                Task {
-                                    await model.captureScreenshot(target: target)
-                                }
-                            }
-                        }
+                Button {
+                    Task {
+                        await model.captureScreenshot()
                     }
                 } label: {
-                    Label("スクショを撮る", systemImage: "camera.viewfinder")
+                    Label("画面を選んで撮る", systemImage: "camera.viewfinder")
                 }
-                .disabled(model.isLoadingTargets || model.isCapturingScreenshot)
+                .disabled(model.isCapturingScreenshot)
             }
+
+            Text("画面かウィンドウを選ぶと、その場で 1 枚撮る")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
 
             if model.isCapturingScreenshot {
                 HStack(spacing: 6) {
                     ProgressView()
                         .controlSize(.small)
-                    Text("撮影中…")
+                    Text("画面を選んで…")
                         .font(.caption)
                 }
             }
@@ -272,9 +256,6 @@ public struct JobRequestView: View {
                     }
                 }
             }
-        }
-        .task {
-            await model.loadScreenshotTargets()
         }
     }
 
@@ -396,8 +377,6 @@ public final class JobRequestViewModel: ObservableObject {
 
     // スクショ（#22）
     @Published public private(set) var screenshots: [ScreenshotAttachment] = []
-    @Published public private(set) var screenshotTargets: [ScreenshotTarget] = []
-    @Published public private(set) var isLoadingTargets = false
     @Published public private(set) var isCapturingScreenshot = false
     @Published public var captureErrorMessage: String?
 
@@ -406,8 +385,7 @@ public final class JobRequestViewModel: ObservableObject {
     private let followupJobID: String?
     private let draftStore: (any JobRequestDraftStoring)?
     private let onSubmitted: @MainActor (String, String) -> Void
-    private let listTargets: @Sendable () async throws -> [ScreenshotTarget]
-    private let capture: @Sendable (ScreenshotTarget) async throws -> ScreenshotCapture
+    private let pickScreenshot: @Sendable () async throws -> ScreenshotCapture
     /// 添付それぞれの元パス。下書きの復元に使う（in-memory の添付は nil）。
     private var attachmentPaths: [URL?] = []
 
@@ -416,11 +394,8 @@ public final class JobRequestViewModel: ObservableObject {
         client: JobRequestClient,
         onSubmitted: @escaping @MainActor (String, String) -> Void = { _, _ in },
         draftStore: (any JobRequestDraftStoring)? = nil,
-        listTargets: @escaping @Sendable () async throws -> [ScreenshotTarget] = {
-            try await ScreenshotCaptureService.availableTargets()
-        },
-        capture: @escaping @Sendable (ScreenshotTarget) async throws -> ScreenshotCapture = {
-            try await ScreenshotCaptureService.capturePNG(of: $0)
+        pickScreenshot: @escaping @Sendable () async throws -> ScreenshotCapture = {
+            try await SystemScreenshotPicker.pick()
         }
     ) {
         self.submitClient = client
@@ -428,8 +403,7 @@ public final class JobRequestViewModel: ObservableObject {
         self.followupJobID = nil
         self.draftStore = draftStore
         self.onSubmitted = onSubmitted
-        self.listTargets = listTargets
-        self.capture = capture
+        self.pickScreenshot = pickScreenshot
         restoreDraft()
         refreshCapabilities()
     }
@@ -439,11 +413,8 @@ public final class JobRequestViewModel: ObservableObject {
     public init(
         followupClient: RoomEventClient,
         jobID: String,
-        listTargets: @escaping @Sendable () async throws -> [ScreenshotTarget] = {
-            try await ScreenshotCaptureService.availableTargets()
-        },
-        capture: @escaping @Sendable (ScreenshotTarget) async throws -> ScreenshotCapture = {
-            try await ScreenshotCaptureService.capturePNG(of: $0)
+        pickScreenshot: @escaping @Sendable () async throws -> ScreenshotCapture = {
+            try await SystemScreenshotPicker.pick()
         }
     ) {
         self.submitClient = nil
@@ -451,8 +422,7 @@ public final class JobRequestViewModel: ObservableObject {
         self.followupJobID = jobID
         self.draftStore = nil
         self.onSubmitted = { _, _ in }
-        self.listTargets = listTargets
-        self.capture = capture
+        self.pickScreenshot = pickScreenshot
     }
 
     /// 追記窓か。タイトル欄を隠し、ボタンの文言も変える。
@@ -475,29 +445,19 @@ public final class JobRequestViewModel: ObservableObject {
         (captureErrorMessage ?? "").contains("権限")
     }
 
-    /// 撮影対象の一覧を読み込む。権限が無ければ理由を表示するだけ。
-    public func loadScreenshotTargets() async {
-        guard !isLoadingTargets, screenshotTargets.isEmpty else { return }
-        isLoadingTargets = true
-        defer { isLoadingTargets = false }
-        do {
-            screenshotTargets = try await listTargets()
-            captureErrorMessage = nil
-        } catch {
-            captureErrorMessage =
-                (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-        }
-    }
-
-    /// 選んだ対象を 1 枚撮ってスクショへ足す。失敗は落とさず理由を表示する。
-    public func captureScreenshot(target: ScreenshotTarget) async {
+    /// システムの対象選びを出し、選ばれた画面またはウィンドウを 1 枚撮って足す。
+    ///
+    /// 選ばずに閉じたら何もしない。失敗は落とさず理由を表示する。
+    public func captureScreenshot() async {
         guard !isCapturingScreenshot else { return }
         isCapturingScreenshot = true
         captureErrorMessage = nil
         defer { isCapturingScreenshot = false }
         do {
-            let shot = try await capture(target)
+            let shot = try await pickScreenshot()
             screenshots.append(ScreenshotAttachment(capture: shot))
+        } catch is CancellationError {
+            return
         } catch {
             captureErrorMessage =
                 (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
