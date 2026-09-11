@@ -186,6 +186,7 @@ extension RoomJobStatus {
         case .done: return .green
         case .failed: return .red
         case .cancelled: return .orange
+        case .waitingForInput: return .purple
         }
     }
 }

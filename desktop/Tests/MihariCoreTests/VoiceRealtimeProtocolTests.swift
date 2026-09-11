@@ -61,10 +61,10 @@ struct VoiceRealtimeProtocolTests {
             return
         }
         #expect(messages.count == 3)
-        #expect(messages[0].role == "user")
-        #expect(messages[0].text == "こんにちは")
-        #expect(messages[0].kind == "text")
-        #expect(messages[2].kind == "image_prompt")
+        #expect(messages.first?.role == "user")
+        #expect(messages.first?.text == "こんにちは")
+        #expect(messages.first?.kind == "text")
+        #expect(messages.dropFirst(2).first?.kind == "image_prompt")
     }
 
     @Test("history.sync の tool_call は system メッセージになる")

@@ -52,7 +52,7 @@ struct OverlayModelTests {
     /// 1 秒を 1 ミリ秒にすると、上限 100 秒がわずか 100 ミリ秒になる。テスト側が Esc を
     /// 押すより先に上限タイマーが発火してしまい、全体実行のような負荷のかかる場面で
     /// 落ちる(実際に 3 回に 1 回落ちた)。テストの操作が確実に先に済む幅を空ける。
-    private static let sleepScaleMilliseconds = 10
+    private static let sleepScaleMilliseconds = 30
 
     /// 待ち時間を縮める。「N 秒待つ」という相対関係はそのまま保つので、
     /// どちらのタイマーが先に発火するかの順序は本番と同じになる。
@@ -68,7 +68,7 @@ struct OverlayModelTests {
     /// 起きるまで待てば、遅い側の失敗は構造的に消える。
     private func waitUntil(
         _ what: String,
-        timeout: Duration = .seconds(3),
+        timeout: Duration = .seconds(10),
         _ condition: @MainActor () -> Bool
     ) async {
         let deadline = ContinuousClock.now.advanced(by: timeout)
@@ -82,7 +82,7 @@ struct OverlayModelTests {
     private func makeModel(
         presenter: StubPresenter,
         musicController: MusicControlling = StubMusicController(),
-        maxDurationSeconds: Int = 100,
+        maxDurationSeconds: Int = 300,
         resumeMusicAfterDismiss: Bool = false,
         speak: @escaping OverlayModel.SermonSpeaking = { _ in "テストのセリフ" }
     ) -> OverlayModel {
@@ -131,9 +131,10 @@ struct OverlayModelTests {
     func dismissesEvenIfSpeakThrows() async {
         struct Boom: Error {}
         let presenter = StubPresenter()
+        // 混雑で読了見積もりのタイマーが遅れても先に効くよう、上限は目いっぱい広く取る。
         let model = makeModel(
             presenter: presenter,
-            maxDurationSeconds: 100,
+            maxDurationSeconds: 300,
             speak: { _ in throw Boom() }
         )
 

@@ -40,6 +40,22 @@ struct VoiceJobCollaborationTests {
         return URLSession(configuration: configuration)
     }
 
+    /// URLSession は本文を `httpBodyStream` へ移すことがあるので両方を読む。
+    private func requestBody(_ request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let read = stream.read(&buffer, maxLength: buffer.count)
+            if read <= 0 { break }
+            data.append(buffer, count: read)
+        }
+        return data.isEmpty ? nil : data
+    }
+
     @Test("steer は POST /jobs/{id}/steer に text を送る")
     func steerPostsText() async throws {
         let session = makeSession()
@@ -47,7 +63,7 @@ struct VoiceJobCollaborationTests {
             #expect(request.httpMethod == "POST")
             #expect(request.url?.path == "/jobs/job-9/steer")
             #expect(request.value(forHTTPHeaderField: DaemonClient.tokenHeader) == "tok")
-            let body = try #require(request.httpBody)
+            let body = try #require(requestBody(request))
             let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
             #expect(json["text"] as? String == "左側を優先して")
             #expect(json["instruction"] == nil)
@@ -81,7 +97,7 @@ struct VoiceJobCollaborationTests {
         StubURLProtocol.handler = { request in
             #expect(request.httpMethod == "POST")
             #expect(request.url?.path == "/jobs/job-9/questions/q1/answer")
-            let body = try #require(request.httpBody)
+            let body = try #require(requestBody(request))
             let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
             #expect(json["answer"] as? String == "blue")
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
@@ -117,11 +133,11 @@ struct VoiceJobCollaborationTests {
         """
         let detail = try JSONDecoder().decode(RoomJobDetail.self, from: Data(json.utf8))
         #expect(detail.pendingQuestions.count == 2)
-        #expect(detail.pendingQuestions[0].id == "q1")
-        #expect(detail.pendingQuestions[1].choices == ["red", "blue"])
+        #expect(try #require(detail.pendingQuestions.first).id == "q1")
+        #expect(detail.pendingQuestions.dropFirst().first?.choices == ["red", "blue"])
         let pending = VoiceJobQuestionParser.pendingQuestions(from: detail)
         #expect(pending.count == 2)
-        #expect(pending[0].prompt == "続けますか？")
+        #expect(try #require(pending.first).prompt == "続けますか？")
     }
 
     @Test("ツール名と引数を会話アクションへ写す")
@@ -146,7 +162,7 @@ struct VoiceJobCollaborationTests {
     }
 
     @Test("pending_questions の先頭 pending を拾う")
-    func parsesFirstPendingQuestion() {
+    func parsesFirstPendingQuestion() throws {
         let detail = RoomJobDetail(
             jobID: "j1",
             title: "調査",
@@ -158,8 +174,9 @@ struct VoiceJobCollaborationTests {
         )
         let pending = VoiceJobQuestionParser.pendingQuestions(from: detail)
         #expect(pending.count == 1)
-        #expect(pending[0].questionID == "q1")
-        #expect(pending[0].prompt == "続けますか？")
+        let first = try #require(pending.first)
+        #expect(first.questionID == "q1")
+        #expect(first.prompt == "続けますか？")
     }
 
     @Test("submit_job / get_job_status の別名と引数キーを読む")

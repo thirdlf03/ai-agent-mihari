@@ -19,7 +19,8 @@ public struct CGEventMouseLocationProvider: MouseLocationProviding {
 
 /// ディスプレイ一覧の取得口。テストでは固定 bounds に差し替える。
 public protocol DisplayBoundsListing: Sendable {
-    func displayBounds() -> [MouseDisplayBounds]
+    /// 実装が `NSScreen.screens` を読むため、メインスレッド寄せにする。
+    @MainActor func displayBounds() -> [MouseDisplayBounds]
 }
 
 /// 1 枚のディスプレイの bounds（CoreGraphics グローバル座標）。
@@ -145,7 +146,7 @@ public struct LiveVoiceScreenCapture: VoiceScreenCapturing {
         }
 
         let point = mouse.globalMouseLocation()
-        let boundsList = displays.displayBounds()
+        let boundsList = await displays.displayBounds()
         let selected = MouseDisplaySelector.display(at: point, displays: boundsList)
         let displayID = selected?.displayID ?? CGMainDisplayID()
         let title = selected?.title ?? "ディスプレイ"

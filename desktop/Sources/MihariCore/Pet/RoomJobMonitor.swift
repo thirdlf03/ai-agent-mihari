@@ -63,6 +63,7 @@ public struct RoomJobTrackedJob: Equatable, Sendable, Identifiable {
         artifacts: [RoomArtifact] = [],
         tempDeploys: [RoomTempDeploy] = [],
         lastError: String? = nil,
+        operationError: String? = nil,
         memories: [RoomMemoryCandidate] = [],
         memoryError: String? = nil,
         directive: RoomPhaseDirective? = nil,
@@ -76,6 +77,7 @@ public struct RoomJobTrackedJob: Equatable, Sendable, Identifiable {
         self.artifacts = artifacts
         self.tempDeploys = tempDeploys
         self.lastError = lastError
+        self.operationError = operationError
         self.memories = memories
         self.memoryError = memoryError
         self.directive = directive
@@ -801,7 +803,7 @@ public final class RoomJobMonitor: ObservableObject {
     nonisolated static func advanceStatus(from current: RoomJobStatus, after event: RoomEvent) -> RoomJobStatus {
         let next = status(after: event)
         switch current {
-        case .queued, .running:
+        case .queued, .running, .waitingForInput:
             return next
         case .done, .failed, .cancelled:
             if event.kind == .cancelled {

@@ -95,6 +95,11 @@ public final class DetectionEngine: ObservableObject {
     /// チェックの世代。畳んだら 1 つ進めて、遅れて届いた結果を捨てる。
     private var checkGeneration = 0
 
+    /// 直近の `evaluate(now:)` に渡された時刻。チェックの決着は非同期に来るため、
+    /// `Date()` を直接刻むと「評価の時計」とずれて段の待ちが狂う。
+    /// テストが仮想時刻を流す場合も同じ時計で決着を記録する。
+    private var evaluationNow: Date?
+
     /// いま出している疑い 2 の問いかけ。出していなければ `nil`。
     private var promptSession: SuspectPromptSession?
 
@@ -263,6 +268,7 @@ public final class DetectionEngine: ObservableObject {
     /// 休憩中はここで打ち切る。**材料を集める前に返す。**
     @discardableResult
     public func evaluate(now: Date = Date()) async -> DetectionDecision {
+        evaluationNow = now
         if let resting = restingDecision(now: now) {
             if state != .normal { finishEpisode() }
             // 休んでいる時間は集中の続きではない。
@@ -421,7 +427,8 @@ public final class DetectionEngine: ObservableObject {
         // 決着したので、ここから先は通常どおり Mac の入力で畳んでよい。
         debugCheckInProgress = false
 
-        let now = Date()
+        // 決着は評価の時計に合わせる。非同期に来るので `Date()` だとずれる。
+        let now = evaluationNow ?? Date()
         guard outcome != .stamped else {
             // 指を置いた本人を疑い続けない。**猶予は付けない**(メニューの在席スタンプだけが猶予を持つ)。
             let decision = DetectionDecision(state: .normal, reason: "疑い 1 回目・Touch ID で在席を確かめた")
@@ -490,7 +497,8 @@ public final class DetectionEngine: ObservableObject {
         // 決着したので、ここから先は通常どおり Mac の入力で畳んでよい。
         debugCheckInProgress = false
 
-        let now = Date()
+        // 決着は評価の時計に合わせる。非同期に来るので `Date()` だとずれる。
+        let now = evaluationNow ?? Date()
         guard answer != true else {
             let spoken = bundledSpeech(for: .gestureYes)
             let decision = DetectionDecision(state: .normal, reason: "疑い 2 回目・うなずいた")

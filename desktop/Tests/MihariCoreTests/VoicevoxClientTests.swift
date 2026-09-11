@@ -55,7 +55,20 @@ struct VoicevoxClientTests {
     }
 
     private func requestBody(_ request: URLRequest) -> Data? {
-        request.httpBody
+        if let body = request.httpBody { return body }
+        // URLSession は本文を `httpBodyStream` へ移し替えることがあるので、そちらも読む。
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 4096)
+        defer { buffer.deallocate() }
+        while stream.hasBytesAvailable {
+            let count = stream.read(buffer, maxLength: 4096)
+            guard count > 0 else { break }
+            data.append(buffer, count: count)
+        }
+        return data.isEmpty ? nil : data
     }
 
     @Test("audio_query と synthesis を話者 14 で順に叩き、WAV を返す")
