@@ -420,7 +420,8 @@ def build_turn_prompt(job: Job) -> str:
         return (
             f"続きの依頼:\n{notes}\n\n"
             "作業内容は上の続きです。"
-            f"`{INPUT_DIRNAME}/followup-*.txt` や `{INPUT_DIRNAME}/steer/*.txt` にも同じ追記があります。"
+            f"`{INPUT_DIRNAME}/followup-*.txt` や `{INPUT_DIRNAME}/steer/*.txt`"
+            " にも同じ追記があります。"
             f"`{INPUT_DIRNAME}/` に他の添付が無くても正常です。無いファイルを探さないでください。"
             f"結果は `{OUTPUT_DIRNAME}/` に書き出してください。"
             "プレビュー CSP は `script-src 'self'`。"
