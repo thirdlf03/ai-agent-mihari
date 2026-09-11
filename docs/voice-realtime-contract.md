@@ -105,8 +105,11 @@ JSON テキストフレーム。方向ごとの最小イベント:
 | client → room | `input.image` | base64 画像 + `media_type` |
 | room → client | `assistant.text` | テキスト応答（`delta` / `text` + `done`） |
 | room → client | `assistant.tool_call` | ツール呼び出し（`name`, `call_id`, `arguments`） |
+| room → client | `user.text` | 入力音声の文字起こし（`text`） |
 | room → client | `error` | エラー |
 | room → client | `session.closed` | ストリーム終了 |
+
+未知の `type` はクライアント側で無視してよい（後方互換の追加イベント）。
 
 ### `input.audio`
 
@@ -134,6 +137,12 @@ JSON テキストフレーム。方向ごとの最小イベント:
 ## 音声 OUT 課金なし方針
 
 room は upstream 接続直後に `session.update` で `output_modalities: ["text"]` を設定し、各 `response.create` でも同設定を送る。モデル音声（`response.output_audio.*`）は relay しない。
+
+`session.update` の `session` は GA 形（`type: "realtime"`）で、音声入力は `session.audio.input` 配下に設定する:
+
+- `format: {"type": "audio/pcm", "rate": 24000}` — クライアント送信は PCM16 24 kHz モノラル
+- `turn_detection: null` — server VAD を切り、クライアントの `commit` でターン確定
+- `transcription: {"model": "gpt-4o-mini-transcribe"}` — 入力音声の文字起こしを有効化。`conversation.item.input_audio_transcription.completed` を room が `user.text` として中継する
 
 検証:
 
