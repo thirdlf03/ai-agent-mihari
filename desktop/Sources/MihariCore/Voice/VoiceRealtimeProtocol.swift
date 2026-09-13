@@ -34,6 +34,17 @@ struct VoiceSessionCreateResponse: Decodable, Equatable, Sendable {
     }
 }
 
+/// `POST /voice/sessions/{id}/close` の応答。
+struct VoiceSessionCloseResponse: Decodable, Equatable, Sendable {
+    let sessionID: String
+    let status: String
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+        case status
+    }
+}
+
 /// `GET /voice/sessions/{id}` の応答。
 struct VoiceSessionStatusResponse: Decodable, Equatable, Sendable {
     let sessionID: String

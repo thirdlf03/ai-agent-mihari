@@ -79,6 +79,8 @@ struct VoiceCallView: View {
                 questionBar
             }
             Divider()
+            talkButton
+            Divider()
             controlBar
         }
         .frame(minWidth: 360, minHeight: 400)
@@ -93,12 +95,12 @@ struct VoiceCallView: View {
                 .font(.subheadline)
                 .lineLimit(2)
             Spacer()
-            if controller.isMicLive {
-                Label("マイク", systemImage: "mic.fill")
+            if controller.isTalking {
+                Label("送信中", systemImage: "mic.fill")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else if controller.isActive {
-                Label("マイク停止中", systemImage: "mic.slash")
+                Label("「話す」押下中のみ送信", systemImage: "mic")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -178,6 +180,41 @@ struct VoiceCallView: View {
             get: { answerDrafts[questionID] ?? "" },
             set: { answerDrafts[questionID] = $0 }
         )
+    }
+
+    /// 押しているあいだだけマイク音声を送るプッシュ・トゥ・トークボタン。
+    private var talkButton: some View {
+        Label(
+            controller.isTalking ? "送信中…" : "話す",
+            systemImage: controller.isTalking ? "mic.fill" : "mic"
+        )
+        .font(.headline)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10)
+        .background(controller.isTalking ? Color.accentColor : Color.accentColor.opacity(0.15))
+        .foregroundStyle(controller.isTalking ? .white : Color.accentColor)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .contentShape(Rectangle())
+        .onLongPressGesture(
+            minimumDuration: .infinity,
+            maximumDistance: .infinity,
+            pressing: { pressing in
+                if pressing {
+                    controller.beginPushToTalk()
+                } else {
+                    controller.endPushToTalk()
+                }
+            },
+            perform: {}
+        )
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .opacity(canTalk ? 1 : 0.4)
+        .allowsHitTesting(canTalk)
+    }
+
+    private var canTalk: Bool {
+        controller.isActive && controller.connectionState == .ready
     }
 
     private var controlBar: some View {

@@ -165,6 +165,7 @@ struct VoiceConversationControllerTests {
         configuration.protocolClasses = [VoiceSessionClientTestsURLProtocol.self]
         VoiceSessionClientTestsURLProtocol.mode = .fixed
         VoiceSessionClientTestsURLProtocol.responses = []
+        VoiceSessionClientTestsURLProtocol.resetRequests()
         VoiceSessionClientTestsURLProtocol.createResponse = VoiceSessionCreateResponse(
             sessionID: "sess-test",
             model: "gpt-realtime-2.1-mini",
@@ -306,18 +307,18 @@ struct VoiceConversationControllerTests {
         controller.stop()
     }
 
-    @Test("再生中の割り込みで chatter 再生を止める")
+    @Test("再生中に「話す」を押すと割り込みで chatter 再生を止める")
     func bargeInStopsPlayback() async throws {
         let player = SpeechPlayer()
         let wav = try makeSilentWAV()
         #expect(player.play(audio: wav, priority: .chatter))
 
         let socket = ScriptedSocket()
-        let (controller, mic, _, factory) = makeController(socket: socket, player: player)
+        let (controller, _, _, factory) = makeController(socket: socket, player: player)
         controller.start()
         await waitUntil { factory.makeCount >= 1 }
 
-        mic.emit(data: Data(repeating: 0, count: 480), level: 0.5)
+        controller.beginPushToTalk()
 
         await waitUntil { player.isSpeaking == false }
         #expect(player.isSpeaking == false)
@@ -325,7 +326,7 @@ struct VoiceConversationControllerTests {
         controller.stop()
     }
 
-    @Test("発話確定時はバッファ全体を再送せず commit だけ送る")
+    @Test("「話す」解放時はバッファ全体を再送せず commit だけ送る")
     func commitTurnDoesNotResendBufferedAudio() async throws {
         let socket = ScriptedSocket()
         let (controller, mic, _, factory) = makeController(socket: socket)
@@ -336,11 +337,18 @@ struct VoiceConversationControllerTests {
 
         let chunkA = Data(repeating: 0xAA, count: 480)
         let chunkB = Data(repeating: 0xBB, count: 480)
+        controller.beginPushToTalk()
         mic.emit(data: chunkA, level: 0.5)
         mic.emit(data: chunkB, level: 0.5)
-        mic.emit(data: Data(), level: 0.0)
 
-        // 無音の見張りが発話を確定し、commit フレームが出るまで待つ。
+        // チャンク処理は MainActor 経由の非同期なので、2 つ送れたのを見てから離す。
+        await waitUntil {
+            self.parseSentAudioFrames(socket.sent)
+                .filter { ($0["commit"] as? Bool) == false }.count >= 2
+        }
+        controller.endPushToTalk()
+
+        // 解放で発話が確定し、commit フレームが出るまで待つ。
         await waitUntil {
             self.parseSentAudioFrames(socket.sent).contains { ($0["commit"] as? Bool) == true }
         }
@@ -521,8 +529,8 @@ struct VoiceConversationControllerTests {
         controller.stop()
     }
 
-    @Test("発話中はしきい値未満のチャンクも切り捨てずに送る")
-    func sendsQuietChunksWhileUserIsSpeaking() async throws {
+    @Test("「話す」押下中は音量に関係なくすべてのチャンクを送る")
+    func sendsAllChunksWhileTalking() async throws {
         let socket = ScriptedSocket()
         let (controller, mic, _, factory) = makeController(socket: socket)
         controller.start()
@@ -532,8 +540,9 @@ struct VoiceConversationControllerTests {
 
         let loud = Data(repeating: 0x11, count: 480)
         let quiet = Data(repeating: 0x22, count: 480)
+        controller.beginPushToTalk()
         mic.emit(data: loud, level: 0.5)
-        // 語尾の小さい音。発話中なのでしきい値未満でも送る。
+        // 語尾の小さい音。押下中なのでレベルに関係なく送る。
         mic.emit(data: quiet, level: 0.005)
 
         await waitUntil {
@@ -550,6 +559,44 @@ struct VoiceConversationControllerTests {
         controller.stop()
     }
 
+    @Test("「話す」を押していない間は音声チャンクを送らない")
+    func dropsMicChunksUnlessTalking() async throws {
+        let socket = ScriptedSocket()
+        let (controller, mic, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+
+        mic.emit(data: Data(repeating: 0x44, count: 480), level: 0.5)
+
+        // 送信は非同期なので、流れていれば届く程度の時間だけ待ってから確認する。
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(parseSentAudioFrames(socket.sent).isEmpty)
+        #expect(controller.isMicLive == false)
+
+        controller.stop()
+    }
+
+    @Test("押してすぐ離し音声が無ければ確定もプレースホルダも送らない")
+    func releaseWithoutAudioDoesNotCommit() async throws {
+        let socket = ScriptedSocket()
+        let (controller, _, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+
+        controller.beginPushToTalk()
+        controller.endPushToTalk()
+
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(parseSentAudioFrames(socket.sent).isEmpty)
+        #expect(!controller.messages.contains(where: { $0.text == "（音声を送信）" }))
+
+        controller.stop()
+    }
+
     @Test("user.text の文字起こしでプレースホルダが本当の文に置き換わる")
     func userTextReplacesPlaceholder() async throws {
         let socket = ScriptedSocket()
@@ -559,9 +606,16 @@ struct VoiceConversationControllerTests {
 
         socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
 
+        controller.beginPushToTalk()
         mic.emit(data: Data(repeating: 0x33, count: 480), level: 0.5)
 
-        // 無音が続いて発話が確定し、プレースホルダが置かれるまで待つ。
+        // チャンク処理は MainActor 経由の非同期なので、送れたのを見てから離す。
+        await waitUntil {
+            !self.parseSentAudioFrames(socket.sent).isEmpty
+        }
+        controller.endPushToTalk()
+
+        // 解放で発話が確定し、プレースホルダが置かれるまで待つ。
         await waitUntil {
             controller.messages.last?.role == .user
                 && controller.messages.last?.text == "（音声を送信）"
@@ -578,6 +632,72 @@ struct VoiceConversationControllerTests {
         let userMessages = controller.messages.filter { $0.role == .user }
         #expect(userMessages.count == 1)
         #expect(userMessages.last?.text == "今日の予定を教えて")
+
+        controller.stop()
+    }
+
+    @Test("会話終了で room へセッション close を送る")
+    func stopClosesServerSession() async throws {
+        let socket = ScriptedSocket()
+        let (controller, _, _, factory) = makeController(socket: socket)
+        // 前テストの非同期 close と区別するため固有のセッション ID を使う。
+        VoiceSessionClientTestsURLProtocol.mode = .sequential
+        VoiceSessionClientTestsURLProtocol.responses = [.create(sessionID: "sess-stop")]
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-stop","model":"mini"}"#)
+        await waitUntil { controller.connectionState == .ready }
+
+        controller.stop()
+
+        await waitUntil {
+            VoiceSessionClientTestsURLProtocol.requests.contains {
+                $0.method == "POST" && $0.path == "/voice/sessions/sess-stop/close"
+            }
+        }
+
+        #expect(
+            VoiceSessionClientTestsURLProtocol.requests.contains {
+                $0.method == "POST" && $0.path == "/voice/sessions/sess-stop/close"
+            }
+        )
+    }
+
+    @Test("再接続では旧セッションを close してから新規作成する")
+    func reconnectClosesSessionBeforeCreatingNew() async throws {
+        let firstSocket = ScriptedSocket()
+        let secondSocket = ScriptedSocket()
+        let factory = ScriptedSocketFactory()
+        factory.queue(firstSocket)
+        factory.queue(secondSocket)
+
+        let (controller, _, first, _) = makeController(socket: firstSocket, factory: factory)
+        // 前テストの非同期 close と区別するため固有のセッション ID を使う。
+        VoiceSessionClientTestsURLProtocol.mode = .sequential
+        VoiceSessionClientTestsURLProtocol.responses = [
+            .create(sessionID: "sess-r1"),
+            .create(sessionID: "sess-r2"),
+        ]
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+        first.feed(#"{"type":"session.ready","session_id":"sess-r1","model":"mini"}"#)
+        await waitUntil { controller.connectionState == .ready }
+
+        controller.reconnect()
+        await waitUntil { factory.makeCount >= 2 }
+
+        let requests = VoiceSessionClientTestsURLProtocol.requests
+        let creates = requests.enumerated().compactMap { index, request in
+            request.method == "POST" && request.path == "/voice/sessions" ? index : nil
+        }
+        let closeIndex = requests.firstIndex {
+            $0.method == "POST" && $0.path == "/voice/sessions/sess-r1/close"
+        }
+        #expect(creates.count >= 2)
+        let closeAt = try #require(closeIndex)
+        #expect(closeAt > creates[0])
+        #expect(closeAt < creates[1])
 
         controller.stop()
     }
@@ -622,6 +742,17 @@ final class VoiceSessionClientTestsURLProtocol: URLProtocol, @unchecked Sendable
 
     nonisolated(unsafe) static var mode: Mode = .fixed
     nonisolated(unsafe) static var responses: [ResponseKind] = []
+    /// 受けた HTTP リクエストの履歴（method, path）。close 順序の検証用。
+    nonisolated(unsafe) private static var _requests: [(method: String, path: String)] = []
+    private static let requestsLock = NSLock()
+
+    static var requests: [(method: String, path: String)] {
+        requestsLock.withLock { _requests }
+    }
+
+    static func resetRequests() {
+        requestsLock.withLock { _requests = [] }
+    }
     nonisolated(unsafe) static var createResponse = VoiceSessionCreateResponse(
         sessionID: "sess-test",
         model: "gpt-realtime-2.1-mini",
@@ -640,6 +771,9 @@ final class VoiceSessionClientTestsURLProtocol: URLProtocol, @unchecked Sendable
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        Self.requestsLock.withLock {
+            Self._requests.append((request.httpMethod ?? "", request.url?.path ?? ""))
+        }
         let response = HTTPURLResponse(
             url: request.url!,
             statusCode: 200,
@@ -647,7 +781,11 @@ final class VoiceSessionClientTestsURLProtocol: URLProtocol, @unchecked Sendable
             headerFields: nil
         )!
         let data: Data
-        if Self.mode == .sequential, !Self.responses.isEmpty {
+        // close は sequential の列を消費しない。前テストの非同期 close が
+        // 後続テストへ流れ込んでもレスポンス並びをずらさないため。
+        if request.url?.path.hasSuffix("/close") == true {
+            data = Data(#"{"session_id":"x","status":"closed"}"#.utf8)
+        } else if Self.mode == .sequential, !Self.responses.isEmpty {
             let kind = Self.responses.removeFirst()
             data = Self.body(for: kind)
         } else {

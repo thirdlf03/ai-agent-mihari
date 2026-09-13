@@ -123,8 +123,13 @@ class VoiceSessionManager:
         return None
 
     def create_session(self) -> VoiceSession:
-        if self.find_open_session() is not None:
-            raise ConcurrentVoiceSessionError("voice session already active")
+        existing = self.find_open_session()
+        if existing is not None:
+            if self._stream_session_id == existing.id:
+                raise ConcurrentVoiceSessionError("voice session already active")
+            # クライアントの明示 close 漏れやプロセス終了で残った放置セッション。
+            # ストリームが張られていない = 実際には通話中でないので、閉じて作り直す。
+            self.close_session(existing.id)
         session_id = secrets.token_urlsafe(16)
         session = VoiceSession(id=session_id, model=self._config.voice_realtime_model)
         self._sessions[session_id] = session

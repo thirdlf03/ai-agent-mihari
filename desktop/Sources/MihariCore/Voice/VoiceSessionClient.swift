@@ -25,6 +25,11 @@ struct VoiceSessionClient: Sendable {
         try await send(method: "GET", path: "voice/sessions/\(sessionID)", body: nil)
     }
 
+    /// セッションを明示終了する。閉じないと以降の新規作成が 409 になる。
+    func closeSession(sessionID: String) async throws -> VoiceSessionCloseResponse {
+        try await send(method: "POST", path: "voice/sessions/\(sessionID)/close", body: nil)
+    }
+
     private func send<Response: Decodable>(
         method: String,
         path: String,
@@ -98,13 +103,27 @@ struct VoiceStreamConnector: Sendable {
     /// 新規セッションを作って WebSocket を開く。
     func connectNew() async throws -> VoiceStreamConnection {
         let created = try await client.createSession()
-        let socket = try await openStream(sessionID: created.sessionID, streamPath: created.streamPath)
-        return VoiceStreamConnection(
-            sessionID: created.sessionID,
-            model: created.model,
-            streamPath: created.streamPath,
-            socket: socket
-        )
+        do {
+            let socket = try await openStream(
+                sessionID: created.sessionID,
+                streamPath: created.streamPath
+            )
+            return VoiceStreamConnection(
+                sessionID: created.sessionID,
+                model: created.model,
+                streamPath: created.streamPath,
+                socket: socket
+            )
+        } catch {
+            // WS が張れなければ未使用セッションが残り、以降の作成が 409 になる。
+            try? await client.closeSession(sessionID: created.sessionID)
+            throw error
+        }
+    }
+
+    /// セッションを明示終了する（closed 済みでも 200。冪等）。
+    func closeSession(sessionID: String) async throws {
+        _ = try await client.closeSession(sessionID: sessionID)
     }
 
     /// セッションが `created` / `streaming` なら張り直す。`closed` 等なら `nil`。

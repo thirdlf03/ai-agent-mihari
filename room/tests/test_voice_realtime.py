@@ -440,11 +440,50 @@ def test_disconnect_and_reconnect_continues_session(tmp_path: Path) -> None:
 
 
 def test_concurrent_session_guard(tmp_path: Path) -> None:
-    client = _make_app(tmp_path)
+    """ストリーム中のセッションがあるあいだは新規作成を 409 で拒否する。"""
+    fake = FakeRealtimeUpstream()
+    client = _make_app(tmp_path, upstream_factory=lambda: fake)
     first = client.post("/voice/sessions", headers=_auth())
     assert first.status_code == 200
+    session_id = first.json()["session_id"]
+
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        ws.receive_json()
+        second = client.post("/voice/sessions", headers=_auth())
+        assert second.status_code == 409
+        _disconnect_and_idle(ws, client, session_id)
+
+
+def test_create_supersedes_idle_session(tmp_path: Path) -> None:
+    """ストリームの無い放置セッションは新規作成時に自動で閉じる。"""
+    client = _make_app(tmp_path)
+    first = client.post("/voice/sessions", headers=_auth()).json()
     second = client.post("/voice/sessions", headers=_auth())
-    assert second.status_code == 409
+    assert second.status_code == 200
+    assert second.json()["session_id"] != first["session_id"]
+    detail = client.get(f"/voice/sessions/{first['session_id']}", headers=_auth()).json()
+    assert detail["status"] == "closed"
+
+
+def test_create_supersedes_disconnected_session(tmp_path: Path) -> None:
+    """WS が切れて idle に戻ったセッションも新規作成で閉じられる。"""
+    fake = FakeRealtimeUpstream()
+    client = _make_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        ws.receive_json()
+        _disconnect_and_idle(ws, client, session_id)
+
+    second = client.post("/voice/sessions", headers=_auth())
+    assert second.status_code == 200
+    assert second.json()["session_id"] != session_id
+    detail = client.get(f"/voice/sessions/{session_id}", headers=_auth()).json()
+    assert detail["status"] == "closed"
 
 
 def test_close_session_allows_new_call(tmp_path: Path) -> None:

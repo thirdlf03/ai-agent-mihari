@@ -21,7 +21,9 @@ public final class VoiceConversationController: ObservableObject {
     @Published public private(set) var statusText = "未接続"
     /// 会話が有効か。
     @Published public private(set) var isActive = false
-    /// マイクが有効か（エコー対策で一時停止中は false）。
+    /// 「話す」を押下中か（押しているあいだだけ音声を送る）。
+    @Published public private(set) var isTalking = false
+    /// 今まさに音声をソケットへ流しているか。
     @Published public private(set) var isMicLive = false
     /// `pending_questions` の未回答分。会話 UI で回答する。
     @Published public private(set) var pendingQuestions: [VoicePendingQuestion] = []
@@ -68,10 +70,6 @@ public final class VoiceConversationController: ObservableObject {
         category: "VoiceConversation"
     )
 
-    /// 発話判定の RMS しきい値。
-    private static let speechThreshold: Float = 0.015
-    /// 発話終了とみなす無音時間(秒)。
-    private static let silenceDuration: TimeInterval = 0.75
     /// 再接続の最大待ち(秒)。
     private static let maxBackoff: TimeInterval = 30
     /// 待機中の質問を取り直す間隔(秒)。
@@ -91,10 +89,10 @@ public final class VoiceConversationController: ObservableObject {
     /// input.audio などの送信を直列化するチェーン。チャンクごとに Task を並べると
     /// 到着順が不定になるため、前の送信の完了を待ってから次を送る。
     private var sendTail: Task<Void, Never>?
-    /// 発話終了の見張り。最後に声を検した時点から無音が続いたらターンを確定する。
-    private var silenceWatchdog: Task<Void, Never>?
     /// 会話中の質問の取り直しループ。
     private var questionPollTask: Task<Void, Never>?
+    /// 終了したセッションの `POST /close`。次の新規作成より先に終わらせるため保持する。
+    private var pendingSessionClose: Task<Void, Never>?
 
     /// 再生中はマイク送信を止める（エコー対策）。
     private var echoGuardActive = false
@@ -104,10 +102,8 @@ public final class VoiceConversationController: ObservableObject {
     private var pendingAssistantText = ""
     private var currentAssistantMessageID: UUID?
 
-    /// VAD 状態。発話中に commit:false で送ったか（確定時に全体を再送しない）。
+    /// 押下中に commit:false で送ったか（確定時に全体を再送しない）。
     private var hasStreamedAudioInTurn = false
-    private var isUserSpeaking = false
-    private var lastSpeechTime: Date?
 
     public init(deps: Dependencies) {
         self.deps = deps
@@ -146,12 +142,14 @@ public final class VoiceConversationController: ObservableObject {
         guard isActive else { return }
         shouldReconnect = false
         isActive = false
+        isTalking = false
         stopMic()
         runTask?.cancel()
         runTask = nil
         questionPollTask?.cancel()
         questionPollTask = nil
         closeSocket()
+        endServerSession()
         playbackGeneration += 1
         deps.speechPlayer.stop(priority: .chatter)
         echoGuardActive = false
@@ -165,8 +163,37 @@ public final class VoiceConversationController: ObservableObject {
     public func reconnect() {
         guard isActive else { return }
         manualReconnectRequested = true
-        clearSession()
+        endServerSession()
         closeSocket()
+    }
+
+    /// 「話す」押下: 押しているあいだだけ音声を送る（プッシュ・トゥ・トーク）。
+    /// 再生中に押した場合は割り込みとして再生を止める。
+    public func beginPushToTalk() {
+        guard isActive, !isTalking else { return }
+        isTalking = true
+        if echoGuardActive || deps.speechPlayer.isSpeaking {
+            bargeIn()
+        }
+        if mic == nil {
+            // 権限待ちなどでキャプチャが立っていなければ開始を試みる。
+            startMic()
+        }
+        updateMicLive()
+        if isMicLive, connectionState == .ready {
+            statusText = "送信中…"
+        }
+    }
+
+    /// 「話す」解放: 発話を確定して応答を要求する。
+    public func endPushToTalk() {
+        guard isTalking else { return }
+        isTalking = false
+        commitUserTurn()
+        updateMicLive()
+        if connectionState == .ready {
+            statusText = "話しかけてください"
+        }
     }
 
     /// 「画面見て」: マウスがあるディスプレイ 1 枚を撮って `input.image` で送る（確認なし）。
@@ -541,7 +568,7 @@ public final class VoiceConversationController: ObservableObject {
         do {
             try capture.start()
             mic = capture
-            isMicLive = true
+            updateMicLive()
         } catch {
             connectionState = .error(error.localizedDescription)
             statusText = "マイクを開始できない: \(error.localizedDescription)"
@@ -554,73 +581,24 @@ public final class VoiceConversationController: ObservableObject {
         mic = nil
         isMicLive = false
         hasStreamedAudioInTurn = false
-        isUserSpeaking = false
-        lastSpeechTime = nil
-        silenceWatchdog?.cancel()
-        silenceWatchdog = nil
     }
 
-    private func handleMicChunk(data: Data, level: Float) {
-        guard isActive else { return }
-
-        let speakingNow = level >= Self.speechThreshold
-
-        // 割り込み: 再生中にユーザーが話したら止める。
-        if speakingNow, echoGuardActive || deps.speechPlayer.isSpeaking {
-            bargeIn()
-        }
-
-        guard !echoGuardActive else {
-            isMicLive = false
-            return
-        }
-        isMicLive = mic?.isRunning ?? false
-
-        if speakingNow {
-            isUserSpeaking = true
-            lastSpeechTime = Date()
-            scheduleSilenceWatchdog()
-        }
-
-        if isUserSpeaking {
-            if !speakingNow,
-                let lastSpeechTime,
-                Date().timeIntervalSince(lastSpeechTime) >= Self.silenceDuration
-            {
-                // 無音が続いたので発話終了とみなし、このチャンクは送らず確定する。
-                commitUserTurn()
-            } else {
-                // 発話中は語尾の小さい音も欠けないよう、レベルに関係なくすべての
-                // チャンクを送る。空のチャンクは sendAudioChunk 側で捨てられる。
-                hasStreamedAudioInTurn = true
-                sendAudioChunk(data, commit: false, createResponse: false)
-            }
-        }
+    /// isMicLive は「今音声をソケットへ流しているか」。押下中でエコー対策中でもなく、
+    /// キャプチャが動いているときだけ true になる。
+    private func updateMicLive() {
+        isMicLive = isTalking && !echoGuardActive && (mic?.isRunning ?? false)
     }
 
-    /// 最後に声を検した時点から無音が続いたかを見る。チャンクが途絶えても
-    /// ターンが確定するように、発話のたびに仕掛け直す。
-    private func scheduleSilenceWatchdog() {
-        silenceWatchdog?.cancel()
-        silenceWatchdog = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(Self.silenceDuration))
-            guard let self, !Task.isCancelled else { return }
-            guard self.isUserSpeaking,
-                let lastSpeechTime = self.lastSpeechTime,
-                Date().timeIntervalSince(lastSpeechTime) >= Self.silenceDuration
-            else { return }
-            self.commitUserTurn()
-        }
+    private func handleMicChunk(data: Data, level _: Float) {
+        // 「話す」を押していない間のチャンクと、再生中のエコーは捨てる。
+        guard isActive, isTalking, !echoGuardActive else { return }
+        updateMicLive()
+        hasStreamedAudioInTurn = true
+        sendAudioChunk(data, commit: false, createResponse: false)
     }
 
     private func commitUserTurn() {
-        guard isUserSpeaking else { return }
-        isUserSpeaking = false
-        lastSpeechTime = nil
-        silenceWatchdog?.cancel()
-        silenceWatchdog = nil
-
-        // 発話中に送ったチャンクを再送しない。commit + create_response だけ送る。
+        // 押下中に送ったチャンクを再送しない。commit + create_response だけ送る。
         if hasStreamedAudioInTurn {
             sendAudioChunk(Self.commitOnlyPCM, commit: true, createResponse: true)
             appendUserPlaceholder()
@@ -656,7 +634,7 @@ public final class VoiceConversationController: ObservableObject {
         currentAssistantMessageID = nil
         deps.speechPlayer.stop(priority: .chatter)
         echoGuardActive = false
-        isMicLive = mic?.isRunning ?? false
+        updateMicLive()
     }
 
     // MARK: - 合成・再生
@@ -680,7 +658,7 @@ public final class VoiceConversationController: ObservableObject {
         playbackGeneration += 1
         let generation = playbackGeneration
         echoGuardActive = true
-        isMicLive = false
+        updateMicLive()
 
         Task {
             do {
@@ -691,14 +669,14 @@ public final class VoiceConversationController: ObservableObject {
                         self.statusText = "再生中…"
                     } else {
                         self.echoGuardActive = false
-                        self.isMicLive = self.mic?.isRunning ?? false
+                        self.updateMicLive()
                     }
                 }
             } catch {
                 await MainActor.run {
                     guard generation == self.playbackGeneration else { return }
                     self.echoGuardActive = false
-                    self.isMicLive = self.mic?.isRunning ?? false
+                    self.updateMicLive()
                     self.appendSystem("VOICEVOX 合成に失敗: \(error.localizedDescription)")
                 }
             }
@@ -707,7 +685,7 @@ public final class VoiceConversationController: ObservableObject {
 
     private func handlePlaybackFinished() {
         echoGuardActive = false
-        isMicLive = mic?.isRunning ?? false
+        updateMicLive()
         if connectionState == .ready {
             statusText = "話しかけてください"
         }
@@ -785,13 +763,34 @@ public final class VoiceConversationController: ObservableObject {
         let socket = currentSocket
         currentSocket = nil
         sendTail = nil
+        // 押下中に切断すると解放操作を受け取れないことがあるため、ここで戻す。
+        isTalking = false
+        hasStreamedAudioInTurn = false
+        updateMicLive()
         if let socket {
             Task { await socket.close() }
         }
     }
 
+    /// room 側のセッションを明示終了する。未 close のまま残すと
+    /// 以降の `POST /voice/sessions` が 409 で拒否され続ける。
+    private func endServerSession() {
+        let closingSessionID = sessionID
+        clearSession()
+        guard let closingSessionID else { return }
+        let connector = deps.connector
+        pendingSessionClose = Task {
+            try? await connector.closeSession(sessionID: closingSessionID)
+        }
+    }
+
     /// 再接続可能なら同一セッションへ。`closed` や失敗時は新規セッション。
     private func openConnection() async throws -> VoiceStreamConnection {
+        // 明示 close の POST と新規作成の順序を保つ（先に作ると 409）。
+        if let pendingSessionClose {
+            _ = await pendingSessionClose.value
+            self.pendingSessionClose = nil
+        }
         if manualReconnectRequested {
             manualReconnectRequested = false
             return try await connectNew()

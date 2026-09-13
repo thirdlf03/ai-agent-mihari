@@ -45,7 +45,8 @@ Mac 操作の `/ws/mac-control` とは別経路。voice は `/voice/*` のみ。
 
 OpenAI キー未設定時は **503**。
 
-同時に 1 会話だけ許可。未終了セッションがある状態で新規作成すると **409**。
+同時に 1 会話だけ許可。**ストリーム中**のセッションがある状態で新規作成すると **409**。
+ストリームが張られていない未終了セッション（クライアントの明示 close 漏れ・プロセス終了で残ったもの）は、新規作成時に room が自動で `closed` にして作り直す。
 
 ### `GET /voice/sessions/{id}/history`
 
@@ -75,7 +76,7 @@ OpenAI キー未設定時は **503**。
 
 ### `POST /voice/sessions/{id}/close`
 
-会話セッションを明示終了する。終了後のみ新規 `POST /voice/sessions` が可能。
+会話セッションを明示終了する。終了しなくても新規 `POST /voice/sessions` で放置セッションは自動 close されるが、クライアントは会話終了時に必ず呼ぶこと（即座に確定させるため）。
 
 生存中のストリームがある場合は `session.closed` フレームがクライアントへ送られ、WS と upstream 接続が切断される（反映まで最大 ~0.2 秒）。
 
@@ -197,7 +198,7 @@ room は upstream 接続直後に `session.update` で `output_modalities: ["tex
 
 ## 切断復旧
 
-1. クライアント WS が切れても HTTP セッションは `created` のまま残る（明示 `POST .../close` で `closed`、ハンドラ内部エラーで `error`）。
+1. クライアント WS が切れても HTTP セッションは `created` のまま残る（明示 `POST .../close` で `closed`、ハンドラ内部エラーで `error`、または次の新規作成で自動 `closed`）。
 2. 同一 `session_id` で `WS .../stream` に再接続する（`closed`/`error` セッションは 4409 で拒否されるため新規 `POST /voice/sessions` からやり直す）。
 3. room はディスク上のテキスト履歴を upstream へ `conversation.item.create` で再注入し、続けて `history.sync` を送る。
 4. 会話を続行する（新しい `input.audio` / `input.image` を送る）。
