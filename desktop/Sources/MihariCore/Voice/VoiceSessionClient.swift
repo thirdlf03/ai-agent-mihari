@@ -116,7 +116,7 @@ struct VoiceStreamConnector: Sendable {
             )
         } catch {
             // WS が張れなければ未使用セッションが残り、以降の作成が 409 になる。
-            try? await client.closeSession(sessionID: created.sessionID)
+            _ = try? await client.closeSession(sessionID: created.sessionID)
             throw error
         }
     }
