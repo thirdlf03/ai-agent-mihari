@@ -54,6 +54,9 @@ EVENT_ASSISTANT_TOOL_CALL = "assistant.tool_call"
 #: client 実行のツール（capture_screen）は従来どおり assistant.tool_call で届く。
 EVENT_ASSISTANT_TOOL_ACTIVITY = "assistant.tool_activity"
 EVENT_USER_TEXT = "user.text"
+#: live_audio で入力音声は upstream へ届いたが文字起こしが一度も来なかった
+#: ターンの通知。desktop は「（音声を送信）」プレースホルダを明示表示へ置き換える。
+EVENT_USER_TRANSCRIPT_NONE = "user.transcript_none"
 EVENT_ERROR = "error"
 EVENT_SESSION_CLOSED = "session.closed"
 
@@ -139,6 +142,15 @@ def user_text_event(*, text: str, delta: str = "", done: bool | None = None) -> 
     if done is not None:
         payload["done"] = done
     return client_event(EVENT_USER_TEXT, **payload)
+
+
+def user_transcript_none_event() -> dict[str, Any]:
+    """音声ターンがあったのに upstream が文字起こしを返さなかった通知。
+
+    live_audio 専用。文字起こしが無いターンは履歴へも残せないため、
+    履歴には記録せず desktop の表示解放だけに使う。
+    """
+    return client_event(EVENT_USER_TRANSCRIPT_NONE)
 
 
 def session_closed_event(*, reason: str = "") -> dict[str, Any]:

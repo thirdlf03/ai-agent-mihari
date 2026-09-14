@@ -27,6 +27,7 @@ from mihari_room.voice.protocol import (
     session_closed_event,
     session_ready_event,
     user_text_event,
+    user_transcript_none_event,
 )
 from mihari_room.voice.sessions import VoiceSessionManager, VoiceStreamBusyError
 from mihari_room.voice.tools import VoiceToolExecutor, VoiceToolOutcome
@@ -87,13 +88,19 @@ ToolExecutorFactory = Callable[[str], Any]
 
 
 class _ClientAudioClock:
-    """クライアント音声の最終到着時刻をモノトニック秒で共有するホルダ。"""
+    """クライアント音声の最終到着時刻とターン内の発話量を共有するホルダ。"""
 
     def __init__(self) -> None:
         self.last_at = asyncio.get_running_loop().time()
+        #: 直前のターン区切り以降に届いた非無音 input.audio の累積バイト数。
+        #: live_audio では非押下中も無音チャンクが流れ続ける（room 側の無音
+        #: ペーサーもある）ため、全ゼロ PCM はユーザー発話として数えない。
+        self.speech_bytes = 0
 
-    def note(self) -> None:
+    def note(self, pcm: bytes) -> None:
         self.last_at = asyncio.get_running_loop().time()
+        if any(pcm):
+            self.speech_bytes += len(pcm)
 
 
 async def handle_voice_stream(
@@ -208,6 +215,7 @@ async def handle_voice_stream(
                     manager=manager,
                     executor=executor,
                     pending_client_calls=pending_client_calls,
+                    audio_clock=client_audio_clock,
                 )
             )
         else:
@@ -368,7 +376,7 @@ async def _client_to_upstream(
     manager: VoiceSessionManager,
     pending_client_calls: dict[str, str],
     live: bool = False,
-    on_client_audio: Callable[[], None] | None = None,
+    on_client_audio: Callable[[bytes], None] | None = None,
 ) -> None:
     while True:
         message = await websocket.receive()
@@ -409,17 +417,18 @@ async def _forward_audio(
     upstream: RealtimeUpstream,
     *,
     live: bool = False,
-    on_client_audio: Callable[[], None] | None = None,
+    on_client_audio: Callable[[bytes], None] | None = None,
 ) -> None:
     audio_b64 = frame.get("audio_base64") or frame.get("audio") or ""
     if not isinstance(audio_b64, str) or not audio_b64:
         raise ValueError("input.audio には audio_base64 が必要")
     # 形式チェックのみ。中身は OpenAI へそのまま渡し、ディスクには書かない。
-    base64.b64decode(audio_b64, validate=True)
+    pcm = base64.b64decode(audio_b64, validate=True)
     await upstream.send({"type": "input_audio_buffer.append", "audio": audio_b64})
     if on_client_audio is not None:
-        # live_audio の無音ペーサーが使う最終到着時刻を更新する。
-        on_client_audio()
+        # live_audio の無音ペーサーが使う最終到着時刻と、ターン内の発話量
+        # （無転写ターン検出用。全ゼロ PCM のキープアライブは数えない）を更新する。
+        on_client_audio(pcm)
     if live:
         # Live は commit / response.create を持たない。delegation 有効時に
         # response.create が upstream へ通ってしまうと、クライアントの
@@ -700,6 +709,7 @@ async def _live_upstream_to_client(
     manager: VoiceSessionManager,
     executor: Any,
     pending_client_calls: dict[str, str],
+    audio_clock: _ClientAudioClock,
 ) -> None:
     """live_audio モードの upstream → クライアント中継。
 
@@ -709,12 +719,21 @@ async def _live_upstream_to_client(
     Live の文字起こしは断片（delta）しか無く「ターン完了」イベントが無い。
     そのためユーザー発話は累積しておき、アシスタントの出力区切り
     （出力セグメント開始 or done/stopped）で確定扱いにして履歴へ記録する。
-    未知のイベント type は 1 度だけログへ出して無視する。
+    発話音声が upstream へ届いたのに文字起こしが一度も来なかったターンは
+    ``user.transcript_none`` で client へ知らせ、desktop の発話プレースホルダ
+    が残り続けるのを防ぐ。未知のイベント type は 1 度だけ警告ログへ出して無視する。
     """
     user_transcript = ""
+    #: 区切り間で受けた ``session.input_transcript.delta`` の回数（診断ログ用）。
+    transcript_deltas = 0
     assistant_transcript = ""
     output_active = False
     logged_types: set[str] = set()
+    #: ターン統計。flush_user が呼ばれるたびに累積し、assistant 出力区切り
+    #: （output_audio.done/stopped）で 1 行ログへ出してリセットする。
+    turn_input_bytes = 0
+    turn_transcript_deltas = 0
+    turn_transcript_len = 0
     #: session.delegation.created で記録する委譲 ID（responses バックエンドの 1 委譲）。
     delegation_id: str | None = None
     #: 内側 response.event の ``response.created`` で記録する委譲応答 ID。
@@ -723,13 +742,24 @@ async def _live_upstream_to_client(
     delegated_calls: list[dict[str, Any]] = []
 
     async def flush_user(*, send: bool = True) -> None:
-        nonlocal user_transcript
-        if not user_transcript:
-            return
-        manager.record_user_text(session_id, user_transcript)
-        if send:
-            await send_client(user_text_event(text=user_transcript, done=True))
-        user_transcript = ""
+        nonlocal user_transcript, transcript_deltas
+        nonlocal turn_input_bytes, turn_transcript_deltas, turn_transcript_len
+        #: 直前の区切り以降に届いた非無音のユーザー音声（無音キープアライブは除く）。
+        speech = audio_clock.speech_bytes
+        audio_clock.speech_bytes = 0
+        turn_input_bytes += speech
+        turn_transcript_deltas += transcript_deltas
+        transcript_deltas = 0
+        turn_transcript_len += len(user_transcript)
+        if user_transcript:
+            manager.record_user_text(session_id, user_transcript)
+            if send:
+                await send_client(user_text_event(text=user_transcript, done=True))
+            user_transcript = ""
+        elif speech and send:
+            # 音声は届いたが文字起こしが一度も来なかったターン。
+            # desktop の「（音声を送信）」を未転写の明示表示へ解放する。
+            await send_client(user_transcript_none_event())
 
     async def flush_assistant(*, send: bool = True) -> None:
         nonlocal assistant_transcript
@@ -775,6 +805,17 @@ async def _live_upstream_to_client(
                         )
                     )
                 await send_client(assistant_audio_event(done=True))
+                # ターン診断。input_bytes が非ゼロで transcript_len=0 なら
+                # 無転写ターン（user.transcript_none を送った区切り）。
+                logger.info(
+                    "live turn: input_bytes=%d transcript_deltas=%d transcript_len=%d",
+                    turn_input_bytes,
+                    turn_transcript_deltas,
+                    turn_transcript_len,
+                )
+                turn_input_bytes = 0
+                turn_transcript_deltas = 0
+                turn_transcript_len = 0
             elif event_type == "session.output_transcript.delta":
                 if not output_active:
                     output_active = True
@@ -784,6 +825,7 @@ async def _live_upstream_to_client(
                     assistant_transcript += delta
                     await send_client(assistant_text_event(delta=delta, done=False))
             elif event_type == "session.input_transcript.delta":
+                transcript_deltas += 1
                 delta = str(event.get("delta") or "")
                 if delta:
                     user_transcript += delta
@@ -839,7 +881,9 @@ async def _live_upstream_to_client(
                     key = f"response.event:{inner_type}"
                     if key not in logged_types:
                         logged_types.add(key)
-                        logger.info("live delegation event (unhandled): %s", inner_type)
+                        logger.warning(
+                            "live delegation event (unhandled): %s", inner_type
+                        )
             elif event_type == "session.closed":
                 return
             elif event_type == "error":
@@ -850,7 +894,7 @@ async def _live_upstream_to_client(
             else:
                 if event_type not in logged_types:
                     logged_types.add(event_type)
-                    logger.info("live upstream event (unhandled): %s", event_type)
+                    logger.warning("live upstream event (unhandled): %s", event_type)
     finally:
         # クライアントへ送り切れなかった未確定の断片も履歴には残す。
         try:

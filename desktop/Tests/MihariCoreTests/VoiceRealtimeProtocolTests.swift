@@ -42,6 +42,15 @@ struct VoiceRealtimeProtocolTests {
         #expect(frame == .userText(text: "今日の予定を教えて", delta: nil, done: nil))
     }
 
+    @Test("user.transcript_none を読む")
+    func parsesUserTranscriptNone() {
+        let json = """
+            {"type":"user.transcript_none"}
+            """
+        let frame = VoiceIncomingFrame.parse(data: Data(json.utf8))
+        #expect(frame == .userTranscriptNone)
+    }
+
     @Test("input.image を base64 付きで組み立てる")
     func buildsInputImage() throws {
         let png = Data([0x89, 0x50, 0x4E, 0x47])

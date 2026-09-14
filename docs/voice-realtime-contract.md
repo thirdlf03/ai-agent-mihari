@@ -122,6 +122,7 @@ JSON テキストフレーム。方向ごとの最小イベント:
 | room → client | `assistant.tool_call` | client 実行ツール呼び出し（`name`, `call_id`, `arguments`） |
 | room → client | `assistant.tool_activity` | room 側ツール実行の通知（`name`, `call_id`, `status`） |
 | room → client | `user.text` | 入力音声の文字起こし（`text`） |
+| room → client | `user.transcript_none` | 音声は届いたが文字起こしが無かったターン（live_audio のみ） |
 | room → client | `error` | エラー |
 | room → client | `session.closed` | ストリーム終了 |
 
@@ -364,6 +365,14 @@ Hermes が clarify 等でユーザー入力待ちになったとき、ジョブ 
 ```
 
 `delta` / `done` は live_audio でのみ付く追加フィールド。text モードでは従来どおり `{ "type": "user.text", "text": "..." }` のみ。
+
+#### `user.transcript_none`（room → client, live_audio のみ）
+
+```json
+{ "type": "user.transcript_none" }
+```
+
+ユーザーの音声が upstream へ届いた（非無音）のに `session.input_transcript.delta` が一度も来なかったターンで、room がアシスタント出力区切り等のターン境界に 1 度だけ送る。desktop は残っている「（音声を送信）」プレースホルダを「（聞き取れなかった）」へ置き換える。プレースホルダが無ければ無視してよい。文字起こしが無いため履歴には記録されない。
 
 #### Responses 委譲（live_audio のツール実行）
 

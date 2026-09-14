@@ -10,6 +10,8 @@ enum VoiceRealtimeProtocol {
         static let inputAudio = "input.audio"
         static let inputImage = "input.image"
         static let userText = "user.text"
+        /// live_audio で入力音声は届いたが文字起こしが一度も来なかったターンの通知。
+        static let userTranscriptNone = "user.transcript_none"
         static let assistantText = "assistant.text"
         static let assistantAudio = "assistant.audio"
         static let assistantToolCall = "assistant.tool_call"
@@ -137,6 +139,8 @@ enum VoiceIncomingFrame: Equatable, Sendable {
     /// `delta` / `done` は live_audio モードだけに付く逐次フィールド。
     /// 従来形式（text のみ）では両方 nil。
     case userText(text: String, delta: String?, done: Bool?)
+    /// 音声は room に届いたが文字起こしが無かったターン（live_audio のみ）。
+    case userTranscriptNone
     case assistantText(delta: String, text: String, done: Bool)
     /// VC 済み音声の 1 チャンク（PCM16 24 kHz mono）。`done` が 1 発話の終端。
     case assistantAudio(pcm16: Data, done: Bool)
@@ -172,6 +176,8 @@ enum VoiceIncomingFrame: Equatable, Sendable {
                 delta: json["delta"] as? String,
                 done: json["done"] as? Bool
             )
+        case VoiceRealtimeProtocol.EventType.userTranscriptNone:
+            return .userTranscriptNone
         case VoiceRealtimeProtocol.EventType.assistantText:
             return .assistantText(
                 delta: json["delta"] as? String ?? "",

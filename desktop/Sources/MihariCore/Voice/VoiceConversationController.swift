@@ -532,6 +532,13 @@ public final class VoiceConversationController: ObservableObject {
             applyUserTranscript(text, delta: delta, done: done)
             return false
 
+        case .userTranscriptNone:
+            // 音声は room に届いたが文字起こしが一度も来なかったターン
+            // （live_audio）。残っている「（音声を送信）」を明示表示へ置き換える。
+            // プレースホルダが無ければ何もしない。
+            replaceUnresolvedUserPlaceholder(with: Self.userNoTranscriptText)
+            return false
+
         case .assistantText(let delta, let text, let done):
             // done フレームの text は全文なので、delta の累積へ足すと二重になる。
             // 全文が届いたら累積を捨てて置き換える。
@@ -818,6 +825,18 @@ public final class VoiceConversationController: ObservableObject {
     /// 発話確定時に履歴へ置く、文字起こし待ちの目印。`user.text` が届いたら書き換える。
     private static let userPlaceholderText = "（音声を送信）"
 
+    /// `user.transcript_none` や切断・終了時に残ったプレースホルダへ書き込む明示表示。
+    private static let userNoTranscriptText = "（聞き取れなかった）"
+
+    /// 未置換の「（音声を送信）」が残っていれば `text` に書き換える。
+    /// `user.transcript_none` 受信時と、切断・終了で取り残されたときの掃除に使う。
+    private func replaceUnresolvedUserPlaceholder(with text: String) {
+        guard let index = messages.lastIndex(where: {
+            $0.role == .user && $0.text == Self.userPlaceholderText
+        }) else { return }
+        messages[index].text = text
+    }
+
     private func appendUserPlaceholder() {
         // 未置換のプレースホルダが残っているのに追加すると、後の置き換えで片方が
         // 孤児行として残るため、残っているあいだは増やさない。
@@ -893,11 +912,22 @@ public final class VoiceConversationController: ObservableObject {
                 timestamp: messages[index].timestamp,
                 imageThumbnailPNG: messages[index].imageThumbnailPNG
             )
-        } else {
-            let message = VoiceConversationMessage(role: .assistant, text: text)
-            currentAssistantMessageID = message.id
-            appendMessage(message)
+            return
         }
+        // tool_activity 等でいったん確定した直後に、同じ全文の done が届く経路がある
+        // （live_audio は transcript 確定が出力区切りまで遅れる）。直前に確定した
+        // assistant 行と trim 一致するなら新バブルを作らず、その行を引き継ぐ。
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let lastAssistant = messages.lastIndex(where: { $0.role == .assistant }),
+            messages[lastAssistant].text.trimmingCharacters(in: .whitespacesAndNewlines)
+                == trimmed
+        {
+            currentAssistantMessageID = messages[lastAssistant].id
+            return
+        }
+        let message = VoiceConversationMessage(role: .assistant, text: text)
+        currentAssistantMessageID = message.id
+        appendMessage(message)
     }
 
     private func appendSystem(_ text: String) {
@@ -927,6 +957,9 @@ public final class VoiceConversationController: ObservableObject {
         isTalking = false
         hasStreamedAudioInTurn = false
         updateMicLive()
+        // 切断・終了で残った「（音声を送信）」は二度と置き換わらないため明示表示にする。
+        // 再接続に成功すれば history.sync で room の履歴に置き換わる。
+        replaceUnresolvedUserPlaceholder(with: Self.userNoTranscriptText)
         if let socket {
             Task { await socket.close() }
         }

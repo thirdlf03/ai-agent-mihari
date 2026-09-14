@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import struct
 import time
 from pathlib import Path
@@ -31,6 +32,7 @@ from mihari_room.voice.protocol import (
     EVENT_ASSISTANT_TOOL_CALL,
     EVENT_SESSION_READY,
     EVENT_USER_TEXT,
+    EVENT_USER_TRANSCRIPT_NONE,
 )
 from mihari_room.voice.stream import LIVE_DELEGATION_INPUT_LIMIT, _send_tool_result
 from mihari_room.voice.tools import VoiceToolOutcome
@@ -244,6 +246,58 @@ class TalkingDelegatingLiveUpstream(FakeLiveUpstream):
         )
 
 
+class NoTranscriptLiveUpstream(FakeLiveUpstream):
+    """input_transcript.delta を一切返さないバリアント（無転写ターンの観測用）。
+
+    非無音の append にだけ応答を積む。無音キープアライブや無音ペーサーの
+    append には反応しないので、出力区切りはクライアントの発話に同期する。
+    """
+
+    async def send(self, event: dict) -> None:
+        if self._closed:
+            return
+        self._sent.append(event)
+        if event.get("type") != "input_audio_buffer.append":
+            return
+        raw = base64.b64decode(event.get("audio") or "")
+        if not any(raw):
+            return
+        await self._queue.put({"type": "session.output_transcript.delta", "delta": "返事だよ"})
+        await self._queue.put({"type": "session.output_audio.delta", "delta": PCM_B64})
+        await self._queue.put({"type": "session.output_audio.done"})
+
+
+class SilentTurnLiveUpstream(FakeLiveUpstream):
+    """input_transcript.delta を返さず、全 append に応答を積むバリアント。
+
+    無音 append にも応答するので、無音だけのターンでも flush 区切りが来る
+    （「無音は発話として数えない」分岐の観測用）。
+    """
+
+    async def send(self, event: dict) -> None:
+        if self._closed:
+            return
+        self._sent.append(event)
+        if event.get("type") == "input_audio_buffer.append":
+            await self._queue.put(
+                {"type": "session.output_transcript.delta", "delta": "返事だよ"}
+            )
+            await self._queue.put({"type": "session.output_audio.delta", "delta": PCM_B64})
+            await self._queue.put({"type": "session.output_audio.done"})
+
+
+class SpeechOnlyLiveUpstream(FakeLiveUpstream):
+    """非無音の append にだけ親の応答列を積む（ターン統計を確定的にするため）。"""
+
+    async def send(self, event: dict) -> None:
+        if event.get("type") == "input_audio_buffer.append":
+            raw = base64.b64decode(event.get("audio") or "")
+            if not any(raw):
+                self._sent.append(event)
+                return
+        await super().send(event)
+
+
 class QuietLiveUpstream(FakeLiveUpstream):
     """応答イベントを積まない静かなバリアント（無音ペーサーの観測用）。
 
@@ -387,6 +441,93 @@ def test_live_input_pacer_fills_silence(tmp_path: Path) -> None:
         raw = base64.b64decode(event["audio"], validate=True)
         assert len(raw) == 4800
         assert raw == b"\x00" * 4800
+
+
+def test_live_no_transcript_turn_sends_transcript_none(tmp_path: Path) -> None:
+    """音声は届いたが input_transcript.delta が無いターンは user.transcript_none を送る。
+
+    desktop の「（音声を送信）」プレースホルダが残り続ける障害の対策。
+    文字起こしが無いターンは履歴にも残さない（user 行は増えない）。
+    """
+    fake = NoTranscriptLiveUpstream()
+    client = _make_live_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01").decode()
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+        frames = _collect_until(
+            ws,
+            lambda f: f["type"] == EVENT_ASSISTANT_AUDIO and f.get("done"),
+        )
+        _disconnect_and_idle(ws, client, session_id)
+
+    none_frames = [f for f in frames if f["type"] == EVENT_USER_TRANSCRIPT_NONE]
+    assert len(none_frames) == 1
+    # 文字起こしは来なかったので user.text は一切送らない。
+    assert not any(f["type"] == EVENT_USER_TEXT for f in frames)
+    # assistant 側の応答は従来どおり届く。
+    text_frames = [f for f in frames if f["type"] == EVENT_ASSISTANT_TEXT]
+    assert text_frames[-1]["text"] == "返事だよ"
+    assert text_frames[-1]["done"] is True
+
+    history = client.get(f"/voice/sessions/{session_id}/history", headers=_auth()).json()
+    user_texts = [m["text"] for m in history["messages"] if m["role"] == "user"]
+    assert user_texts == []
+    assistant_texts = [
+        m["text"] for m in history["messages"] if m["role"] == "assistant"
+    ]
+    assert "返事だよ" in assistant_texts
+
+
+def test_live_silence_turn_does_not_send_transcript_none(tmp_path: Path) -> None:
+    """無音キープアライブだけの区切りでは user.transcript_none を送らない。
+
+    live_audio では非押下中も無音チャンクが流れ続けるため、全ゼロ PCM は
+    「ユーザーが話した」判定に数えない。
+    """
+    fake = SilentTurnLiveUpstream()
+    client = _make_live_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    silence_b64 = base64.b64encode(b"\x00" * 480).decode()
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        ws.send_json({"type": "input.audio", "audio_base64": silence_b64})
+        # 無音 append にも応答する fake なので、ここで flush 区切りが必ず来る。
+        frames = _collect_until(
+            ws,
+            lambda f: f["type"] == EVENT_ASSISTANT_AUDIO and f.get("done"),
+        )
+        _disconnect_and_idle(ws, client, session_id)
+
+    assert not any(f["type"] == EVENT_USER_TRANSCRIPT_NONE for f in frames)
+    assert not any(f["type"] == EVENT_USER_TEXT for f in frames)
+
+
+def test_live_turn_diagnostic_log(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """assistant 出力区切りでターン統計の 1 行ログを出す。"""
+    fake = SpeechOnlyLiveUpstream()
+    client = _make_live_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01").decode()
+    with caplog.at_level(logging.INFO, logger="mihari_room.voice"):
+        with client.websocket_connect(
+            f"/voice/sessions/{session_id}/stream", headers=_auth()
+        ) as ws:
+            assert ws.receive_json()["type"] == EVENT_SESSION_READY
+            ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+            _collect_until(
+                ws,
+                lambda f: f["type"] == EVENT_ASSISTANT_AUDIO and f.get("done"),
+            )
+            _disconnect_and_idle(ws, client, session_id)
+    messages = [record.getMessage() for record in caplog.records]
+    # 非無音 2 バイト + transcript delta 1 回（"こんにちは"=5 文字）。
+    assert "live turn: input_bytes=2 transcript_deltas=1 transcript_len=5" in messages
 
 
 def test_live_audio_passes_through_converter(

@@ -828,6 +828,73 @@ struct VoiceConversationControllerTests {
         controller.stop()
     }
 
+    @Test("tool_activity の暫定確定のあと同じ全文の done が届いてもバブルを増やさない")
+    func doneAfterToolActivityDoesNotDuplicateAssistantBubble() async throws {
+        let socket = ScriptedSocket()
+        let (controller, _, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        // live_audio は出力区切りまで transcript 確定が遅れるため、
+        // tool_activity（delegate 等）で先に暫定確定 → 同じ全文の done が後から届く。
+        socket.feed(
+            #"{"type":"assistant.text","delta":"うん、こんにちは。やっと来てくれた、ずっと待ってたよ。","done":false}"#
+        )
+        await waitUntil {
+            controller.messages.contains {
+                $0.role == .assistant && $0.text == "うん、こんにちは。やっと来てくれた、ずっと待ってたよ。"
+            }
+        }
+        socket.feed(
+            #"{"type":"assistant.tool_activity","name":"delegate","call_id":"dlg-1","status":"running"}"#
+        )
+        await waitUntil {
+            controller.messages.contains { $0.text == "みはり: 裏で考えている…" }
+        }
+
+        socket.feed(
+            #"{"type":"assistant.text","text":"うん、こんにちは。やっと来てくれた、ずっと待ってたよ。","done":true}"#
+        )
+        try await Task.sleep(for: .milliseconds(200))
+
+        // 同じ文言のバブルは 1 つだけ（暫定確定 → done で二重にならない）。
+        let assistantTexts = controller.messages.filter { $0.role == .assistant }.map(\.text)
+        #expect(assistantTexts == ["うん、こんにちは。やっと来てくれた、ずっと待ってたよ。"])
+
+        controller.stop()
+    }
+
+    @Test("暫定確定後に異なる全文の done が届けば別バブルになる")
+    func doneAfterToolActivityWithDifferentTextStartsNewBubble() async throws {
+        let socket = ScriptedSocket()
+        let (controller, _, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        socket.feed(#"{"type":"assistant.text","delta":"前半の返事","done":false}"#)
+        await waitUntil {
+            controller.messages.contains { $0.role == .assistant && $0.text == "前半の返事" }
+        }
+        socket.feed(
+            #"{"type":"assistant.tool_activity","name":"delegate","call_id":"dlg-1","status":"running"}"#
+        )
+        await waitUntil {
+            controller.messages.contains { $0.text == "みはり: 裏で考えている…" }
+        }
+
+        socket.feed(#"{"type":"assistant.text","text":"後半の返事","done":true}"#)
+        await waitUntil {
+            controller.messages.contains { $0.role == .assistant && $0.text == "後半の返事" }
+        }
+
+        let assistantTexts = controller.messages.filter { $0.role == .assistant }.map(\.text)
+        #expect(assistantTexts == ["前半の返事", "後半の返事"])
+
+        controller.stop()
+    }
+
     @Test("「話す」押下中は音量に関係なくすべてのチャンクを送る")
     func sendsAllChunksWhileTalking() async throws {
         let socket = ScriptedSocket()
@@ -1291,6 +1358,119 @@ struct VoiceConversationControllerTests {
         let userMessages = controller.messages.filter { $0.role == .user }
         #expect(userMessages.count == 1)
         #expect(userMessages.last?.text == "画面を見て")
+
+        controller.stop()
+    }
+
+    @Test("user.transcript_none でプレースホルダが「聞き取れなかった」に置き換わる")
+    func transcriptNoneReplacesPlaceholder() async throws {
+        let socket = ScriptedSocket()
+        let (controller, mic, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+
+        controller.beginPushToTalk()
+        mic.emit(data: Data(repeating: 0x55, count: 480), level: 0.5)
+        await waitUntil {
+            !self.parseSentAudioFrames(socket.sent).isEmpty
+        }
+        controller.endPushToTalk()
+
+        await waitUntil {
+            controller.messages.contains { $0.role == .user && $0.text == "（音声を送信）" }
+        }
+
+        socket.feed(#"{"type":"user.transcript_none"}"#)
+        await waitUntil {
+            controller.messages.contains { $0.role == .user && $0.text == "（聞き取れなかった）" }
+        }
+
+        // 行は増えず、user role のまま明示表示になる。
+        let userMessages = controller.messages.filter { $0.role == .user }
+        #expect(userMessages.count == 1)
+        #expect(userMessages.first?.text == "（聞き取れなかった）")
+        #expect(!controller.messages.contains { $0.text == "（音声を送信）" })
+
+        controller.stop()
+    }
+
+    @Test("user.transcript_none はプレースホルダが無ければ何もしない")
+    func transcriptNoneWithoutPlaceholderIsNoop() async throws {
+        let socket = ScriptedSocket()
+        let (controller, _, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        socket.feed(#"{"type":"user.transcript_none"}"#)
+
+        try await Task.sleep(for: .milliseconds(200))
+
+        // ユーザー行も明示表示も増えない。
+        #expect(controller.messages.filter { $0.role == .user }.isEmpty)
+        #expect(!controller.messages.contains { $0.text == "（聞き取れなかった）" })
+
+        controller.stop()
+    }
+
+    @Test("残ったプレースホルダは会話終了時に「聞き取れなかった」へ置き換わる")
+    func stopReplacesLeftoverPlaceholder() async throws {
+        let socket = ScriptedSocket()
+        let (controller, mic, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+
+        controller.beginPushToTalk()
+        mic.emit(data: Data(repeating: 0x55, count: 480), level: 0.5)
+        await waitUntil {
+            !self.parseSentAudioFrames(socket.sent).isEmpty
+        }
+        controller.endPushToTalk()
+
+        await waitUntil {
+            controller.messages.contains { $0.role == .user && $0.text == "（音声を送信）" }
+        }
+
+        // 文字起こしが届かないまま終了しても、プレースホルダが残らない。
+        controller.stop()
+
+        #expect(!controller.messages.contains { $0.text == "（音声を送信）" })
+        #expect(
+            controller.messages.contains { $0.role == .user && $0.text == "（聞き取れなかった）" }
+        )
+    }
+
+    @Test("残ったプレースホルダは切断時にも「聞き取れなかった」へ置き換わる")
+    func disconnectReplacesLeftoverPlaceholder() async throws {
+        let socket = ScriptedSocket()
+        let (controller, mic, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+
+        controller.beginPushToTalk()
+        mic.emit(data: Data(repeating: 0x55, count: 480), level: 0.5)
+        await waitUntil {
+            !self.parseSentAudioFrames(socket.sent).isEmpty
+        }
+        controller.endPushToTalk()
+
+        await waitUntil {
+            controller.messages.contains { $0.role == .user && $0.text == "（音声を送信）" }
+        }
+
+        // 文字起こしが届かないまま WS が切れた場合も、プレースホルダが残らない。
+        socket.finish()
+
+        await waitUntil {
+            controller.messages.contains { $0.role == .user && $0.text == "（聞き取れなかった）" }
+        }
+        #expect(!controller.messages.contains { $0.text == "（音声を送信）" })
 
         controller.stop()
     }
