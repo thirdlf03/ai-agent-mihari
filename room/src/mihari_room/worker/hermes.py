@@ -111,8 +111,9 @@ def build_prompt(job: Job) -> str:
 
     プロンプトは強制ではない（enforcement は tool hook / store 側）。
     配置・公開・秘密の約束だけを書く。
+    既定は「返答で答える」。成果物を作るのは依頼が求めたときだけ。
     """
-    return (
+    prompt = (
         f"タイトル: {job.title}\n"
         f"内容:\n{job.body}\n\n"
         "作業内容は上のタイトルと内容です。"
@@ -121,10 +122,14 @@ def build_prompt(job: Job) -> str:
         "無いファイルを探したり、無いことを失敗としないでください。"
         f"追記があるときだけ `{INPUT_DIRNAME}/followup-*.txt` と "
         f"`{INPUT_DIRNAME}/steer/*.txt` を読んでください。\n"
-        "調べものは `research/` に置き、要点は `research/summary.md`、"
-        "出典は `research/sources.json`、生データは `research/downloads/` に置いてください。\n"
-        f"成果物は `{OUTPUT_DIRNAME}/artifact/index.html` を起点に "
-        f"`{OUTPUT_DIRNAME}/` に書き出してください。\n"
+        "答えは最後の返答で返してください。質問・探し物・確認など成果物を"
+        "求められない依頼では、ファイルを作らないでください。\n"
+        "資料・レポート・ページなど成果物を求められたとき、または返答に"
+        "収まらない長さの内容のときだけファイルに書きます。\n"
+        "調べものの記録を残すときは `research/` に置き、要点は `research/summary.md`、"
+        "出典は `research/sources.json`、生データは `research/downloads/` に置きます。\n"
+        f"成果物は `{OUTPUT_DIRNAME}/` に置きます。"
+        f"ページを作るときは `{OUTPUT_DIRNAME}/artifact/index.html` を起点にしてください。\n"
         "Markdown の資料・レポートは `output/` 直下に `*.md` で置いてください"
         "（Room がプレビュー用 HTML と原稿を公開します）。"
         "画像を載せるときは `.md` と同じフォルダに置いて、相対パスで参照してください"
@@ -138,18 +143,21 @@ def build_prompt(job: Job) -> str:
         "静的な HTML/CSS/JS のモックは Room が管理します。"
         "新しくできた版は非公開で、共有 URL は owner が公開操作してから出ます。"
         "直接デプロイや外部投稿はしないでください。\n"
-        "Worker や D1/KV/DO などバックエンド付きの動作確認が必要なときだけ "
-        "`cloudflare_temp_deploy` を使ってください（一時アカウント、約 60 分、外部公開）。"
-        "これは依頼時に外部公開を許可（allow_external_publish）された仕事でだけ使えます。"
-        "許されていない仕事ではこの道具は存在しません。"
-        "その仕事では `output/artifact` にページを置かないでください。"
-        "置くと恒久プレビューになり、CSP で Worker API に繋がりません。"
-        "UI は Worker プロジェクト側に含めてください。"
-        "`cloudflare_temp_deploy` の subdir はこのジョブのフォルダだけを見ます。"
-        "他ジョブの worker/ や temp_deploy.json は使えません。"
-        "このジョブに wrangler.toml が無ければ先に書いてから呼んでください。"
-        "本番 Cloudflare アカウントへの wrangler deploy はしないでください。"
-        "claim URL は Room が owner に渡します。Forum や成果物に書かないでください。\n"
+    )
+    if job.allow_external_publish:
+        prompt += (
+            "Worker や D1/KV/DO などバックエンド付きの動作確認が必要なときだけ "
+            "`cloudflare_temp_deploy` を使ってください（一時アカウント、約 60 分、外部公開）。"
+            "デプロイするページは `output/artifact` には置かないでください。"
+            "置くと恒久プレビューになり、CSP で Worker API に繋がりません。"
+            "UI は Worker プロジェクト側に含めてください。"
+            "`cloudflare_temp_deploy` の subdir はこのジョブのフォルダだけを見ます。"
+            "他ジョブの worker/ や temp_deploy.json は使えません。"
+            "このジョブに wrangler.toml が無ければ先に書いてから呼んでください。"
+            "本番 Cloudflare アカウントへの wrangler deploy はしないでください。"
+            "claim URL は Room が owner に渡します。Forum や成果物に書かないでください。\n"
+        )
+    prompt += (
         "過去の会話は組み込みの session_search を先に使ってください。\n"
         "Discord 横断検索が必要なときは組み込みツールを使う:"
         " `discord_search`（本文・添付・URL、日時/チャンネル/作者で絞れる）、"
@@ -174,8 +182,9 @@ def build_prompt(job: Job) -> str:
         "キャラクターの口調を成果物の本文に押し付けないでください。\n"
         "最後の返答はみはりの発話として短く締めてください（読み上げる想定なので 1〜2 文）。\n"
         "完了報告など長めの説明は、空行を空けて返答の末尾に数行までなら続けて構いません。\n"
-        "説明が長くなる場合は research/ か output/ のファイルに書いてください。\n"
+        "説明が長くなる場合だけファイルに書き、返答でその場所を伝えてください。\n"
     )
+    return prompt
 
 
 def is_log_line(line: str) -> bool:
