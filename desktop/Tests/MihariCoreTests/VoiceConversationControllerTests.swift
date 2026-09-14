@@ -88,7 +88,8 @@ struct VoiceConversationControllerTests {
         func steer(jobID: String, instruction: String) async throws -> JobSteerResponse {
             JobSteerResponse(jobID: jobID, seq: 1, text: instruction, delivered: true)
         }
-        func answerQuestion(jobID: String, questionID: String, answer: String) async throws -> JobQuestionAnswerResponse {
+        func answerQuestion(jobID: String, questionID: String, answer: String) async throws -> JobQuestionAnswerResponse
+        {
             JobQuestionAnswerResponse(
                 jobID: jobID,
                 question: RoomPendingQuestion(id: questionID, question: "?", status: "answered", answer: answer)
@@ -150,6 +151,7 @@ struct VoiceConversationControllerTests {
         player: SpeechPlayer = SpeechPlayer(),
         factory: ScriptedSocketFactory? = nil,
         jobCollaboration: (any VoiceJobCollaborating)? = nil,
+        pcmPlayer: (any PCMStreamPlaying)? = nil,
         micPermission: PermissionGrant = .granted
     ) -> (VoiceConversationController, StubMic, ScriptedSocket, ScriptedSocketFactory) {
         let factory = factory ?? ScriptedSocketFactory()
@@ -197,6 +199,8 @@ struct VoiceConversationControllerTests {
                 micFactory: { stubMic },
                 jobCollaboration: jobCollaboration ?? StubJobCollaboration(),
                 screenCapture: StubScreenCapture(),
+                // 既定の実プレイヤーは AVAudioEngine を触るため、テストではスタブにする。
+                pcmPlayer: pcmPlayer ?? VoiceConversationControllerTestsStubPCMPlayer(),
                 onJobSubmitted: nil,
                 checkMicPermission: { PermissionState(grant: micPermission, detail: "test") },
                 requestMicPermission: { micPermission == .granted }
@@ -305,6 +309,146 @@ struct VoiceConversationControllerTests {
         #expect(controller.messages.contains(where: { $0.role == .assistant && $0.text == "こんにちは" }))
 
         controller.stop()
+    }
+
+    @Test("assistant.audio は PCM プレーヤーへ流れ、assistant.text では VOICEVOX を呼ばない")
+    func assistantAudioRoutesToPCMPlayerAndSkipsVoicevox() async throws {
+        let socket = ScriptedSocket()
+        let pcm = VoiceConversationControllerTestsStubPCMPlayer()
+        let (controller, _, _, factory) = makeController(socket: socket, pcmPlayer: pcm)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+
+        let chunk = Data([0x01, 0x00, 0x02, 0x00])
+        socket.feed(
+            """
+            {"type":"assistant.audio","audio_base64":"\(chunk.base64EncodedString())","done":false}
+            """
+        )
+        socket.feed(#"{"type":"assistant.audio","audio_base64":"","done":true}"#)
+
+        await waitUntil { pcm.finishCount >= 1 }
+        #expect(pcm.chunks == [chunk])
+        #expect(pcm.finishCount == 1)
+
+        // テキストは履歴に載るが、audio モードなので合成は呼ばれない。
+        socket.feed(#"{"type":"assistant.text","text":"ひまりの声で返す","done":true}"#)
+        await waitUntil {
+            controller.messages.contains(where: {
+                $0.role == .assistant && $0.text == "ひまりの声で返す"
+            })
+        }
+        // 合成を呼んでいたら届くはずの失敗メッセージが無いことも確認する。
+        try await Task.sleep(for: .milliseconds(200))
+
+        #expect(
+            !VoiceSessionClientTestsURLProtocol.requests.contains {
+                $0.path.contains("audio_query")
+            }
+        )
+        #expect(!controller.messages.contains { $0.text.contains("VOICEVOX") })
+
+        controller.stop()
+    }
+
+    @Test("assistant.audio が無いセッションは従来通り VOICEVOX 合成を呼ぶ")
+    func assistantTextWithoutAudioModeCallsVoicevox() async throws {
+        let socket = ScriptedSocket()
+        let pcm = VoiceConversationControllerTestsStubPCMPlayer()
+        let (controller, _, _, factory) = makeController(socket: socket, pcmPlayer: pcm)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        socket.feed(#"{"type":"assistant.text","text":"合成してね","done":true}"#)
+
+        await waitUntil {
+            VoiceSessionClientTestsURLProtocol.requests.contains { $0.path.contains("audio_query") }
+        }
+
+        #expect(
+            VoiceSessionClientTestsURLProtocol.requests.contains {
+                $0.path.contains("audio_query")
+            }
+        )
+        #expect(pcm.chunks.isEmpty)
+
+        controller.stop()
+    }
+
+    @Test("assistant.audio の再生中に「話す」を押すと PCM 再生を止める")
+    func bargeInStopsPCMPlayback() async throws {
+        let socket = ScriptedSocket()
+        let pcm = VoiceConversationControllerTestsStubPCMPlayer()
+        let (controller, _, _, factory) = makeController(socket: socket, pcmPlayer: pcm)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        // 可聴フレーム（振幅 > 閾値 512）でないとエコーガードが立たず割り込みにならない。
+        let chunk = Data([0x00, 0x20])
+        socket.feed(
+            """
+            {"type":"assistant.audio","audio_base64":"\(chunk.base64EncodedString())","done":false}
+            """
+        )
+        await waitUntil { controller.statusText == "再生中…" }
+
+        controller.beginPushToTalk()
+
+        await waitUntil { pcm.stopCount >= 1 }
+        #expect(pcm.stopCount >= 1)
+
+        controller.stop()
+    }
+
+    @Test("assistant.audio を鳴らし切ると待機状態へ戻る")
+    func drainedReturnsToPrompt() async throws {
+        let socket = ScriptedSocket()
+        let pcm = VoiceConversationControllerTestsStubPCMPlayer()
+        let (controller, _, _, factory) = makeController(socket: socket, pcmPlayer: pcm)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        await waitUntil { controller.connectionState == .ready }
+
+        let chunk = Data([0x01, 0x00])
+        socket.feed(
+            """
+            {"type":"assistant.audio","audio_base64":"\(chunk.base64EncodedString())","done":false}
+            """
+        )
+        await waitUntil { controller.statusText == "再生中…" }
+
+        socket.feed(#"{"type":"assistant.audio","audio_base64":"","done":true}"#)
+        await waitUntil { pcm.finishCount >= 1 }
+
+        // 実機では最後のバッファの再生完了で呼ばれる。
+        pcm.fireDrained()
+        await waitUntil { controller.statusText == "話しかけてください" }
+
+        #expect(controller.statusText == "話しかけてください")
+
+        controller.stop()
+    }
+
+    @Test("会話終了で PCM プレーヤーを止める")
+    func stopStopsPCMPlayer() async throws {
+        let socket = ScriptedSocket()
+        let pcm = VoiceConversationControllerTestsStubPCMPlayer()
+        let (controller, _, _, factory) = makeController(socket: socket, pcmPlayer: pcm)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        await waitUntil { controller.connectionState == .ready }
+
+        controller.stop()
+
+        #expect(pcm.stopCount >= 1)
     }
 
     @Test("再生中に「話す」を押すと割り込みで chatter 再生を止める")
@@ -421,9 +565,11 @@ struct VoiceConversationControllerTests {
         #expect(jobs.steerCalls.count == 1)
         #expect(jobs.steerCalls[0].jobID == "job-active")
         #expect(jobs.steerCalls[0].instruction == "左側を優先")
-        #expect(controller.messages.contains(where: {
-            $0.role == .system && $0.text.contains("指示を送った")
-        }))
+        #expect(
+            controller.messages.contains(where: {
+                $0.role == .system && $0.text.contains("指示を送った")
+            })
+        )
 
         controller.stop()
     }
@@ -469,9 +615,11 @@ struct VoiceConversationControllerTests {
         )
         try await Task.sleep(for: .milliseconds(200))
 
-        #expect(controller.messages.contains(where: {
-            $0.role == .system && $0.text.contains("エラー: Realtime が落ちた")
-        }))
+        #expect(
+            controller.messages.contains(where: {
+                $0.role == .system && $0.text.contains("エラー: Realtime が落ちた")
+            })
+        )
 
         controller.stop()
     }
@@ -500,9 +648,11 @@ struct VoiceConversationControllerTests {
         await waitUntil { factory.makeCount >= 2 }
 
         #expect(factory.makeCount == 2)
-        #expect(controller.messages.contains(where: {
-            $0.role == .system && $0.text.contains("新規セッション")
-        }))
+        #expect(
+            controller.messages.contains(where: {
+                $0.role == .system && $0.text.contains("新規セッション")
+            })
+        )
 
         controller.stop()
     }
@@ -578,6 +728,126 @@ struct VoiceConversationControllerTests {
         controller.stop()
     }
 
+    @Test("live_audio では押していないあいだ同じ長さの無音チャンクを流し続ける")
+    func liveAudioStreamsSilenceWhileNotTalking() async throws {
+        let socket = ScriptedSocket()
+        let (controller, mic, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(
+            #"{"type":"session.ready","session_id":"sess-test","model":"gpt-live-1","output_modalities":["audio","text"]}"#
+        )
+        // output_modalities の反映を確実にしてからチャンクを供給する。
+        await waitUntil { controller.connectionState == .ready }
+
+        mic.emit(data: Data(repeating: 0x77, count: 480), level: 0.5)
+
+        await waitUntil {
+            !self.parseSentAudioFrames(socket.sent).isEmpty
+        }
+
+        let frames = parseSentAudioFrames(socket.sent)
+        let streaming = try #require(frames.first)
+        #expect(streaming["commit"] as? Bool == false)
+        #expect(streaming["create_response"] as? Bool == false)
+        // 実音声ではなく、入力チャンクと同じバイト長の PCM16 無音が流れる。
+        let silence = Data(
+            base64Encoded: try #require(streaming["audio_base64"] as? String)
+        )
+        #expect(silence == Data(count: 480))
+        // isMicLive は「実音声を流しているか」なので無音送信中は false のまま。
+        #expect(controller.isMicLive == false)
+
+        controller.stop()
+    }
+
+    @Test("live_audio の再生中(エコーガード中)も無音チャンクを流し続ける")
+    func liveAudioStreamsSilenceDuringEchoGuard() async throws {
+        let socket = ScriptedSocket()
+        let pcm = VoiceConversationControllerTestsStubPCMPlayer()
+        let (controller, mic, _, factory) = makeController(socket: socket, pcmPlayer: pcm)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(
+            #"{"type":"session.ready","session_id":"sess-test","model":"gpt-live-1","output_modalities":["audio","text"]}"#
+        )
+        await waitUntil { controller.connectionState == .ready }
+        // 可聴レベルの assistant.audio でエコーガードを立てる。
+        let audible = Data([0x00, 0x10])
+        socket.feed(
+            """
+            {"type":"assistant.audio","audio_base64":"\(audible.base64EncodedString())","done":false}
+            """
+        )
+        await waitUntil { controller.statusText == "再生中…" }
+
+        mic.emit(data: Data(repeating: 0x77, count: 480), level: 0.5)
+
+        await waitUntil {
+            !self.parseSentAudioFrames(socket.sent).isEmpty
+        }
+
+        let streaming = try #require(parseSentAudioFrames(socket.sent).first)
+        let silence = Data(
+            base64Encoded: try #require(streaming["audio_base64"] as? String)
+        )
+        #expect(silence == Data(count: 480))
+
+        controller.stop()
+    }
+
+    @Test("text モードでは output_modalities があっても押していないあいだは送らない")
+    func textModeDropsMicChunksUnlessTalking() async throws {
+        let socket = ScriptedSocket()
+        let (controller, mic, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(
+            #"{"type":"session.ready","session_id":"sess-test","model":"mini","output_modalities":["text"]}"#
+        )
+        await waitUntil { controller.connectionState == .ready }
+
+        mic.emit(data: Data(repeating: 0x44, count: 480), level: 0.5)
+
+        // 送信は非同期なので、流れていれば届く程度の時間だけ待ってから確認する。
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(parseSentAudioFrames(socket.sent).isEmpty)
+
+        controller.stop()
+    }
+
+    @Test("live_audio でも押下中は従来どおり実音声を送る")
+    func liveAudioSendsRealAudioWhileTalking() async throws {
+        let socket = ScriptedSocket()
+        let (controller, mic, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(
+            #"{"type":"session.ready","session_id":"sess-test","model":"gpt-live-1","output_modalities":["audio","text"]}"#
+        )
+        await waitUntil { controller.connectionState == .ready }
+
+        let chunk = Data(repeating: 0xAA, count: 480)
+        controller.beginPushToTalk()
+        mic.emit(data: chunk, level: 0.5)
+
+        await waitUntil {
+            self.parseSentAudioFrames(socket.sent)
+                .contains { ($0["commit"] as? Bool) == false }
+        }
+
+        let streaming = parseSentAudioFrames(socket.sent).filter { ($0["commit"] as? Bool) == false }
+        let payloads = streaming.compactMap { $0["audio_base64"] as? String }
+            .compactMap { Data(base64Encoded: $0) }
+        #expect(payloads.contains(chunk))
+
+        controller.stop()
+    }
+
     @Test("押してすぐ離し音声が無ければ確定もプレースホルダも送らない")
     func releaseWithoutAudioDoesNotCommit() async throws {
         let socket = ScriptedSocket()
@@ -632,6 +902,112 @@ struct VoiceConversationControllerTests {
         let userMessages = controller.messages.filter { $0.role == .user }
         #expect(userMessages.count == 1)
         #expect(userMessages.last?.text == "今日の予定を教えて")
+
+        controller.stop()
+    }
+
+    @Test("live_audio の逐次 user.text は行を増やさず累積 text で書き換える")
+    func streamingUserTextRewritesSingleLine() async throws {
+        let socket = ScriptedSocket()
+        let (controller, _, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        socket.feed(#"{"type":"user.text","text":"こ","delta":"こ","done":false}"#)
+        socket.feed(#"{"type":"user.text","text":"こんに","delta":"んに","done":false}"#)
+        socket.feed(#"{"type":"user.text","text":"こんにちは","delta":"ちは","done":false}"#)
+
+        await waitUntil {
+            controller.messages.contains(where: { $0.role == .user && $0.text == "こんにちは" })
+        }
+
+        // 断片ごとに行が増えず、累積全文で末尾の user 行が書き換わるだけ。
+        let userMessages = controller.messages.filter { $0.role == .user }
+        #expect(userMessages.count == 1)
+        #expect(userMessages.last?.text == "こんにちは")
+
+        controller.stop()
+    }
+
+    @Test("逐次 user.text の done で確定し、次の発話は新しい行から始まる")
+    func streamingUserTextDoneStartsNewLineForNextUtterance() async throws {
+        let socket = ScriptedSocket()
+        let (controller, _, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        socket.feed(#"{"type":"user.text","text":"一つ目","delta":"一つ目","done":false}"#)
+        socket.feed(#"{"type":"user.text","text":"一つ目の発話","done":true}"#)
+        socket.feed(#"{"type":"user.text","text":"二","delta":"二","done":false}"#)
+        socket.feed(#"{"type":"user.text","text":"二つ目の発話","done":true}"#)
+
+        await waitUntil {
+            controller.messages.filter { $0.role == .user }.count == 2
+                && controller.messages.last?.text == "二つ目の発話"
+        }
+
+        // 2 回の発話が混ざらず、それぞれ確定文の 1 行ずつになる。
+        let userTexts = controller.messages.filter { $0.role == .user }.map(\.text)
+        #expect(userTexts == ["一つ目の発話", "二つ目の発話"])
+
+        controller.stop()
+    }
+
+    @Test("従来形式の user.text（delta/done 無し）は従来通り新規行を追加する")
+    func legacyUserTextStillAppendsNewLines() async throws {
+        let socket = ScriptedSocket()
+        let (controller, _, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        socket.feed(#"{"type":"user.text","text":"最初の発話"}"#)
+        socket.feed(#"{"type":"user.text","text":"次の発話"}"#)
+
+        await waitUntil {
+            controller.messages.filter { $0.role == .user }.count == 2
+        }
+
+        let userTexts = controller.messages.filter { $0.role == .user }.map(\.text)
+        #expect(userTexts == ["最初の発話", "次の発話"])
+
+        controller.stop()
+    }
+
+    @Test("逐次 user.text はプッシュ・トゥ・トークのプレースホルダ行を書き換える")
+    func streamingUserTextReplacesPlaceholder() async throws {
+        let socket = ScriptedSocket()
+        let (controller, mic, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+
+        controller.beginPushToTalk()
+        mic.emit(data: Data(repeating: 0x55, count: 480), level: 0.5)
+        await waitUntil {
+            !self.parseSentAudioFrames(socket.sent).isEmpty
+        }
+        controller.endPushToTalk()
+
+        await waitUntil {
+            controller.messages.last?.role == .user
+                && controller.messages.last?.text == "（音声を送信）"
+        }
+
+        socket.feed(#"{"type":"user.text","text":"画面を","delta":"画面を","done":false}"#)
+        socket.feed(#"{"type":"user.text","text":"画面を見て","done":true}"#)
+
+        await waitUntil {
+            controller.messages.last?.role == .user
+                && controller.messages.last?.text == "画面を見て"
+        }
+
+        let userMessages = controller.messages.filter { $0.role == .user }
+        #expect(userMessages.count == 1)
+        #expect(userMessages.last?.text == "画面を見て")
 
         controller.stop()
     }
@@ -730,6 +1106,44 @@ struct VoiceConversationControllerTests {
         data.append(contentsOf: "data".utf8)
         data.append(contentsOf: [2, 0, 0, 0, 0, 0])
         return data
+    }
+}
+
+/// `assistant.audio` の再生口のスタブ。実プレイヤーは AVAudioEngine を触るため、
+/// テストではこれで呼び出しを記録する。VoiceScreenCaptureTests からも使う。
+final class VoiceConversationControllerTestsStubPCMPlayer: PCMStreamPlaying, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _startCount = 0
+    private var _stopCount = 0
+    private var _finishCount = 0
+    private var _chunks: [Data] = []
+
+    var onDrained: (@Sendable () -> Void)?
+
+    var startCount: Int { lock.withLock { _startCount } }
+    var stopCount: Int { lock.withLock { _stopCount } }
+    var finishCount: Int { lock.withLock { _finishCount } }
+    var chunks: [Data] { lock.withLock { _chunks } }
+
+    func start() {
+        lock.withLock { _startCount += 1 }
+    }
+
+    func enqueue(pcm16: Data) {
+        lock.withLock { _chunks.append(pcm16) }
+    }
+
+    func finish() {
+        lock.withLock { _finishCount += 1 }
+    }
+
+    func stop() {
+        lock.withLock { _stopCount += 1 }
+    }
+
+    /// 実機では最後のバッファの再生完了で呼ばれる `onDrained` を手で発火させる。
+    func fireDrained() {
+        onDrained?()
     }
 }
 

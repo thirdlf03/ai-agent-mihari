@@ -11,6 +11,7 @@ enum VoiceRealtimeProtocol {
         static let inputImage = "input.image"
         static let userText = "user.text"
         static let assistantText = "assistant.text"
+        static let assistantAudio = "assistant.audio"
         static let assistantToolCall = "assistant.tool_call"
         static let error = "error"
         static let sessionClosed = "session.closed"
@@ -126,10 +127,16 @@ struct VoiceHistorySyncEntry: Equatable, Sendable {
 
 /// room → client の 1 フレーム。
 enum VoiceIncomingFrame: Equatable, Sendable {
-    case sessionReady(sessionID: String, model: String)
+    /// `outputModalities` は room が upstream に設定した出力種別（例: `["audio","text"]`）。
+    /// 送らない古い room では空配列になる。
+    case sessionReady(sessionID: String, model: String, outputModalities: [String])
     case historySync(messages: [VoiceHistorySyncEntry])
-    case userText(text: String)
+    /// `delta` / `done` は live_audio モードだけに付く逐次フィールド。
+    /// 従来形式（text のみ）では両方 nil。
+    case userText(text: String, delta: String?, done: Bool?)
     case assistantText(delta: String, text: String, done: Bool)
+    /// VC 済み音声の 1 チャンク（PCM16 24 kHz mono）。`done` が 1 発話の終端。
+    case assistantAudio(pcm16: Data, done: Bool)
     case assistantToolCall(name: String, callID: String, arguments: String)
     case error(code: String, message: String)
     case sessionClosed(reason: String)
@@ -146,18 +153,33 @@ enum VoiceIncomingFrame: Equatable, Sendable {
         case VoiceRealtimeProtocol.EventType.sessionReady:
             return .sessionReady(
                 sessionID: json["session_id"] as? String ?? "",
-                model: json["model"] as? String ?? ""
+                model: json["model"] as? String ?? "",
+                outputModalities: json["output_modalities"] as? [String] ?? []
             )
         case VoiceRealtimeProtocol.EventType.historySync:
             let rawMessages = json["messages"] as? [[String: Any]] ?? []
             let messages = rawMessages.compactMap(VoiceHistorySyncEntry.parse(from:))
             return .historySync(messages: messages)
         case VoiceRealtimeProtocol.EventType.userText:
-            return .userText(text: json["text"] as? String ?? "")
+            // delta / done の「有無」で逐次モードを判定するため ?? は使わない。
+            return .userText(
+                text: json["text"] as? String ?? "",
+                delta: json["delta"] as? String,
+                done: json["done"] as? Bool
+            )
         case VoiceRealtimeProtocol.EventType.assistantText:
             return .assistantText(
                 delta: json["delta"] as? String ?? "",
                 text: json["text"] as? String ?? "",
+                done: json["done"] as? Bool ?? false
+            )
+        case VoiceRealtimeProtocol.EventType.assistantAudio:
+            // done 通知だけのフレームは audio_base64 が空なので、欠落・不正は空データにする。
+            let pcm16 =
+                (json["audio_base64"] as? String)
+                .flatMap { Data(base64Encoded: $0) } ?? Data()
+            return .assistantAudio(
+                pcm16: pcm16,
                 done: json["done"] as? Bool ?? false
             )
         case VoiceRealtimeProtocol.EventType.assistantToolCall:

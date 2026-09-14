@@ -13,10 +13,12 @@ from typing import Any
 from fastapi import WebSocket, WebSocketDisconnect
 
 from mihari_room.voice.history import HistoryMessage
+from mihari_room.voice.live_upstream import LIVE_AUDIO_OUTPUT_EVENTS
 from mihari_room.voice.protocol import (
     EVENT_INPUT_AUDIO,
     EVENT_INPUT_IMAGE,
     SessionStatus,
+    assistant_audio_event,
     assistant_text_event,
     assistant_tool_call_event,
     error_event,
@@ -31,10 +33,45 @@ from mihari_room.voice.upstream import (
     RealtimeUpstream,
     response_create_event,
 )
+from mihari_room.voice.vc import (
+    VoiceConverter,
+    f32_to_pcm16,
+    pcm16_to_f32,
+    voice_converter_from_config,
+)
 
 logger = logging.getLogger("mihari_room.voice")
 
+#: Live API の既知だが中継しないイベント（ACK 類）。これ以外は 1 度だけログに出す。
+_LIVE_QUIET_EVENTS = frozenset(
+    {
+        "session.started",
+        "session.updated",
+        "session.instructions.appended",
+        "session.thinking.appended",
+        "session.commentary.appended",
+        "session.input_audio.muted",
+        "session.input_audio.unmuted",
+    }
+)
+
+#: live_audio モードで upstream の入力ストリームを維持する無音ペーサーの周期（秒）。
+_LIVE_INPUT_PACER_INTERVAL = 0.1
+
+#: ペーサーが補填する無音 1 枚分。PCM16 mono 24kHz の 100ms = 2400 サンプル = 4800 バイト。
+_LIVE_SILENCE_FRAME_B64 = base64.b64encode(b"\x00" * 4800).decode()
+
 UpstreamFactory = Callable[[], RealtimeUpstream]
+
+
+class _ClientAudioClock:
+    """クライアント音声の最終到着時刻をモノトニック秒で共有するホルダ。"""
+
+    def __init__(self) -> None:
+        self.last_at = asyncio.get_running_loop().time()
+
+    def note(self) -> None:
+        self.last_at = asyncio.get_running_loop().time()
 
 
 async def handle_voice_stream(
@@ -63,6 +100,11 @@ async def handle_voice_stream(
         return
 
     upstream = upstream_factory()
+    output_mode = getattr(manager.config, "voice_output_mode", "text")
+    #: live_audio モードではセッション（= このストリーム）中 1 インスタンスの VC を保持する。
+    converter: VoiceConverter | None = (
+        voice_converter_from_config(manager.config) if output_mode == "live_audio" else None
+    )
     manager.mark_streaming(session_id)
     end_reason = "idle"
     close_sent = False
@@ -76,12 +118,22 @@ async def handle_voice_stream(
         await upstream.connect()
         if history:
             await _replay_history_to_upstream(upstream, history)
+        if converter is not None:
+            await converter.reset()
         await send_client(
-            session_ready_event(session_id=session_id, model=session.model, resumed=resumed)
+            session_ready_event(
+                session_id=session_id,
+                model=session.model,
+                resumed=resumed,
+                output_modalities=session.output_modalities,
+            )
         )
         if history:
             await send_client(history_sync_event(messages=manager.history_to_dicts(session_id)))
 
+        # Live API は入力音声ストリームでセッションの時間が進むため、live_audio
+        # ではクライアント音声の最終到着時刻を共有し、途切れた区間を無音で補填する。
+        client_audio_clock = _ClientAudioClock() if converter is not None else None
         client_task = asyncio.create_task(
             _client_to_upstream(
                 websocket,
@@ -89,22 +141,37 @@ async def handle_voice_stream(
                 send_client,
                 session_id=session_id,
                 manager=manager,
+                on_client_audio=(
+                    client_audio_clock.note if client_audio_clock is not None else None
+                ),
             )
         )
-        upstream_task = asyncio.create_task(
-            _upstream_to_client(
-                upstream,
-                send_client,
-                session_id=session_id,
-                manager=manager,
+        if converter is not None:
+            upstream_task = asyncio.create_task(
+                _live_upstream_to_client(
+                    upstream,
+                    converter,
+                    send_client,
+                    session_id=session_id,
+                    manager=manager,
+                )
             )
-        )
-        close_task = asyncio.create_task(
-            _watch_session_close(manager, session_id)
-        )
+        else:
+            upstream_task = asyncio.create_task(
+                _upstream_to_client(
+                    upstream,
+                    send_client,
+                    session_id=session_id,
+                    manager=manager,
+                )
+            )
+        close_task = asyncio.create_task(_watch_session_close(manager, session_id))
+        stream_tasks = {client_task, upstream_task, close_task}
+        if client_audio_clock is not None:
+            stream_tasks.add(asyncio.create_task(_live_input_pacer(upstream, client_audio_clock)))
         try:
             done, pending = await asyncio.wait(
-                {client_task, upstream_task, close_task},
+                stream_tasks,
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for task in pending:
@@ -122,15 +189,10 @@ async def handle_voice_stream(
                 end_reason = "closed"
         finally:
             # ルートタスクが cancel されても子タスクを残さず、例外を回収する。
-            for task in (client_task, upstream_task, close_task):
+            for task in stream_tasks:
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(
-                client_task,
-                upstream_task,
-                close_task,
-                return_exceptions=True,
-            )
+            await asyncio.gather(*stream_tasks, return_exceptions=True)
     except WebSocketDisconnect:
         end_reason = "client_disconnect"
     except Exception as error:
@@ -144,6 +206,11 @@ async def handle_voice_stream(
         except Exception:
             pass
     finally:
+        if converter is not None:
+            try:
+                await converter.close()
+            except Exception:
+                pass
         await upstream.close()
         await manager.release_stream(session_id)
         current = manager.get(session_id)
@@ -192,9 +259,7 @@ async def _replay_history_to_upstream(
         )
 
 
-async def _watch_session_close(
-    manager: VoiceSessionManager, session_id: str
-) -> None:
+async def _watch_session_close(manager: VoiceSessionManager, session_id: str) -> None:
     """POST /close など外部操作で CLOSED/ERROR にされたら戻る。"""
     while True:
         await asyncio.sleep(0.2)
@@ -206,6 +271,31 @@ async def _watch_session_close(
             return
 
 
+async def _live_input_pacer(upstream: RealtimeUpstream, clock: _ClientAudioClock) -> None:
+    """live_audio 専用。クライアント音声が無い区間を無音フレームで補填する。
+
+    gpt-live-1（Live API）はフルデュプレックスで、入力音声ストリームが
+    セッションの時計を進める。クライアントの input.audio が止まると
+    応答生成も途中で停まるため、最後のクライアント音声から 100ms 以上
+    経っていれば 100ms 分の無音（PCM16 mono 24kHz）を送り続ける。
+    upstream が切れていれば静かに終わり、ストリーム全体は落とさない。
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        while True:
+            await asyncio.sleep(_LIVE_INPUT_PACER_INTERVAL)
+            if loop.time() - clock.last_at < _LIVE_INPUT_PACER_INTERVAL:
+                continue
+            await upstream.send(
+                {
+                    "type": "input_audio_buffer.append",
+                    "audio": _LIVE_SILENCE_FRAME_B64,
+                }
+            )
+    except Exception:
+        return
+
+
 async def _client_to_upstream(
     websocket: WebSocket,
     upstream: RealtimeUpstream,
@@ -213,6 +303,7 @@ async def _client_to_upstream(
     *,
     session_id: str,
     manager: VoiceSessionManager,
+    on_client_audio: Callable[[], None] | None = None,
 ) -> None:
     while True:
         message = await websocket.receive()
@@ -230,7 +321,7 @@ async def _client_to_upstream(
         frame_type = frame.get("type")
         try:
             if frame_type == EVENT_INPUT_AUDIO:
-                await _forward_audio(frame, upstream)
+                await _forward_audio(frame, upstream, on_client_audio=on_client_audio)
             elif frame_type == EVENT_INPUT_IMAGE:
                 await _forward_image(frame, upstream, session_id=session_id, manager=manager)
             else:
@@ -239,13 +330,21 @@ async def _client_to_upstream(
             await send_client(error_event(str(error), code="bad_payload"))
 
 
-async def _forward_audio(frame: dict[str, Any], upstream: RealtimeUpstream) -> None:
+async def _forward_audio(
+    frame: dict[str, Any],
+    upstream: RealtimeUpstream,
+    *,
+    on_client_audio: Callable[[], None] | None = None,
+) -> None:
     audio_b64 = frame.get("audio_base64") or frame.get("audio") or ""
     if not isinstance(audio_b64, str) or not audio_b64:
         raise ValueError("input.audio には audio_base64 が必要")
     # 形式チェックのみ。中身は OpenAI へそのまま渡し、ディスクには書かない。
     base64.b64decode(audio_b64, validate=True)
     await upstream.send({"type": "input_audio_buffer.append", "audio": audio_b64})
+    if on_client_audio is not None:
+        # live_audio の無音ペーサーが使う最終到着時刻を更新する。
+        on_client_audio()
     if frame.get("commit", True):
         await upstream.send({"type": "input_audio_buffer.commit"})
     if frame.get("create_response", True):
@@ -356,3 +455,114 @@ def _extract_error_message(event: dict[str, Any]) -> str:
     if isinstance(error, dict):
         return str(error.get("message") or error.get("code") or "upstream error")
     return str(error or "upstream error")
+
+
+async def _live_upstream_to_client(
+    upstream: RealtimeUpstream,
+    converter: VoiceConverter,
+    send_client: Any,
+    *,
+    session_id: str,
+    manager: VoiceSessionManager,
+) -> None:
+    """live_audio モードの upstream → クライアント中継。
+
+    gpt-live-1 の ``session.output_audio.delta``（base64 PCM16 24kHz）を
+    f32 に変換して VC へ通し、PCM16 に戻して ``assistant.audio`` で送る。
+
+    Live の文字起こしは断片（delta）しか無く「ターン完了」イベントが無い。
+    そのためユーザー発話は累積しておき、アシスタントの出力区切り
+    （出力セグメント開始 or done/stopped）で確定扱いにして履歴へ記録する。
+    未知のイベント type は 1 度だけログへ出して無視する。
+    """
+    user_transcript = ""
+    assistant_transcript = ""
+    output_active = False
+    logged_types: set[str] = set()
+
+    async def flush_user(*, send: bool = True) -> None:
+        nonlocal user_transcript
+        if not user_transcript:
+            return
+        manager.record_user_text(session_id, user_transcript)
+        if send:
+            await send_client(user_text_event(text=user_transcript, done=True))
+        user_transcript = ""
+
+    async def flush_assistant(*, send: bool = True) -> None:
+        nonlocal assistant_transcript
+        if not assistant_transcript:
+            return
+        manager.record_assistant_text(session_id, assistant_transcript)
+        if send:
+            await send_client(assistant_text_event(text=assistant_transcript, done=True))
+        assistant_transcript = ""
+
+    try:
+        while True:
+            event = await upstream.receive()
+            event_type = event.get("type", "")
+            if event_type in LIVE_AUDIO_OUTPUT_EVENTS:
+                manager.note_upstream_audio_output(session_id)
+            if event_type == "session.output_audio.delta":
+                if not output_active:
+                    output_active = True
+                    await flush_user()
+                try:
+                    pcm = base64.b64decode(event.get("delta") or "")
+                except (ValueError, binascii.Error):
+                    continue
+                converted = await converter.convert(pcm16_to_f32(pcm))
+                await send_client(
+                    assistant_audio_event(
+                        audio_b64=base64.b64encode(f32_to_pcm16(converted)).decode()
+                    )
+                )
+            elif event_type in {
+                "session.output_audio.done",
+                "session.output_audio.stopped",
+            }:
+                output_active = False
+                await flush_user()
+                await flush_assistant()
+                flushed = await converter.flush()
+                if flushed:
+                    await send_client(
+                        assistant_audio_event(
+                            audio_b64=base64.b64encode(f32_to_pcm16(flushed)).decode()
+                        )
+                    )
+                await send_client(assistant_audio_event(done=True))
+            elif event_type == "session.output_transcript.delta":
+                if not output_active:
+                    output_active = True
+                    await flush_user()
+                delta = str(event.get("delta") or "")
+                if delta:
+                    assistant_transcript += delta
+                    await send_client(assistant_text_event(delta=delta, done=False))
+            elif event_type == "session.input_transcript.delta":
+                delta = str(event.get("delta") or "")
+                if delta:
+                    user_transcript += delta
+                    await send_client(
+                        user_text_event(text=user_transcript, delta=delta, done=False)
+                    )
+            elif event_type == "session.closed":
+                return
+            elif event_type == "error":
+                message = _extract_error_message(event)
+                await send_client(error_event(message, code="upstream_error"))
+            elif event_type in _LIVE_QUIET_EVENTS:
+                continue
+            else:
+                if event_type not in logged_types:
+                    logged_types.add(event_type)
+                    logger.info("live upstream event (unhandled): %s", event_type)
+    finally:
+        # クライアントへ送り切れなかった未確定の断片も履歴には残す。
+        try:
+            await flush_user(send=False)
+            await flush_assistant(send=False)
+        except Exception:
+            pass

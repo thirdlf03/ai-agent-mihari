@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, status
 
 from mihari_room.auth import verify_token, verify_ws_token
+from mihari_room.voice.live_upstream import OpenAILiveUpstream
 from mihari_room.voice.protocol import PROTOCOL_VERSION
 from mihari_room.voice.sessions import ConcurrentVoiceSessionError, VoiceSessionManager
 from mihari_room.voice.stream import UpstreamFactory, handle_voice_stream
@@ -105,6 +106,12 @@ def _default_upstream_factory_from_app(websocket: WebSocket) -> UpstreamFactory:
     config = manager.config
 
     def factory() -> RealtimeUpstream:
+        if config.voice_output_mode == "live_audio":
+            return OpenAILiveUpstream(
+                api_key=config.openai_api_key,
+                model=config.live_model,
+                voice=config.live_voice,
+            )
         return OpenAIRealtimeUpstream(
             api_key=config.openai_api_key,
             model=config.voice_realtime_model,

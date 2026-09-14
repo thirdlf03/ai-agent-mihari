@@ -172,6 +172,7 @@ private enum VoiceConversationCaptureTests {
                 micFactory: { VoiceConversationControllerTestsStubMic() },
                 jobCollaboration: VoiceConversationControllerTestsStubJobCollaboration(),
                 screenCapture: screenCapture,
+                pcmPlayer: VoiceConversationControllerTestsStubPCMPlayer(),
                 onJobSubmitted: nil,
                 checkMicPermission: { PermissionState(grant: .granted, detail: "test") },
                 requestMicPermission: { true }
