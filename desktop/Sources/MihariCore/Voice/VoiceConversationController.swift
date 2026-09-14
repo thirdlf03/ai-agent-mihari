@@ -546,6 +546,18 @@ public final class VoiceConversationController: ObservableObject {
             handleToolCall(name: name, arguments: arguments)
             return false
 
+        case .assistantToolActivity(let name, _, let status):
+            // room が実行したツールの通知。client では実行しない。
+            switch status {
+            case "failed":
+                appendSystem("みはり: \(name) に失敗")
+            case "running":
+                appendSystem("みはり: \(name) を実行中")
+            default:
+                appendSystem("みはり: \(name) を実行")
+            }
+            return false
+
         case .error(_, let message):
             appendSystem("エラー: \(message)")
             statusText = message

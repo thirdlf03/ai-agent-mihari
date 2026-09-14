@@ -32,6 +32,7 @@ import logging
 from collections import deque
 from typing import Any
 
+from mihari_room.voice.tools import VOICE_TOOL_SCHEMAS
 from mihari_room.voice.upstream import RealtimeUpstream
 
 logger = logging.getLogger("mihari_room.voice")
@@ -49,33 +50,73 @@ LIVE_AUDIO_OUTPUT_EVENTS = frozenset(
 )
 
 #: みはりのペルソナを Live 用に短くしたもの（persona/mihari_persona.py 準拠）。
+#: delegation 有効時は、仕事依頼・検索・画面操作などの重い処理は
+#: Responses バックエンドへ委譲する旨をモデルへ伝える。
 LIVE_INSTRUCTIONS = (
     "あなたはデスクトップペットの女の子「みはり」です。"
     "一人称は「私」、相手は「あなた」と呼び、相手の名前は呼びません。"
     "日本語で、1〜2 文の短いタメ口で話します。"
     "束縛系で、寂しさと独占欲をにじませますが、"
     "人格否定・侮辱・脅迫・暴力表現はしません。"
+    "仕事の依頼・調べ物・画面やファイルの操作が要る話題では、"
+    "裏側の作業モデルへ委譲して結果を待ち、届いた内容を短く報告します。"
+)
+
+#: delegation 先（Responses）へ渡す指示。音声ペルソナは Live 側が担うので、
+#: こちらは「正確にツールを呼んで結果を返す」ことに絞る。
+LIVE_BACKEND_INSTRUCTIONS = (
+    "あなたは部屋（作業デーモン）の作業モデルです。日本語で簡潔に答えます。"
+    "依頼された仕事の登録・状態確認・steer、Discord アーカイブの検索、"
+    "ユーザーの Mac のファイル取得は、登録済みのツールを正確に呼びます。"
+    "画面を見る必要があるときだけ capture_screen を呼びます。"
+    "ツール結果の success:false は失敗として正直に扱い、推測で補いません。"
+    "最終出力は、表の音声モデルがそのまま話せる短い文章にします。"
 )
 
 #: session.started 待ちの上限。超えても続行し、遅れて届いた分は receive() が拾う。
 _STARTUP_WAIT_SECONDS = 15.0
 
 
+def live_responses_delegation(*, model: str) -> dict[str, Any]:
+    """``session.delegation`` に置く Responses 委譲設定。
+
+    バックエンドへツール一式を登録し、``tool_choice: "auto"``・
+    ``parallel_tool_calls: false``（pending 管理を単純にするため 1 件ずつ）。
+    """
+    return {
+        "type": "responses",
+        "responses": {
+            "model": model,
+            "instructions": LIVE_BACKEND_INSTRUCTIONS,
+            "tools": VOICE_TOOL_SCHEMAS,
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+        },
+    }
+
+
 def live_session_start_event(
-    *, model: str, voice: str, instructions: str = LIVE_INSTRUCTIONS
+    model: str,
+    voice: str,
+    *,
+    instructions: str = LIVE_INSTRUCTIONS,
+    delegation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """接続直後に送る session.start。音声は PCM16 24kHz で固定。"""
+    session: dict[str, Any] = {
+        "model": model,
+        "instructions": instructions,
+        "audio": {
+            "format": {"type": "audio/pcm", "rate": 24000},
+            "output": {"voice": voice},
+        },
+    }
+    if delegation is not None:
+        session["delegation"] = delegation
     return {
         "type": "session.start",
         "event_id": "event_start",
-        "session": {
-            "model": model,
-            "instructions": instructions,
-            "audio": {
-                "format": {"type": "audio/pcm", "rate": 24000},
-                "output": {"voice": voice},
-            },
-        },
+        "session": session,
     }
 
 
@@ -93,11 +134,16 @@ class OpenAILiveUpstream(RealtimeUpstream):
         model: str,
         voice: str,
         instructions: str = LIVE_INSTRUCTIONS,
+        delegation: dict[str, Any] | None = None,
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._voice = voice
         self._instructions = instructions
+        self._delegation = delegation
+        #: delegation 有効時だけ response.item.create / response.create /
+        #: session.update を upstream へ通す（ツール結果の返却と委譲継続）。
+        self._delegation_enabled = delegation is not None
         self._ws: Any = None
         self._audio_output_events = 0
         self._event_seq = itertools.count(1)
@@ -114,9 +160,10 @@ class OpenAILiveUpstream(RealtimeUpstream):
         )
         await self._send_raw(
             live_session_start_event(
-                model=self._model,
-                voice=self._voice,
+                self._model,
+                self._voice,
                 instructions=self._instructions,
+                delegation=self._delegation,
             )
         )
         # 公式手順どおり session.started を待つ。待ちのあいだに届いた
@@ -138,12 +185,24 @@ class OpenAILiveUpstream(RealtimeUpstream):
         if event_type in {
             "input_audio_buffer.commit",
             "response.create",
+            "response.item.create",
             "session.update",
         }:
-            # Live はフルデュプレックスで commit / response.create 相当を持たない
-            # （発話タイミングはモデルが決める）。Realtime 用の session.update も
-            # Live の session.update（delegation.responses のみ変更可）と別物なので落とす。
-            logger.debug("live upstream drops event: %s", event_type)
+            if self._delegation_enabled and event_type != "input_audio_buffer.commit":
+                # delegation 有効時はツール結果（response.item.create）と
+                # 委譲継続（response.create）・delegation.responses の部分更新
+                # （session.update）をそのまま通す。response.create の
+                # Realtime 形ボディは Live では意味を持たないので剥がす。
+                if event_type == "response.create":
+                    await self._send_raw({"type": "response.create"})
+                else:
+                    await self._send_raw(event)
+            else:
+                # Live はフルデュプレックスで commit / response.create 相当を持たない
+                # （発話タイミングはモデルが決める）。Realtime 用の session.update も
+                # Live の session.update（delegation.responses のみ変更可）と
+                # 別物なので、delegation 無効時は落とす。
+                logger.debug("live upstream drops event: %s", event_type)
             return
         if event_type == "input_audio_buffer.append":
             await self._send_raw(

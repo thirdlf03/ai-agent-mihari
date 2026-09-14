@@ -21,7 +21,8 @@ public final class AlertMacControlPermissionDecider: MacControlPermissionDecidin
         alert.messageText = "「\(title)」が Mac の操作を求めています"
         alert.informativeText = [
             request.note,
-            "許可すると、この依頼専用に本体の撮影・クリック・入力などの操作を実行します。"
+            "許可すると、この依頼専用に本体の撮影・クリック・入力などの操作と、"
+                + "許可フォルダ内のファイル検索・参照・受け渡しの演出を実行します。"
                 + "依頼の中断・Mac のロック・アプリ終了で失効します。",
             "操作のたびに許可するわけではありません（依頼ごとに一度）。",
         ].joined(separator: "\n\n")

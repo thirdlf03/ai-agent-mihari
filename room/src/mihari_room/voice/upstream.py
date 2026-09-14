@@ -11,10 +11,32 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from mihari_room.voice.protocol import DEMO_TOOL
+from mihari_room.voice.tools import VOICE_TOOL_SCHEMAS
 
 logger = logging.getLogger("mihari_room.voice")
 
 REALTIME_WS_BASE = "wss://api.openai.com/v1/realtime"
+
+#: テキストモード（Realtime）のセッション指示。みはりペルソナ + ツール運用ルール。
+REALTIME_INSTRUCTIONS = (
+    "あなたはデスクトップペットの女の子「みはり」。"
+    "部屋（作業デーモン）の受付として、依頼主と日本語で会話する。\n\n"
+    "## 口調\n"
+    "- 一人称は「私」、相手は「あなた」と呼ぶ。相手の名前は呼ばない。\n"
+    "- 敬語ではなく短いタメ口。1〜2 文・30 文字程度の短いセリフで返す。\n"
+    "- 出力はテキストのみ。読み上げは別系統（VOICEVOX）が行うので、"
+    "読み方の指定や前置きは書かない。\n\n"
+    "## ツール\n"
+    "- 仕事を頼まれたら submit_job で部屋のキューへ登録し、"
+    "結果（job_id 等）を踏まえて短く報告する。\n"
+    "- 実行中の仕事への追加指示は steer_job、状態確認は "
+    "get_job_status / list_running_jobs を使う。\n"
+    "- 画面を見る必要があるときだけ capture_screen を使う。"
+    "撮影は client 側で行われ、画像は別メッセージで届く。\n"
+    "- Discord の過去ログを聞かれたら discord_*、"
+    "ユーザーの Mac のファイルは mac_* を使う。\n"
+    "- ツール結果が success:false なら失敗を隠さず、理由を短く伝える。"
+)
 
 #: モデル音声出力イベント。観測数 0 が「音声 OUT 課金なし」の目安。
 UPSTREAM_AUDIO_OUTPUT_EVENTS = frozenset(
@@ -51,28 +73,39 @@ class RealtimeUpstream(ABC):
         raise NotImplementedError
 
 
-def session_update_event(*, model: str) -> dict[str, Any]:
-    """テキスト出力のみ・手動ターン制御・入力音声の文字起こし有効。"""
-    return {
-        "type": "session.update",
-        "session": {
-            "type": "realtime",
-            "model": model,
-            "output_modalities": ["text"],
-            "tools": [DEMO_TOOL],
-            # GA の RealtimeSessionCreateRequest では音声入力の設定は audio.input 配下。
-            # トップレベルの turn_detection は beta 時代の形で、置いても無視されうる。
-            "audio": {
-                "input": {
-                    "format": {"type": "audio/pcm", "rate": 24000},
-                    # server VAD を切り、クライアントの commit でターンを確定する。
-                    "turn_detection": None,
-                    # ユーザー発話の文字起こし。user.text 中継と履歴に使う。
-                    "transcription": {"model": "gpt-4o-mini-transcribe"},
-                },
+def session_update_event(
+    model: str,
+    *,
+    tools: list[dict[str, Any]] | None = None,
+    instructions: str | None = None,
+) -> dict[str, Any]:
+    """テキスト出力のみ・手動ターン制御・入力音声の文字起こし有効。
+
+    ``tools`` 指定時は ``tool_choice: "auto"`` を付ける（省略時は接続検証用の
+    ``DEMO_TOOL`` のみ、tool_choice なし）。
+    """
+    session: dict[str, Any] = {
+        "type": "realtime",
+        "model": model,
+        "output_modalities": ["text"],
+        "tools": list(tools) if tools is not None else [DEMO_TOOL],
+        # GA の RealtimeSessionCreateRequest では音声入力の設定は audio.input 配下。
+        # トップレベルの turn_detection は beta 時代の形で、置いても無視されうる。
+        "audio": {
+            "input": {
+                "format": {"type": "audio/pcm", "rate": 24000},
+                # server VAD を切り、クライアントの commit でターンを確定する。
+                "turn_detection": None,
+                # ユーザー発話の文字起こし。user.text 中継と履歴に使う。
+                "transcription": {"model": "gpt-4o-mini-transcribe"},
             },
         },
     }
+    if tools:
+        session["tool_choice"] = "auto"
+    if instructions is not None:
+        session["instructions"] = instructions
+    return {"type": "session.update", "session": session}
 
 
 def response_create_event() -> dict[str, Any]:
@@ -100,7 +133,13 @@ class OpenAIRealtimeUpstream(RealtimeUpstream):
             additional_headers={"Authorization": f"Bearer {self._api_key}"},
             open_timeout=30,
         )
-        await self.send(session_update_event(model=self._model))
+        await self.send(
+            session_update_event(
+                self._model,
+                tools=VOICE_TOOL_SCHEMAS,
+                instructions=REALTIME_INSTRUCTIONS,
+            )
+        )
 
     async def send(self, event: dict[str, Any]) -> None:
         if self._ws is None:
@@ -148,7 +187,13 @@ class FakeRealtimeUpstream(RealtimeUpstream):
         self._connected = True
         self._closed = False
         self._queue = asyncio.Queue()
-        await self.send(session_update_event(model="gpt-realtime-2.1-mini"))
+        await self.send(
+            session_update_event(
+                "gpt-realtime-2.1-mini",
+                tools=VOICE_TOOL_SCHEMAS,
+                instructions=REALTIME_INSTRUCTIONS,
+            )
+        )
         await self._queue.put({"type": "session.created", "session": {"model": "fake"}})
 
     async def send(self, event: dict[str, Any]) -> None:
@@ -164,8 +209,10 @@ class FakeRealtimeUpstream(RealtimeUpstream):
                 raw = base64.b64decode(audio, validate=True)
             except Exception:
                 raw = b""
-            if raw == b"tool":
-                await self._emit_tool_call("audio-tool")
+            if raw == b"tool" or raw.startswith(b"tool:"):
+                # b"tool" → list_running_jobs、b"tool:<name>" → 指定ツール。
+                name = raw.partition(b":")[2].decode() or "list_running_jobs"
+                await self._emit_tool_call(name, "{}", "call_test_1")
             elif raw == b"audio-out-probe":
                 await self._emit_upstream_audio_output_probe()
                 await self._emit_text("text-only")
@@ -189,7 +236,16 @@ class FakeRealtimeUpstream(RealtimeUpstream):
                     if part.get("type") == "input_text":
                         prompt = str(part.get("text") or "")
                 if "__tool__" in prompt:
-                    await self._emit_tool_call("image-tool")
+                    # "__tool__" → capture_screen、"__tool__:<name>" → 指定ツール。
+                    name = "capture_screen"
+                    if "__tool__:" in prompt:
+                        name = prompt.split("__tool__:", 1)[1].strip() or "capture_screen"
+                    arguments = (
+                        json.dumps({"prompt": prompt}, ensure_ascii=False)
+                        if name == "capture_screen"
+                        else "{}"
+                    )
+                    await self._emit_tool_call(name, arguments, "call_test_2")
                 else:
                     await self._emit_text("saw-image")
             return
@@ -237,8 +293,9 @@ class FakeRealtimeUpstream(RealtimeUpstream):
         for event_type in ("response.output_audio.delta", "response.output_audio.done"):
             await self._queue.put({"type": event_type, "delta": "probe"})
 
-    async def _emit_tool_call(self, phrase: str) -> None:
-        arguments = json.dumps({"phrase": phrase}, ensure_ascii=False)
+    async def _emit_tool_call(
+        self, name: str, arguments: str, call_id: str
+    ) -> None:
         await self._queue.put(
             {
                 "type": "response.done",
@@ -247,8 +304,8 @@ class FakeRealtimeUpstream(RealtimeUpstream):
                     "output": [
                         {
                             "type": "function_call",
-                            "name": "echo_phrase",
-                            "call_id": "call_test_1",
+                            "name": name,
+                            "call_id": call_id,
                             "arguments": arguments,
                         }
                     ],

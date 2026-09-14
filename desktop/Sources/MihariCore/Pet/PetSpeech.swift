@@ -61,6 +61,8 @@ struct PetSpeechLines: Codable, Sendable {
         case clingyEvidence
         /// メンヘラモードから戻ってきたとき。
         case returned
+        /// Mac 制御でファイルを手渡すとき。
+        case fileHandoff
 
         /// 同封セリフ側の同じ区分。名前は `lines.json` のキーと揃えてある。
         var bundled: BundledVoiceKind {
@@ -93,6 +95,7 @@ struct PetSpeechLines: Codable, Sendable {
             case .clingy3: return .clingy3
             case .clingyEvidence: return .clingyEvidence
             case .returned: return .returned
+            case .fileHandoff: return .fileHandoff
             }
         }
     }

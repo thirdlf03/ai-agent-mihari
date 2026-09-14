@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import time
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from mihari_room.queue.file_queue import FileJobQueue
 from mihari_room.store.file_store import FileJobStore
 from mihari_room.voice.protocol import (
     EVENT_ASSISTANT_TEXT,
+    EVENT_ASSISTANT_TOOL_ACTIVITY,
     EVENT_ASSISTANT_TOOL_CALL,
     EVENT_HISTORY_SYNC,
     EVENT_SESSION_CLOSED,
@@ -206,6 +208,7 @@ def test_websocket_image_input_path(tmp_path: Path) -> None:
 
 
 def test_websocket_tool_call_via_audio(tmp_path: Path) -> None:
+    """room 実行ツールは room で処理し、tool_activity + fco + response.create を返す。"""
     fake = FakeRealtimeUpstream()
     client = _make_app(tmp_path, upstream_factory=lambda: fake)
     session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
@@ -215,20 +218,45 @@ def test_websocket_tool_call_via_audio(tmp_path: Path) -> None:
     ) as ws:
         ws.receive_json()
         ws.send_json({"type": "input.audio", "audio_base64": tool_audio})
-        tool = None
+        activity = None
+        client_frames: list[dict] = []
         for _ in range(10):
             frame = ws.receive_json()
-            if frame["type"] == EVENT_ASSISTANT_TOOL_CALL:
-                tool = frame
+            client_frames.append(frame)
+            if frame["type"] == EVENT_ASSISTANT_TOOL_ACTIVITY:
+                activity = frame
                 break
-        assert tool is not None
-        assert tool["name"] == "echo_phrase"
-        assert tool["call_id"] == "call_test_1"
-        assert "audio-tool" in tool["arguments"]
+        assert activity is not None
+        assert activity["name"] == "list_running_jobs"
+        assert activity["call_id"] == "call_test_1"
+        assert activity["status"] == "done"
+        # room で実行したツールは client へ tool_call を送らない（二重実行防止）。
+        assert not any(
+            f["type"] == EVENT_ASSISTANT_TOOL_CALL for f in client_frames
+        )
         _disconnect_and_idle(ws, client, session_id)
+    sent = fake.sent_events()
+    fco = [
+        e for e in sent
+        if e.get("type") == "conversation.item.create"
+        and (e.get("item") or {}).get("type") == "function_call_output"
+    ]
+    assert len(fco) == 1
+    assert fco[0]["item"]["call_id"] == "call_test_1"
+    output = json.loads(fco[0]["item"]["output"])
+    assert output["success"] is True
+    assert output["jobs"] == []
+    # fco のあとに response.create がちょうど 1 回続く（ターン継続）。
+    fco_index = sent.index(fco[0])
+    creates_after = [
+        e for e in sent[fco_index:] if e.get("type") == "response.create"
+    ]
+    assert len(creates_after) == 1
 
 
 def test_websocket_tool_call_via_image(tmp_path: Path) -> None:
+    """client 実行ツール（capture_screen）は tool_call で desktop へ渡り、
+    返ってきた input.image が fco + 画像メッセージ + response.create になる。"""
     fake = FakeRealtimeUpstream()
     client = _make_app(tmp_path, upstream_factory=lambda: fake)
     session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
@@ -251,8 +279,46 @@ def test_websocket_tool_call_via_image(tmp_path: Path) -> None:
                 tool = frame
                 break
         assert tool is not None
-        assert "image-tool" in tool["arguments"]
+        assert tool["name"] == "capture_screen"
+        assert tool["call_id"] == "call_test_2"
+        assert "__tool__ please" in tool["arguments"]
+        # desktop が撮って返す input.image → pending 解決で fco + 画像 + response.create。
+        ws.send_json(
+            {
+                "type": "input.image",
+                "image_base64": PNG_1X1,
+                "media_type": "image/png",
+                "prompt": "見て",
+            }
+        )
+        # capture 結果の画像は会話コンテキストへ入り、fake は saw-image を返す。
+        for _ in range(10):
+            frame = ws.receive_json()
+            if frame["type"] == EVENT_ASSISTANT_TEXT and frame.get("done"):
+                assert frame["text"] == "saw-image"
+                break
         _disconnect_and_idle(ws, client, session_id)
+    sent = fake.sent_events()
+    creates_with_image = [
+        e for e in sent
+        if e.get("type") == "conversation.item.create"
+        and (e.get("item") or {}).get("type") == "message"
+    ]
+    # 1 枚目（__tool__）と 2 枚目（capture 結果）の 2 メッセージ。
+    assert len(creates_with_image) == 2
+    fco = [
+        e for e in sent
+        if e.get("type") == "conversation.item.create"
+        and (e.get("item") or {}).get("type") == "function_call_output"
+    ]
+    assert len(fco) == 1
+    assert fco[0]["item"]["call_id"] == "call_test_2"
+    assert json.loads(fco[0]["item"]["output"])["success"] is True
+    fco_index = sent.index(fco[0])
+    creates_after = [
+        e for e in sent[fco_index:] if e.get("type") == "response.create"
+    ]
+    assert len(creates_after) == 1
 
 
 def test_capabilities_advertises_voice(tmp_path: Path) -> None:

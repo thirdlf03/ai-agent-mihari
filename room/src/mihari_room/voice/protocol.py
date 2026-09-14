@@ -50,6 +50,9 @@ EVENT_ASSISTANT_TEXT = "assistant.text"
 #: live_audio モードの音声出力。PCM16 24kHz mono の base64（input.audio と対称）。
 EVENT_ASSISTANT_AUDIO = "assistant.audio"
 EVENT_ASSISTANT_TOOL_CALL = "assistant.tool_call"
+#: room 側で実行したツールの結果通知（status: "running" / "done" / "failed"）。
+#: client 実行のツール（capture_screen）は従来どおり assistant.tool_call で届く。
+EVENT_ASSISTANT_TOOL_ACTIVITY = "assistant.tool_activity"
 EVENT_USER_TEXT = "user.text"
 EVENT_ERROR = "error"
 EVENT_SESSION_CLOSED = "session.closed"
@@ -100,6 +103,18 @@ def assistant_tool_call_event(*, name: str, call_id: str, arguments: str) -> dic
         name=name,
         call_id=call_id,
         arguments=arguments,
+    )
+
+
+def assistant_tool_activity_event(
+    *, name: str, call_id: str, status: str
+) -> dict[str, Any]:
+    """room 実行ツールの活動通知。tool_call と違い client は実行しない。"""
+    return client_event(
+        EVENT_ASSISTANT_TOOL_ACTIVITY,
+        name=name,
+        call_id=call_id,
+        status=status,
     )
 
 

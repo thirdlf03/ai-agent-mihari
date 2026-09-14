@@ -673,6 +673,9 @@ def test_mac_tools_schema_and_names(monkeypatch: pytest.MonkeyPatch) -> None:
         "mac_type_text",
         "mac_key",
         "mac_activate_app",
+        "mac_find_files",
+        "mac_fetch_file",
+        "mac_hand_off_file",
     )
     for name in tools.TOOL_NAMES:
         schema = tools._SCHEMAS[name]

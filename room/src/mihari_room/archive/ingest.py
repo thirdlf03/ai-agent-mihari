@@ -13,7 +13,7 @@ import dataclasses
 import datetime as dt
 import inspect
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -115,6 +115,20 @@ def _channel_accepts(channel_id: int, config: ArchiveConfig) -> bool:
     if not config.channel_ids:
         return True
     return channel_id in config.channel_ids
+
+
+def _target_scope(target: Any) -> tuple[str, int, int | None, str]:
+    """history 対象から (scope_key, channel_id, thread_id, name) を作る。
+
+    スレッド（parent 持ち）は ``thread:<id>``、親チャンネル ID は channel_id 側へ。
+    """
+    target_id = int(getattr(target, "id", 0) or 0)
+    name = str(getattr(target, "name", "") or "")
+    parent = getattr(target, "parent", None)
+    if parent is not None:
+        parent_id = int(getattr(parent, "id", 0) or 0)
+        return f"thread:{target_id}", parent_id, target_id, name
+    return f"channel:{target_id}", target_id, None, name
 
 
 class ArchiveIngester:
@@ -348,7 +362,189 @@ class ArchiveIngester:
                 continue
             targets.extend(getattr(forum, "threads", ()) or ())
             await _extend_archived(targets, forum)
-        return targets
+        # 公開/非公開/参加済みの列挙で同じスレッドが重なりうるので scope で落とす。
+        seen: set[str] = set()
+        unique: list[Any] = []
+        for target in targets:
+            scope_key = _target_scope(target)[0]
+            if scope_key in seen:
+                continue
+            seen.add(scope_key)
+            unique.append(target)
+        return unique
+
+    # ---------- backfill ----------
+
+    async def backfill_client(
+        self,
+        client: Any,
+        *,
+        progress: Callable[[dict[str, Any]], Any] | None = None,
+    ) -> int:
+        """``client.guilds`` 全件をバックフィルする。catchup の後に呼ぶ。"""
+        guilds = tuple(getattr(client, "guilds", ()) or ())
+        return await self.backfill_guilds(guilds, progress=progress)
+
+    async def backfill_guilds(
+        self,
+        guilds: Sequence[Any],
+        *,
+        progress: Callable[[dict[str, Any]], Any] | None = None,
+    ) -> int:
+        """ギルドごとに全スコープを最古まで遡る。戻り値は今回収録した件数。"""
+        if self._closed:
+            return 0
+        self._ensure_started()
+        total = 0
+        for guild in guilds:
+            try:
+                total += await self._backfill_guild(guild, progress=progress)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("アーカイブ backfill 失敗 guild=%s", getattr(guild, "id", "?"))
+        logger.info("アーカイブ backfill 完了: %d 件", total)
+        return total
+
+    async def _backfill_guild(
+        self,
+        guild: Any,
+        *,
+        progress: Callable[[dict[str, Any]], Any] | None = None,
+    ) -> int:
+        guild_id = int(getattr(guild, "id", 0) or 0)
+        inserted = 0
+        for target in await self._history_targets(guild):
+            scope_key, channel_id, thread_id, name = _target_scope(target)
+            result = await self._backfill_scope(
+                target,
+                guild_id=guild_id,
+                scope_key=scope_key,
+                channel_id=channel_id,
+                thread_id=thread_id,
+                name=name,
+            )
+            inserted += result.get("inserted", 0)
+            if progress is not None:
+                try:
+                    outcome = progress(result)
+                    if inspect.isawaitable(outcome):
+                        await outcome
+                except Exception:
+                    logger.debug("backfill progress コールバック失敗", exc_info=True)
+        return inserted
+
+    async def _backfill_scope(
+        self,
+        target: Any,
+        *,
+        guild_id: int,
+        scope_key: str,
+        channel_id: int,
+        thread_id: int | None,
+        name: str,
+    ) -> dict[str, Any]:
+        """1 スコープを最古まで遡る。ページごとに進捗を残すので中断しても続きから。"""
+        result = {
+            "scope_key": scope_key,
+            "channel_id": channel_id,
+            "thread_id": thread_id,
+            "name": name,
+            "inserted": 0,
+            "done": False,
+            "skipped": False,
+            "forbidden": False,
+        }
+        if self._db is None:
+            return result
+        db = self._db
+        state = db.backfill_state(scope_key)
+        if state is not None and state.get("backfill_done"):
+            result["done"] = True
+            result["skipped"] = True
+            return result
+        before: int | None = None
+        if state is not None and state.get("oldest_message_id"):
+            before = int(state["oldest_message_id"])
+        if before is None:
+            # progress 未登録でも、既存収録の最古 ID から再開できる。
+            before = db.oldest_message_id_for_scope(channel_id=channel_id, thread_id=thread_id)
+        history = getattr(target, "history", None)
+        if not callable(history):
+            result["done"] = True
+            result["skipped"] = True
+            return result
+        page_size = max(1, int(self._config.backfill_page_size))
+        interval = max(0.0, float(self._config.backfill_page_interval))
+
+        def _checkpoint(oldest: int | None, *, done: bool, label: str | None = None) -> None:
+            try:
+                db.update_backfill(
+                    scope_key,
+                    guild_id=guild_id,
+                    channel_id=channel_id,
+                    thread_id=thread_id,
+                    name=label if label is not None else name,
+                    oldest_message_id=oldest,
+                    done=done,
+                )
+            except Exception:
+                logger.exception("バックフィル進捗の記録に失敗: %s", scope_key)
+
+        while True:
+            page_min: int | None = None
+            count = 0
+            prev_before = before
+            try:
+                marker = SimpleNamespace(id=before) if before else None
+                async for message in history(
+                    limit=page_size, before=marker, oldest_first=False
+                ):
+                    count += 1
+                    message_id = int(getattr(message, "id", 0) or 0)
+                    if message_id and (page_min is None or message_id < page_min):
+                        page_min = message_id
+                    if not self._accepts(message):
+                        continue
+                    try:
+                        await self._ingest_message(message)
+                        result["inserted"] += 1
+                    except Exception:
+                        logger.exception(
+                            "バックフィル収録失敗 message=%s", getattr(message, "id", "?")
+                        )
+            except asyncio.CancelledError:
+                if page_min is not None:
+                    _checkpoint(page_min, done=False)
+                raise
+            except Exception as exc:
+                if page_min is not None:
+                    _checkpoint(page_min, done=False)
+                if _is_forbidden(exc):
+                    logger.info("バックフィル権限なし: %s", scope_key)
+                    _checkpoint(page_min, done=True, label=f"{name} (forbidden)")
+                    result["done"] = True
+                    result["forbidden"] = True
+                    return result
+                logger.warning("バックフィル history 失敗 %s: %s", scope_key, exc)
+                return result
+            if page_min is None:
+                # 空ページ = そのスコープの先頭まで着いた。
+                _checkpoint(prev_before, done=True)
+                result["done"] = True
+                break
+            before = page_min
+            stalled = prev_before is not None and page_min >= prev_before
+            done = stalled or count < page_size
+            _checkpoint(page_min, done=done)
+            if done:
+                result["done"] = True
+                break
+            await asyncio.sleep(interval)
+        logger.info(
+            "バックフィル scope 完了: %s name=%s +%d 件", scope_key, name, result["inserted"]
+        )
+        return result
 
     def _latest_for_target(self, target: Any) -> dt.datetime | None:
         if self._db is None:
@@ -620,21 +816,34 @@ def _is_forbidden(exc: BaseException) -> bool:
 
 
 async def _extend_archived(targets: list[Any], channel: Any) -> None:
+    """アーカイブ済みスレッドを全件列挙して targets に足す。
+
+    公開スレッドに加えて、``private_archived_threads`` 属性がある型や
+    ``archived_threads(private=...)`` を受け付ける型は非公開分も試す。
+    権限不足や未対応のシグネチャは静かに落とす。
+    """
+    calls: list[tuple[Any, dict[str, Any]]] = []
     archived = getattr(channel, "archived_threads", None)
-    if not callable(archived):
-        return
-    try:
-        result = archived(limit=100)
-        if inspect.isawaitable(result):
-            result = await result
-        async for thread in result:
-            targets.append(thread)
-    except TypeError:
-        return
-    except Exception as exc:
-        if _is_forbidden(exc):
-            return
-        logger.debug("archived_threads を取れない: %s", exc, exc_info=True)
+    if callable(archived):
+        calls.append((archived, {"limit": None}))
+        calls.append((archived, {"limit": None, "private": True, "joined": True}))
+        calls.append((archived, {"limit": None, "private": True}))
+    private = getattr(channel, "private_archived_threads", None)
+    if callable(private):
+        calls.append((private, {"limit": None}))
+    for func, kwargs in calls:
+        try:
+            result = func(**kwargs)
+            if inspect.isawaitable(result):
+                result = await result
+            async for thread in result:
+                targets.append(thread)
+        except TypeError:
+            continue
+        except Exception as exc:
+            if _is_forbidden(exc):
+                continue
+            logger.debug("archived_threads を取れない: %s", exc, exc_info=True)
 
 
 def _raw_attachments(raw: list[Any]) -> list[Any]:

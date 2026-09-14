@@ -37,6 +37,14 @@ public enum MacControlWire {
         case typeText = "type_text"
         case key
         case activateApp = "activate_app"
+        /// ローカルファイル検索（名前 / 本文）。
+        case findFiles = "find_files"
+        /// 許可フォルダ内のファイルを 1 つ読んで部屋へ取り込む。
+        case fetchFile = "fetch_file"
+        /// ファイルを Finder で見せつつ、ペットの「手渡し」演出を出す。
+        case handOffFile = "hand_off_file"
+        /// 知らない kind。実行せずに失敗を返す（誤って click などへ倒さない）。
+        case unsupported
     }
 
     public enum StateEvent: String, Sendable {
@@ -333,6 +341,7 @@ public enum MacControlIncomingFrame: Sendable {
             } else {
                 expected = nil
             }
+            let rawKind = wire.kind ?? ""
             return (
                 type,
                 .op(
@@ -340,7 +349,8 @@ public enum MacControlIncomingFrame: Sendable {
                         opID: wire.opId ?? "",
                         runID: wire.runId ?? "",
                         jobID: wire.jobId ?? "",
-                        kind: MacControlWire.OpKind(rawValue: wire.kind ?? "") ?? .click,
+                        kind: MacControlWire.OpKind(rawValue: rawKind) ?? .unsupported,
+                        rawKind: rawKind,
                         params: wire.params ?? [:],
                         expected: expected,
                         sentAt: wire.sentAt ?? ""
@@ -447,6 +457,9 @@ public struct MacControlOpFrame: Sendable {
     public let runID: String
     public let jobID: String
     public let kind: MacControlWire.OpKind
+    /// 線上で届いた kind の文字列。未知の kind（kind == .unsupported）でも
+    /// op.result でそのまま返せるよう原本を持つ。
+    public let rawKind: String
     public let params: [String: MacJSONValue]
     public let expected: MacExpectedLayout?
     public let sentAt: String
@@ -456,6 +469,7 @@ public struct MacControlOpFrame: Sendable {
         runID: String,
         jobID: String,
         kind: MacControlWire.OpKind,
+        rawKind: String? = nil,
         params: [String: MacJSONValue],
         expected: MacExpectedLayout?,
         sentAt: String
@@ -464,6 +478,7 @@ public struct MacControlOpFrame: Sendable {
         self.runID = runID
         self.jobID = jobID
         self.kind = kind
+        self.rawKind = rawKind ?? kind.rawValue
         self.params = params
         self.expected = expected
         self.sentAt = sentAt
@@ -486,6 +501,15 @@ public struct MacControlOpFrame: Sendable {
     public var appName: String? { params["app_name"]?.string() }
     public var button: String { params["button"]?.string() ?? "left" }
     public var modifiers: [String] { params["modifiers"]?.stringArray() ?? [] }
+
+    // ファイル系 op のパラメータ。
+    public var query: String? { params["query"]?.string() }
+    public var searchScope: String? { params["scope"]?.string() }
+    public var searchLimit: Int? { params["limit"]?.int() }
+    public var searchDirs: [String]? { params["dirs"]?.stringArray() }
+    public var filePath: String? { params["path"]?.string() }
+    public var maxBytes: Int? { params["max_bytes"]?.int() }
+    public var handOffLabel: String? { params["label"]?.string() }
 
     /// 操作座標を表に出せる点へ変換する。撮影の expected が要る。
     public func point(fromX: Int? = nil, fromY: Int? = nil, toX: Int? = nil, toY: Int? = nil) -> MacPoint? {
@@ -541,7 +565,8 @@ public enum MacControlOutgoing {
             "type": MacControlWire.FrameType.opResult.rawValue,
             "op_id": op.opID,
             "run_id": op.runID,
-            "kind": op.kind.rawValue,
+            // 未知の kind が来ても room が送った文字列をそのまま返す（.unsupported に潰さない）。
+            "kind": op.rawKind,
         ]
         switch result {
         case .success(let value):

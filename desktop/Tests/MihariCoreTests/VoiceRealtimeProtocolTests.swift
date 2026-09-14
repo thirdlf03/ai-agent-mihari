@@ -132,6 +132,40 @@ struct VoiceRealtimeProtocolTests {
         #expect(message?.text == "ツール呼び出し: echo_phrase")
     }
 
+    @Test("assistant.tool_activity を name / call_id / status 付きで読む")
+    func parsesAssistantToolActivity() {
+        let json = """
+            {"type":"assistant.tool_activity","name":"submit_job","call_id":"c1","status":"done"}
+            """
+        let frame = VoiceIncomingFrame.parse(data: Data(json.utf8))
+        #expect(
+            frame
+                == .assistantToolActivity(
+                    name: "submit_job",
+                    callID: "c1",
+                    status: "done"
+                )
+        )
+    }
+
+    @Test("assistant.tool_activity の status は running / failed も読める")
+    func parsesAssistantToolActivityStatuses() {
+        for status in ["running", "failed"] {
+            let json = """
+                {"type":"assistant.tool_activity","name":"get_job_status","call_id":"c2","status":"\(status)"}
+                """
+            let frame = VoiceIncomingFrame.parse(data: Data(json.utf8))
+            #expect(
+                frame
+                    == .assistantToolActivity(
+                        name: "get_job_status",
+                        callID: "c2",
+                        status: status
+                    )
+            )
+        }
+    }
+
     @Test("assistant.tool_call を name / call_id / arguments 付きで読む")
     func parsesAssistantToolCall() {
         let json = """

@@ -40,6 +40,8 @@ Hermes の Discord Gateway は起動しない。Forum・タグ・ペット HTTP 
 | `MIHARI_ROOM_PYTHON` | mihari-room を動かす Python（systemd の ExecStart 用） |
 | `MIHARI_PREVIEW_BASE_URL` | 静的プレビューの公開ホスト名。API ホストとは別にする（推奨） |
 | `MIHARI_ARCHIVE_CHANNEL_IDS` | 任意。絞るときだけチャンネル ID をカンマ区切り。空なら Bot が見えるチャンネル全部を収録 |
+| `MIHARI_ARCHIVE_BACKFILL` | 任意。`0` で全履歴バックフィルを無効化（既定 ON。catchup 後に全チャンネルを最古まで遡る。再開点は `channel_progress` テーブル） |
+| `MIHARI_ARCHIVE_BACKFILL_PAGE_SIZE` / `MIHARI_ARCHIVE_BACKFILL_INTERVAL` | 任意。バックフィルの 1 ページ件数（既定 1000）とページ間隔秒（既定 0.3） |
 | `MIHARI_POPPLER_BIN` / `MIHARI_TESSERACT_BIN` | 任意。Poppler（pdftoppm）と Tesseract のパス。標準パスに無いときだけ |
 
 ## デプロイ

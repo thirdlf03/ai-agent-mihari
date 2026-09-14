@@ -3,8 +3,10 @@
 - ``search --query ...`` … 全文検索（キーワード・日付・チャンネルで絞れる）
 - ``context --message-id ...`` … メッセージと前後の文脈
 - ``export --job-id ... --message-id ...`` … 添付を jobs/<id>/research/downloads へ
+- ``status`` … バックフィル進捗（channel_progress）を表示
+- ``backfill`` … REST で全チャンネル全履歴を遡って収録（``DISCORD_BOT_TOKEN`` が要る）
 
-トークンやチャンネル許可リストは要らない。root だけあれば読める。
+search / context / export / status はトークン不要。root だけあれば読める。
 """
 
 from __future__ import annotations
@@ -14,7 +16,9 @@ import asyncio
 import dataclasses
 import datetime as dt
 import json
+import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from mihari_room.archive.config import ArchiveConfig, load_archive_config
@@ -261,6 +265,137 @@ async def cmd_export(args: argparse.Namespace, config: ArchiveConfig) -> dict[st
     }
 
 
+def cmd_status(args: argparse.Namespace, db: ArchiveDatabase) -> dict[str, Any]:
+    """channel_progress の全行を出す。done=完了、それ以外は再開待ち。"""
+    scopes = db.list_backfill_status()
+    done = sum(1 for scope in scopes if scope["backfill_done"])
+    return {
+        "command": "status",
+        "total_scopes": len(scopes),
+        "done_scopes": done,
+        "pending_scopes": len(scopes) - done,
+        "scopes": scopes,
+    }
+
+
+def _rest_guild_shim(guild: Any, channels: Any, active_threads: Any) -> Any:
+    """REST で取れた Guild を ``_history_targets`` が読める形に包む。
+
+    各チャンネルは実チャンネルの ``history`` / ``archived_threads`` を持つ
+    ``SimpleNamespace``。スレッドも同様に包むが ``parent`` は残す
+    （``thread:<id>`` の scope_key を Gateway 経路と揃えるため）。
+    ``message.channel`` は実チャンネルなので ``_classify_channel`` はそのまま動く。
+    """
+    import discord
+
+    by_parent: dict[int, list[Any]] = {}
+    for thread in active_threads or ():
+        parent_id = int(getattr(thread, "parent_id", 0) or 0)
+        by_parent.setdefault(parent_id, []).append(thread)
+
+    def _wrap_thread(thread: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=int(thread.id),
+            name=str(getattr(thread, "name", "") or ""),
+            threads=[],
+            archived_threads=None,
+            private_archived_threads=None,
+            history=thread.history,
+            parent=SimpleNamespace(id=int(getattr(thread, "parent_id", 0) or 0)),
+        )
+
+    def _wrap_channel(channel: Any) -> SimpleNamespace:
+        channel_id = int(channel.id)
+        return SimpleNamespace(
+            id=channel_id,
+            name=str(getattr(channel, "name", "") or ""),
+            threads=[_wrap_thread(t) for t in by_parent.get(channel_id, [])],
+            archived_threads=getattr(channel, "archived_threads", None),
+            private_archived_threads=getattr(channel, "private_archived_threads", None),
+            history=channel.history,
+            parent=None,
+        )
+
+    text_channels: list[Any] = []
+    forums: list[Any] = []
+    for channel in channels or ():
+        if isinstance(channel, discord.ForumChannel):
+            forums.append(_wrap_channel(channel))
+        elif isinstance(channel, discord.TextChannel):
+            text_channels.append(_wrap_channel(channel))
+    return SimpleNamespace(
+        id=int(getattr(guild, "id", 0) or 0),
+        name=str(getattr(guild, "name", "") or ""),
+        text_channels=text_channels,
+        forums=forums,
+    )
+
+
+async def cmd_backfill(args: argparse.Namespace, config: ArchiveConfig) -> dict[str, Any]:
+    """Gateway を張らず REST だけで全ギルドの全履歴を遡る。
+
+    ``client.login()`` で認証だけ済ませ、``fetch_guilds`` → ``fetch_guild`` →
+    ``fetch_channels`` + ``active_threads`` で列挙する。途中で止まっても
+    channel_progress に再開点が残るので、もう一度叩けば続きから進む。
+    """
+    token = (os.environ.get("DISCORD_BOT_TOKEN") or "").strip()
+    if not token:
+        raise CliError("backfill には DISCORD_BOT_TOKEN が要る（REST で履歴を辿る）")
+    import discord
+
+    from mihari_room.archive.ingest import ArchiveIngester
+
+    intents = discord.Intents.default()
+    intents.guilds = True
+    intents.message_content = True  # デーモンと同じ。無いと本文が空で返る。
+    client = discord.Client(intents=intents)
+    ingester = ArchiveIngester(config)
+    total = 0
+    guild_count = 0
+    try:
+        try:
+            await client.login(token)
+        except discord.DiscordException as exc:
+            raise CliError(f"Discord ログインに失敗: {exc}") from exc
+        shims: list[Any] = []
+        try:
+            async for partial in client.fetch_guilds():
+                guild = await client.fetch_guild(partial.id)
+                channels = await guild.fetch_channels()
+                try:
+                    active = await guild.active_threads()
+                except discord.DiscordException:
+                    active = []
+                shims.append(_rest_guild_shim(guild, channels, active))
+        except discord.DiscordException as exc:
+            raise CliError(f"Discord ギルド列挙に失敗: {exc}") from exc
+        guild_count = len(shims)
+        print(f"[backfill] 対象ギルド: {guild_count}")
+
+        def _print_scope(result: dict[str, Any]) -> None:
+            if result.get("forbidden"):
+                state = "権限なし skip"
+            elif result.get("skipped"):
+                state = "済み skip"
+            else:
+                state = "done" if result.get("done") else "中断（次回再開）"
+            scope = f"{result['scope_key']} {result['name']}"
+            print(f"[backfill] {scope}: {state} +{result['inserted']}")
+
+        total = await ingester.backfill_guilds(shims, progress=_print_scope)
+    finally:
+        await ingester.aclose()
+        try:
+            await client.close()
+        except Exception:
+            pass
+    return {
+        "command": "backfill",
+        "guilds": guild_count,
+        "inserted": total,
+    }
+
+
 # ---------- 組み立て ----------
 
 
@@ -308,6 +443,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export.set_defaults(handler=None)  # async なので別経路
 
+    status = _add("status", "バックフィル進捗（scope ごとの完了/再開点）")
+    status.set_defaults(handler=lambda args, db: cmd_status(args, db))
+
+    backfill = _add(
+        "backfill",
+        "全ギルド全チャンネルの履歴を遡って収録（DISCORD_BOT_TOKEN 必須・再開可能）",
+    )
+    backfill.set_defaults(handler=None)  # async + トークン要。別経路
+
     return parser
 
 
@@ -321,6 +465,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "export":
             payload = asyncio.run(cmd_export(args, config))
+        elif args.command == "backfill":
+            payload = asyncio.run(cmd_backfill(args, config))
         else:
             with _open_db(config.root) as db:
                 payload = args.handler(args, db)

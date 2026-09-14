@@ -11,11 +11,14 @@ Mac へ送る。hub が許可・端末・画面構成・操作 ID を検証す�
 
 from __future__ import annotations
 
+import base64
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from mihari_room.archive.pathutil import ensure_contained, sanitize_filename
 from mihari_room.mac_control.errors import MacControlError
 from mihari_room.mac_control.hub import MacControlHub
 
@@ -31,6 +34,9 @@ TOOL_NAMES = (
     "mac_type_text",
     "mac_key",
     "mac_activate_app",
+    "mac_find_files",
+    "mac_fetch_file",
+    "mac_hand_off_file",
 )
 
 #: 座標操作の共通説明。ツールの説明に載せる。
@@ -76,6 +82,24 @@ _INTENT = {
         "例: {'key': 'return'}、{'key': 'a', 'modifiers': ['command']}。"
     ),
     "mac_activate_app": ("アプリを前面に切り替える（bundle_id か app_name）。"),
+    "mac_find_files": (
+        "この依頼を許可した Mac のローカルファイルを探す（撮影・クリックと同じ許可が要る）。"
+        "探せるのは Mac 側で許可されたフォルダ（既定: Desktop / Documents / Downloads、"
+        "MIHARI_MAC_SEARCH_DIRS で変更可）の内側だけ。scope=name はファイル名の部分一致、"
+        "scope=content は本文の検索（Mac の Spotlight 経由）。返る files の path は"
+        "mac_fetch_file / mac_hand_off_file にそのまま渡せる。"
+    ),
+    "mac_fetch_file": (
+        "mac_find_files で見つけたファイル（または許可フォルダ内のパス）の中身を"
+        "このジョブの research/downloads/ へ取り込む。大きいファイルは先頭"
+        "max_bytes（既定 8MB、上限 16MB）だけ読んで truncated=true で返るので、"
+        "全文が要るなら max_bytes を上げて呼ぶ。"
+    ),
+    "mac_hand_off_file": (
+        "許可フォルダ内のファイルを「みはりちゃんが手渡す」演出でユーザーへ見せる。"
+        "ペットが差し出すポーズ + カットインでファイル名を出し、Finder でその場所を開く。"
+        "ファイルの中身は部屋へ送られない（取り込むときは mac_fetch_file）。"
+    ),
 }
 
 
@@ -275,6 +299,88 @@ _SCHEMAS: dict[str, dict[str, Any]] = {
             ),
         },
     },
+    "mac_find_files": {
+        "type": "function",
+        "function": {
+            "name": "mac_find_files",
+            "description": _INTENT["mac_find_files"],
+            "parameters": _params(
+                {
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "探す文字列（1〜200 文字）。",
+                        },
+                        "scope": {
+                            "type": "string",
+                            "enum": ["name", "content"],
+                            "default": "name",
+                            "description": "name=ファイル名の部分一致 / content=本文検索。",
+                        },
+                        "dirs": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "探すフォルダの絞り込み（許可フォルダ内・8 件まで）。"
+                            "省略時は許可フォルダ全部。",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "default": 10,
+                            "description": "返す件数の上限（1〜50）。新しい順。",
+                        },
+                    },
+                    "required": ["query"],
+                }
+            ),
+        },
+    },
+    "mac_fetch_file": {
+        "type": "function",
+        "function": {
+            "name": "mac_fetch_file",
+            "description": _INTENT["mac_fetch_file"],
+            "parameters": _params(
+                {
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "取り込むファイルの Mac 上のパス"
+                            "（mac_find_files の結果の path）。",
+                        },
+                        "max_bytes": {
+                            "type": "integer",
+                            "default": 8388608,
+                            "description": "読む上限バイト数（1〜16777216）。",
+                        },
+                    },
+                    "required": ["path"],
+                }
+            ),
+        },
+    },
+    "mac_hand_off_file": {
+        "type": "function",
+        "function": {
+            "name": "mac_hand_off_file",
+            "description": _INTENT["mac_hand_off_file"],
+            "parameters": _params(
+                {
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "手渡すファイルの Mac 上のパス"
+                            "（mac_find_files の結果の path）。",
+                        },
+                        "label": {
+                            "type": "string",
+                            "description": "カットインに出す表示名（省略時はファイル名）。",
+                        },
+                    },
+                    "required": ["path"],
+                }
+            ),
+        },
+    },
 }
 
 
@@ -339,6 +445,151 @@ def mac_activate_app_impl(hub: MacControlHub, job: Any, **kwargs: Any) -> str:
     return _operate(hub, job, "activate_app", kwargs)
 
 
+def mac_find_files_impl(hub: MacControlHub, job: Any, **kwargs: Any) -> str:
+    """find_files を実行し、見つかったファイルを 1 行ずつ読める形に整えて返す。"""
+    outcome = _run_op(hub, job, "find_files", kwargs)
+    if isinstance(outcome, MacControlError):
+        return _json(outcome)
+    result = outcome.get("result") or {}
+    files = [item for item in (result.get("files") or []) if isinstance(item, dict)]
+    lines = [_file_line(item) for item in files]
+    return _json(
+        {
+            "success": True,
+            "op_id": outcome.get("op_id"),
+            "count": result.get("count", len(files)),
+            "files": files,
+            "lines": "\n".join(lines),
+        }
+    )
+
+
+def mac_fetch_file_impl(hub: MacControlHub, job: Any, **kwargs: Any) -> str:
+    """fetch_file を実行し、届いた中身を research/downloads/ へ保存して返す。"""
+    outcome = _run_op(hub, job, "fetch_file", kwargs)
+    if isinstance(outcome, MacControlError):
+        return _json(outcome)
+    result = outcome.get("result") or {}
+    raw = str(result.get("data_base64") or "")
+    if not raw:
+        return _json(MacControlError("execution_failed", "結果にファイル本体（data_base64）が無い"))
+    try:
+        data = base64.b64decode(raw, validate=True)
+    except (ValueError, TypeError):
+        return _json(MacControlError("execution_failed", "ファイル本体（base64）が壊れている"))
+    job_dir = getattr(job, "directory", None)
+    if job_dir is None:
+        return _json(MacControlError("unavailable", "job に保存先（directory）が無い"))
+    name = sanitize_filename(str(result.get("name") or "file"))
+    try:
+        saved = _save_download(Path(job_dir), name, data)
+    except (OSError, ValueError) as exc:
+        return _json(MacControlError("execution_failed", f"保存に失敗した: {exc}"))
+    return _json(
+        {
+            "success": True,
+            "op_id": outcome.get("op_id"),
+            "saved_as": saved,
+            "name": name,
+            "size": result.get("size", len(data)),
+            "truncated": bool(result.get("truncated", False)),
+        }
+    )
+
+
+def mac_hand_off_file_impl(hub: MacControlHub, job: Any, **kwargs: Any) -> str:
+    """hand_off_file を実行し、演出が出たか（presented）をそのまま返す。"""
+    outcome = _run_op(hub, job, "hand_off_file", kwargs)
+    if isinstance(outcome, MacControlError):
+        return _json(outcome)
+    result = outcome.get("result") or {}
+    return _json(
+        {
+            "success": True,
+            "op_id": outcome.get("op_id"),
+            "revealed": bool(result.get("revealed", False)),
+            "presented": bool(result.get("presented", False)),
+        }
+    )
+
+
+def _run_op(
+    hub: MacControlHub, job: Any, kind: str, kwargs: dict[str, Any]
+) -> dict[str, Any] | MacControlError:
+    """_operate と同じ運びで op を実行し、成功時は outcome の辞書を返す。"""
+    params, device_id = _split_device(kwargs)
+    run_id = getattr(job, "_mac_run_id", None) or ""
+    if not run_id:
+        return MacControlError(
+            "unavailable",
+            "このツールは Hermes の実行からしか呼べない（run が紐付いていない）",
+        )
+    try:
+        return hub.run_operation(
+            job_id=job.id,
+            run_id=run_id,
+            kind=kind,
+            params=params,
+            device_id=device_id,
+        )
+    except MacControlError as error:
+        return error
+
+
+def _file_line(item: dict[str, Any]) -> str:
+    """`name — path (kind, サイズ)` の 1 行。kind・サイズは取れなければ省く。"""
+    name = str(item.get("name") or "")
+    path = str(item.get("path") or "")
+    extras: list[str] = []
+    kind = str(item.get("kind") or "").strip()
+    if kind:
+        extras.append(kind)
+    size = _format_size(item.get("size"))
+    if size:
+        extras.append(size)
+    suffix = f"（{', '.join(extras)}）" if extras else ""
+    return f"{name} — {path}{suffix}"
+
+
+def _format_size(value: Any) -> str:
+    """バイト数を読みやすい表記へ。数字でなければ空文字。"""
+    if isinstance(value, bool):
+        return ""
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        return ""
+    if size < 0:
+        return ""
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    if size < 1024 * 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    return f"{size / (1024 * 1024 * 1024):.1f} GB"
+
+
+def _save_download(job_dir: Path, name: str, data: bytes) -> str:
+    """research/downloads/ へ保存し、job からの相対パスを返す。同名は連番でずらす。"""
+    downloads = job_dir / "research" / "downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+    target = ensure_contained(downloads / name, job_dir)
+    if target.exists() or target.is_symlink():
+        stem, suffix = target.stem, target.suffix
+        for counter in range(2, 1000):
+            candidate = ensure_contained(downloads / f"{stem}-{counter}{suffix}", job_dir)
+            if not candidate.exists() and not candidate.is_symlink():
+                target = candidate
+                break
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    return target.relative_to(job_dir.resolve()).as_posix()
+
+
 def _operate(hub: MacControlHub, job: Any, kind: str, kwargs: dict[str, Any]) -> str:
     params, device_id = _split_device(kwargs)
     run_id = getattr(job, "_mac_run_id", None) or ""
@@ -384,6 +635,9 @@ def make_handlers(hub: MacControlHub, job: Any) -> dict[str, Callable[..., str]]
         "mac_type_text": _bind(mac_type_text_impl),
         "mac_key": _bind(mac_key_impl),
         "mac_activate_app": _bind(mac_activate_app_impl),
+        "mac_find_files": _bind(mac_find_files_impl),
+        "mac_fetch_file": _bind(mac_fetch_file_impl),
+        "mac_hand_off_file": _bind(mac_hand_off_file_impl),
     }
 
 

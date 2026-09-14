@@ -60,12 +60,24 @@ public final class MacControlCenter: ObservableObject {
         let task: Task<Void, Never>
     }
 
-    private let deps: Dependencies
+    /// 手渡し演出の差し込みで CGEventMacControlOperator を作り直せるよう var にする。
+    private var deps: Dependencies
     private var runTask: Task<Void, Never>?
     private var currentSocket: (any MacControlSocket)?
     private var activeOp: ActiveOp?
     /// 操作中の常設表示。アプリ本体から差し込む（未設定なら表示しない）。
     public var operationIndicator: (any MacControlOperationIndicating)?
+    /// 「手渡し」演出の出し手。`AppCoordinator` が `PetFileHandoffPresenter` を差し込む。
+    ///
+    /// 実 operator が `CGEventMacControlOperator` ならその `handoffPresenter` へ転送する。
+    /// テスト用の別実装には届かないが、その場合 hand_off_file は revealed だけを返す。
+    public var handoffPresenter: (any MacFileHandoffPresenting)? {
+        didSet {
+            guard var operator_ = deps.operator as? CGEventMacControlOperator else { return }
+            operator_.handoffPresenter = handoffPresenter
+            deps.operator = operator_
+        }
+    }
     /// 再接続の待ち秒数（成功するたび 1 秒に戻す）。
     private var backoffSeconds: TimeInterval = 1
     private var lockObserver: NSObjectProtocol?
@@ -243,6 +255,18 @@ public final class MacControlCenter: ObservableObject {
 
     /// 常設表示に出す短い説明。秘密（入力文そのまま）は載せない。
     private func describeForIndicator(_ op: MacControlOpFrame) -> String {
+        switch op.kind {
+        case .findFiles:
+            return "ファイルを探す「\(op.query ?? "")」"
+        case .fetchFile:
+            return "ファイルを取り込む: \(op.filePath ?? "")"
+        case .handOffFile:
+            return "ファイルを手渡す: \(op.handOffLabel ?? op.filePath ?? "")"
+        case .unsupported:
+            return "未対応の操作: \(op.rawKind)"
+        default:
+            break
+        }
         var parts = [op.kind.rawValue]
         if let displayID = op.displayID { parts.append("表示器 \(displayID)") }
         if let x = op.xPX, let y = op.yPX { parts.append("x=\(x) y=\(y)") }

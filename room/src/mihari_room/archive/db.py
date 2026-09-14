@@ -99,6 +99,18 @@ CREATE TABLE IF NOT EXISTS urls (
 );
 CREATE INDEX IF NOT EXISTS idx_urls_message ON urls(message_id);
 CREATE INDEX IF NOT EXISTS idx_urls_normalized ON urls(normalized_url);
+
+-- バックフィルの再開点。チャンネル/スレッドごとに「どこまで遡ったか」を持つ。
+CREATE TABLE IF NOT EXISTS channel_progress (
+    scope_key    TEXT PRIMARY KEY,
+    guild_id     INTEGER NOT NULL DEFAULT 0,
+    channel_id   INTEGER NOT NULL,
+    thread_id    INTEGER,
+    name         TEXT NOT NULL DEFAULT '',
+    oldest_message_id INTEGER,
+    backfill_done INTEGER NOT NULL DEFAULT 0,
+    updated_at   TEXT NOT NULL
+);
 """
 
 #: FTS5 が使える時だけ実行する。外部コンテンツ表で本文の二重持ちを避ける。
@@ -470,6 +482,111 @@ class ArchiveDatabase:
         if not row or not row[0]:
             return None
         return dt.datetime.fromisoformat(str(row[0]))
+
+    # ---------- backfill progress ----------
+
+    _PROGRESS_COLUMNS = (
+        "scope_key, guild_id, channel_id, thread_id, name, "
+        "oldest_message_id, backfill_done, updated_at"
+    )
+
+    @staticmethod
+    def _row_to_progress(row: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "scope_key": str(row[0]),
+            "guild_id": int(row[1]),
+            "channel_id": int(row[2]),
+            "thread_id": int(row[3]) if row[3] is not None else None,
+            "name": str(row[4]),
+            "oldest_message_id": int(row[5]) if row[5] is not None else None,
+            "backfill_done": bool(row[6]),
+            "updated_at": str(row[7]),
+        }
+
+    def backfill_state(self, scope_key: str) -> dict[str, Any] | None:
+        """scope（"channel:<id>" / "thread:<id>"）の進捗 1 行。無ければ None。"""
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT {self._PROGRESS_COLUMNS} FROM channel_progress WHERE scope_key = ?",
+                (scope_key,),
+            ).fetchone()
+        return self._row_to_progress(row) if row is not None else None
+
+    def update_backfill(
+        self,
+        scope_key: str,
+        *,
+        guild_id: int,
+        channel_id: int,
+        thread_id: int | None,
+        name: str,
+        oldest_message_id: int | None,
+        done: bool,
+    ) -> None:
+        """バックフィル進捗を UPSERT する。チャンクごとのチェックポイント用。"""
+        now = to_iso(dt.datetime.now(dt.UTC))
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO channel_progress
+                    (scope_key, guild_id, channel_id, thread_id, name,
+                     oldest_message_id, backfill_done, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scope_key) DO UPDATE SET
+                    guild_id = excluded.guild_id,
+                    channel_id = excluded.channel_id,
+                    thread_id = excluded.thread_id,
+                    name = excluded.name,
+                    oldest_message_id = excluded.oldest_message_id,
+                    backfill_done = excluded.backfill_done,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    scope_key,
+                    int(guild_id),
+                    int(channel_id),
+                    int(thread_id) if thread_id is not None else None,
+                    name,
+                    int(oldest_message_id) if oldest_message_id is not None else None,
+                    1 if done else 0,
+                    now,
+                ),
+            )
+
+    def oldest_message_id_for_scope(
+        self,
+        *,
+        channel_id: int | None = None,
+        thread_id: int | None = None,
+    ) -> int | None:
+        """収録済みメッセージの最小 message_id。progress 未登録スコープの再開点に使う。"""
+        if thread_id is not None:
+            where_sql = "thread_id = ?"
+            params: tuple[object, ...] = (thread_id,)
+        elif channel_id is not None:
+            where_sql = "channel_id = ? AND thread_id IS NULL"
+            params = (channel_id,)
+        else:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT MIN(message_id) FROM messages WHERE {where_sql}",
+                params,
+            ).fetchone()
+        if not row or row[0] is None:
+            return None
+        return int(row[0])
+
+    def list_backfill_status(self) -> list[dict[str, Any]]:
+        """進捗テーブルの全行。status コマンドの表示用。"""
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT {self._PROGRESS_COLUMNS} FROM channel_progress
+                ORDER BY guild_id, channel_id, thread_id IS NULL, thread_id
+                """,
+            ).fetchall()
+        return [self._row_to_progress(row) for row in rows]
 
     def list_channels(self, *, limit: int = 200) -> list[dict[str, Any]]:
         """収録済みチャンネルの件数と最終発言。"""

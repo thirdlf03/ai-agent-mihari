@@ -201,6 +201,30 @@ README にあった「しゃべる」「しまう / 起こす」「ペット」�
 
 同梱ペット(mauve)の 3 枚は 1536 × 1536 の透過 PNG で、3 枚とも構図を揃えてある(左 36% が透明)。
 
+### ファイルの手渡し
+
+Room の依頼で Mac のファイルを探した結果をユーザーへ渡す演出。部屋側の
+`mac_hand_off_file` ツール → `hand_off_file` op が、許可フォルダ
+(`MIHARI_MAC_SEARCH_DIRS`、既定は Desktop / Documents / Downloads)内のファイルに対して走る。
+
+| 手順 | 中身 |
+| --- | --- |
+| 出し手 | `PetFileHandoffPresenter`(`MacControlCenter.handoffPresenter` に AppCoordinator が差し込む)。出し手が無くても op は失敗にせず、Finder 表示だけを `revealed` として返す |
+| 絵 | `cutin/deliver.png`。無ければ `cutin/reach.png` に倒す(`PetDefinition.fileHandoffImageURL`)ので、専用画像を持たないペットでも演出は出る |
+| 帯 | 「TOUCH」の帯をファイルチップ(アイコン + ファイル名 / `label`)に置き換える(`AttendanceCutInModel.fileChip`)。アイコンは `NSWorkspace.icon(forFile:)` で Finder と同じもの |
+| セリフ | `fileHandoff` 区分を 1 本(`lines.json`、同封 .m4a あり) |
+| Finder | `NSWorkspace.activateFileViewerSelecting` でファイルを選択状態で開く |
+| 退場 | 4 秒(`PetFileHandoffPresenter.holdSeconds`)で自動的に引っ込める |
+
+#### `fileHandoff` — Mac 制御でファイルを手渡すとき
+
+| セリフ |
+| --- |
+| はい、これ。探してきたよ。 |
+| 見つけた。…私が渡してあげる。 |
+| このファイルでしょ。ほら。 |
+| 渡すね。ちゃんと受け取って。 |
+
 ## 声
 
 話者は冥鳴ひまり(VOICEVOX の話者 14)で固定。**音声モードが 2 つある。**

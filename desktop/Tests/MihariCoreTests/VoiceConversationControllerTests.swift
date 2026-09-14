@@ -290,6 +290,34 @@ struct VoiceConversationControllerTests {
         controller.stop()
     }
 
+    @Test("assistant.tool_activity は表示するだけで client 側では実行しない")
+    func handlesToolActivityWithoutExecuting() async throws {
+        let socket = ScriptedSocket()
+        let (controller, _, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        socket.feed(
+            #"{"type":"assistant.tool_activity","name":"submit_job","call_id":"c9","status":"running"}"#
+        )
+        socket.feed(
+            #"{"type":"assistant.tool_activity","name":"submit_job","call_id":"c9","status":"done"}"#
+        )
+
+        await waitUntil {
+            controller.messages.contains { $0.text.contains("submit_job") }
+        }
+        // room 側ツールの通知なので、client は input.image 等を送り返さない。
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(!socket.sent.contains { $0.contains("\"input.image\"") })
+        #expect(
+            controller.messages.contains { $0.text.contains("submit_job") }
+        )
+
+        controller.stop()
+    }
+
     @Test("session.ready で ready になり、assistant.text が履歴に載る")
     func handlesAssistantText() async throws {
         let socket = ScriptedSocket()

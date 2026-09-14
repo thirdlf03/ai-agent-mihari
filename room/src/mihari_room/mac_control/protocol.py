@@ -39,6 +39,12 @@ class MacOpKind(StrEnum):
     TYPE_TEXT = "type_text"
     KEY = "key"
     ACTIVATE_APP = "activate_app"
+    #: ローカルファイル検索（名前 / 本文）。画面構成の突き合わせは要らない。
+    FIND_FILES = "find_files"
+    #: 許可フォルダ内のファイルを 1 つ読んで部屋へ取り込む。
+    FETCH_FILE = "fetch_file"
+    #: ファイルを Finder で見せつつ、ペットの「手渡し」演出を出す。
+    HAND_OFF_FILE = "hand_off_file"
 
 
 #: Room → Mac のフレーム種別。
@@ -191,6 +197,18 @@ def sanitize_op_params(kind: str, params: dict[str, Any]) -> dict[str, Any]:
     elif kind_name == MacOpKind.CAPTURE:
         if params.get("display_id") is not None:
             safe["display_id"] = params["display_id"]
+    elif kind_name == MacOpKind.FIND_FILES:
+        for key in ("query", "scope", "limit", "dirs"):
+            if params.get(key) is not None:
+                safe[key] = params.get(key)
+    elif kind_name == MacOpKind.FETCH_FILE:
+        for key in ("path", "max_bytes"):
+            if params.get(key) is not None:
+                safe[key] = params.get(key)
+    elif kind_name == MacOpKind.HAND_OFF_FILE:
+        for key in ("path", "label"):
+            if params.get(key) is not None:
+                safe[key] = params.get(key)
     return safe
 
 
@@ -206,6 +224,9 @@ def describe_op(kind: str, params: dict[str, Any]) -> str:
         MacOpKind.TYPE_TEXT: "文字入力",
         MacOpKind.KEY: "キー操作",
         MacOpKind.ACTIVATE_APP: "アプリ切り替え",
+        MacOpKind.FIND_FILES: "ファイルを探す",
+        MacOpKind.FETCH_FILE: "ファイルを取り込む",
+        MacOpKind.HAND_OFF_FILE: "ファイルを手渡す",
     }.get(str(kind), str(kind))
     if kind_label == "文字入力":
         length = safe.get("text_len", 0)
@@ -225,6 +246,9 @@ def describe_op(kind: str, params: dict[str, Any]) -> str:
         ("bundle_id", "アプリ"),
         ("app_name", "アプリ名"),
         ("button", "ボタン"),
+        ("query", "検索"),
+        ("path", "パス"),
+        ("label", "表示名"),
     ):
         if safe.get(key) is not None:
             pieces.append(f"{label}={safe[key]}")

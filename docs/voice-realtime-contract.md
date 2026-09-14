@@ -119,7 +119,8 @@ JSON テキストフレーム。方向ごとの最小イベント:
 | client → room | `input.audio` | PCM16 等の base64 音声チャンク |
 | client → room | `input.image` | base64 画像 + `media_type` |
 | room → client | `assistant.text` | テキスト応答（`delta` / `text` + `done`） |
-| room → client | `assistant.tool_call` | ツール呼び出し（`name`, `call_id`, `arguments`） |
+| room → client | `assistant.tool_call` | client 実行ツール呼び出し（`name`, `call_id`, `arguments`） |
+| room → client | `assistant.tool_activity` | room 側ツール実行の通知（`name`, `call_id`, `status`） |
 | room → client | `user.text` | 入力音声の文字起こし（`text`） |
 | room → client | `error` | エラー |
 | room → client | `session.closed` | ストリーム終了 |
@@ -166,19 +167,59 @@ PCM16 モノラル 24 kHz を想定。`commit: false` でチャンクを流し�
 }
 ```
 
-### ツール名（`assistant.tool_call`）
+### ツール（実行主体の分担）
 
-desktop が解釈するツール名（別名あり）:
+room は upstream 接続時に実ツール一式を登録する。text モードは `session.update` の
+`session.tools`、live_audio モードは `session.delegation.responses.tools`
+（後述）。いずれも `tool_choice: "auto"`。定義元は
+`room/src/mihari_room/voice/tools.py` の `VOICE_TOOL_SCHEMAS`。
 
-| 正名 | 別名例 | 用途 |
+**実行主体はツール名で決まる。** client 実行は `capture_screen` だけ。
+それ以外はすべて room が実行し、client には `assistant.tool_call` を
+**送らない**（旧 client が二重実行しないよう `assistant.tool_activity`
+だけを送る）。
+
+| ツール | 実行側 | 用途 |
 | --- | --- | --- |
-| `capture_screen` | `screen_capture`, `request_screen` | 画面 1 枚を `input.image` で送信（マウスがあるディスプレイ） |
-| `submit_job` | `create_job`, `request_job` | Hermes ジョブ依頼 |
-| `steer_job` | `steer`, `job_steer` | `POST /jobs/{id}/steer`（body は **`text`**） |
-| `get_job_status` | `job_status`, `check_job_progress` | 進捗確認 |
-| `show_job_question` | `waiting_for_input`, `job_question` | 質問 UI 表示 |
+| `capture_screen` | **client** | 画面 1 枚を撮り `input.image` で送信（ScreenCaptureKit 許可済み側でしか撮れないため room へ移さない） |
+| `submit_job` | room | Hermes ジョブ依頼。「投げて」「やっておいて」用 |
+| `steer_job` | room | 実行中ジョブへの追加指示（内部で `POST /jobs/{id}/steer` 相当） |
+| `get_job_status` | room | 進捗・pending 質問の取得 |
+| `list_running_jobs` | room | 机占有ジョブの一覧 |
+| `answer_job_question` | room | `waiting_for_input` の質問へ回答 |
+| `cancel_job` | room | ジョブのキャンセル |
+| `discord_search` / `discord_recent` / `discord_channels` / `discord_message` / `discord_context` | room | 取り込み済み Discord アーカイブの検索・閲覧 |
+| `mac_find_files` / `mac_fetch_file` / `mac_hand_off_file` | room | Mac 上のファイル検索・取り込み・引き渡し（Mac control hub 経由。Mac 未接続・権限不足でも `{"success": false, "code": ...}` を返すだけで会話は落とさない） |
 
-現状 room が `session.update` で登録するツールは接続検証用の `echo_phrase` のみ。上記の job/画面ツールをモデルが実際に呼べるようにするには、room 側でのツール定義登録と結果返却（`function_call_output` 相当）経路の追加が今後必要。
+#### `assistant.tool_call`（room → client、client 実行のみ）
+
+```json
+{ "type": "assistant.tool_call", "name": "capture_screen", "call_id": "<id>", "arguments": "{\"prompt\":\"見て\"}" }
+```
+
+client は画面を撮り `input.image` を送る。room は pending の `call_id` を
+引き当て、画像メッセージ + `function_call_output`（`{"success": true, ...}`）
++ `response.create` を upstream へ積む（live では `response.item.create` 系）。
+`capture_screen` 以外の名前が届いても client は実行してはいけない。
+
+#### `assistant.tool_activity`（room → client、通知のみ）
+
+```json
+{ "type": "assistant.tool_activity", "name": "submit_job", "call_id": "<id>", "status": "done" }
+```
+
+`status` は `running` / `done` / `failed`。room がツールを実行した事実の
+表示用で、**client は何も実行せず・結果も送り返さない**。
+
+#### room 側ツール結果の返却（text モード）
+
+1. upstream の `response.done` の `response.output[]` から `type: "function_call"` を拾う。
+2. room 実行ツールは `VoiceToolExecutor` が実行し、client へ `assistant.tool_activity` を送る。
+3. `conversation.item.create`（item `function_call_output`、`output` は JSON 文字列）を送り、最後に `response.create` を 1 回だけ送る。
+4. 結果に画像が付く場合（`mac_fetch_file` で PNG 等）は `function_call_output` の前に画像メッセージを積む。
+5. `capture_screen` は client へ委譲し、pending が解決されるまで `response.create` を遅らせる。
+
+失敗も `{"success": false, "error": ..., "code": ...}` の JSON としてモデルへ返し、会話は継続する（Mac の安定コードは `mac_control/errors.py` 準拠）。
 
 ## 音声 OUT 課金なし方針
 
@@ -295,6 +336,8 @@ Hermes が clarify 等でユーザー入力待ちになったとき、ジョブ 
 | `MIHARI_LIVE_VOICE` | `marin` | upstream が返す素の声（VC 前） |
 | `MIHARI_VC_URL` | 空（VC 無効） | 外部 VC サービスの base URL。空ならパススルー |
 | `MIHARI_VC_TIMEOUT` | `2.0` | VC 変換 1 回あたりのタイムアウト秒 |
+| `MIHARI_LIVE_DELEGATION` | `true` | Responses 委譲（ツール実行）の有効化。`0/false/off/no` で無効 |
+| `MIHARI_LIVE_DELEGATION_MODEL` | `gpt-5.6-terra` | 委譲先 Responses バックエンドのモデル |
 
 ### `live_audio` モードの線上差分
 
@@ -321,6 +364,40 @@ Hermes が clarify 等でユーザー入力待ちになったとき、ジョブ 
 ```
 
 `delta` / `done` は live_audio でのみ付く追加フィールド。text モードでは従来どおり `{ "type": "user.text", "text": "..." }` のみ。
+
+#### Responses 委譲（live_audio のツール実行）
+
+Live モデルは音声対話に専念させ、ツール呼び出しを要する推論は
+`session.delegation` で Responses バックエンドへ委譲する
+（`MIHARI_LIVE_DELEGATION` が有効なとき）。`session.start` に載せる形:
+
+```json
+{
+  "type": "session.start",
+  "session": {
+    "model": "gpt-live-1",
+    "...": "...",
+    "delegation": {
+      "type": "responses",
+      "responses": {
+        "model": "gpt-5.6-terra",
+        "instructions": "...",
+        "tools": ["<VOICE_TOOL_SCHEMAS 一式>"],
+        "tool_choice": "auto",
+        "parallel_tool_calls": false
+      }
+    }
+  }
+}
+```
+
+イベント流れ:
+
+1. 委譲が起こると `session.delegation.created`（`delegation.id`, `response_id`）が届く。room は client へ `assistant.tool_activity`（`name: "delegate"`, `status: "running"`）を送る。
+2. 委譲中の Responses イベントは `response.event`（`delegation_id` 付き）に内包されて届く。判定は**内側 `event.type`** で行う。
+3. `response.output_item.done` の `item.type == "function_call"` を集める。`response.completed` の `output` は空なのでここで拾う。
+4. `response.completed` で集めた呼び出しを実行する。実行主体の分担は text モードと同じ（room 実行 → `assistant.tool_activity` + `response.item.create` の `function_call_output` + `response.create`／`capture_screen` → `assistant.tool_call` で client 委譲、結果は `input.image` で回収）。
+5. 委譲有効時、client の `input.audio` から upstream へ `response.create` は転送しない（ターン確定ごとに委譲応答が起きるのを防ぐ）。`input_audio_buffer.append` / `commit` 等の Live 入力イベントは従来どおり通す。
 
 ### VC サービス契約（room → 外部 HTTP）
 

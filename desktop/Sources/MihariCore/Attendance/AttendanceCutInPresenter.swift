@@ -10,11 +10,23 @@ public protocol AttendanceCutInPresenting: AnyObject {
     /// カットインを出す。`pet` の `cutin/` から絵を読み、`screen` の右下に密着させる。
     func present(_ image: AttendanceCutInImage, of pet: PetDefinition, on screen: NSScreen?)
 
+    /// 「手渡し」のカットインを出す。`pet` の `cutin/deliver.png`（無ければ `reach.png`）を
+    /// 使い、文字の帯は `chip` のアイコンとファイル名に置き換わる。
+    func presentFile(_ chip: AttendanceFileChip, of pet: PetDefinition, on screen: NSScreen?)
+
     /// 出しているカットインの絵を差し替える。`flash` を true にすると白く光らせる。
     func swap(to image: AttendanceCutInImage, flash: Bool)
 
     /// カットインを画面の外へ滑らせて閉じる。
     func dismiss()
+}
+
+extension AttendanceCutInPresenting {
+    /// 既定では指を差し出す絵に倒す（ファイルチップは出ない）。
+    /// 手渡しに未対応の実装を壊さないための後方互換。
+    public func presentFile(_ chip: AttendanceFileChip, of pet: PetDefinition, on screen: NSScreen?) {
+        present(.reach, of: pet, on: screen)
+    }
 }
 
 /// `NSPanel` + SwiftUI によるカットインの実装。
@@ -44,6 +56,26 @@ public final class AttendanceCutInPresenter: AttendanceCutInPresenting {
             Self.logger.error("カットインの画像を読めないので演出を出さない: \(image.rawValue, privacy: .public)")
             return
         }
+        show(nsImage: nsImage, kind: image, pet: pet, screen: screen, fileChip: nil)
+    }
+
+    public func presentFile(_ chip: AttendanceFileChip, of pet: PetDefinition, on screen: NSScreen?) {
+        // deliver.png が無いペットは reach.png に倒す（PetDefinition.fileHandoffImageURL）。
+        guard let url = pet.fileHandoffImageURL, let nsImage = NSImage(contentsOf: url) else {
+            Self.logger.error("手渡し用のカットイン画像を読めないので演出を出さない")
+            return
+        }
+        show(nsImage: nsImage, kind: .reach, pet: pet, screen: screen, fileChip: chip)
+    }
+
+    /// ウィンドウを作って `nsImage` のカットインを出す。`present` / `presentFile` の共通部。
+    private func show(
+        nsImage: NSImage,
+        kind: AttendanceCutInImage,
+        pet: PetDefinition,
+        screen: NSScreen?,
+        fileChip: AttendanceFileChip?
+    ) {
         guard let frame = Self.frame(on: screen) else {
             Self.logger.error("表示できる画面が無いのでカットインを出さない")
             return
@@ -57,8 +89,9 @@ public final class AttendanceCutInPresenter: AttendanceCutInPresenting {
         self.pet = pet
         let model = AttendanceCutInModel(
             image: nsImage,
-            kind: image,
-            isReduceMotionEnabled: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            kind: kind,
+            isReduceMotionEnabled: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+            fileChip: fileChip
         )
         self.model = model
 
@@ -75,6 +108,8 @@ public final class AttendanceCutInPresenter: AttendanceCutInPresenting {
         guard let model, let pet, let nsImage = Self.loadImage(image, of: pet) else { return }
         model.image = nsImage
         model.kind = image
+        // 別の局面へ移ったので、手渡しのファイルチップは外す。
+        model.fileChip = nil
         if flash { model.isFlashing = true }
     }
 

@@ -20,6 +20,7 @@ from mihari_room.voice.protocol import (
     SessionStatus,
     assistant_audio_event,
     assistant_text_event,
+    assistant_tool_activity_event,
     assistant_tool_call_event,
     error_event,
     history_sync_event,
@@ -28,6 +29,7 @@ from mihari_room.voice.protocol import (
     user_text_event,
 )
 from mihari_room.voice.sessions import VoiceSessionManager, VoiceStreamBusyError
+from mihari_room.voice.tools import VoiceToolExecutor, VoiceToolOutcome
 from mihari_room.voice.upstream import (
     UPSTREAM_AUDIO_OUTPUT_EVENTS,
     RealtimeUpstream,
@@ -80,8 +82,16 @@ async def handle_voice_stream(
     session_id: str,
     manager: VoiceSessionManager,
     upstream_factory: UpstreamFactory,
+    orchestrator: Any = None,
+    mac_hub: Any = None,
+    interactions: Any = None,
+    tool_executor: Any = None,
 ) -> None:
-    """``/voice/sessions/{id}/stream`` の本体。"""
+    """``/voice/sessions/{id}/stream`` の本体。
+
+    ``orchestrator`` / ``mac_hub`` / ``interactions`` は room のツール実行器へ
+    渡す依存（app.state 由来）。``tool_executor`` があればそれを使う（test 用）。
+    """
     session = manager.get(session_id)
     if session is None:
         await websocket.close(code=4404)
@@ -110,6 +120,19 @@ async def handle_voice_stream(
     close_sent = False
     history = manager.get_history(session_id)
     resumed = bool(history)
+    executor = (
+        tool_executor
+        if tool_executor is not None
+        else VoiceToolExecutor(
+            session_id=session_id,
+            manager=manager,
+            orchestrator=orchestrator,
+            mac_hub=mac_hub,
+            interactions=interactions,
+        )
+    )
+    #: client 実行ツール（capture_screen）の未解決 call。call_id → ツール名。
+    pending_client_calls: dict[str, str] = {}
 
     async def send_client(frame: dict[str, Any]) -> None:
         await websocket.send_text(json.dumps(frame, ensure_ascii=False))
@@ -141,6 +164,8 @@ async def handle_voice_stream(
                 send_client,
                 session_id=session_id,
                 manager=manager,
+                pending_client_calls=pending_client_calls,
+                live=converter is not None,
                 on_client_audio=(
                     client_audio_clock.note if client_audio_clock is not None else None
                 ),
@@ -154,6 +179,8 @@ async def handle_voice_stream(
                     send_client,
                     session_id=session_id,
                     manager=manager,
+                    executor=executor,
+                    pending_client_calls=pending_client_calls,
                 )
             )
         else:
@@ -163,6 +190,8 @@ async def handle_voice_stream(
                     send_client,
                     session_id=session_id,
                     manager=manager,
+                    executor=executor,
+                    pending_client_calls=pending_client_calls,
                 )
             )
         close_task = asyncio.create_task(_watch_session_close(manager, session_id))
@@ -209,6 +238,13 @@ async def handle_voice_stream(
         if converter is not None:
             try:
                 await converter.close()
+            except Exception:
+                pass
+        # begin 済みの Mac run があれば畳む（executor 未生成パスもあるので getattr）。
+        close_executor = getattr(executor, "close", None)
+        if callable(close_executor):
+            try:
+                await close_executor()
             except Exception:
                 pass
         await upstream.close()
@@ -303,6 +339,8 @@ async def _client_to_upstream(
     *,
     session_id: str,
     manager: VoiceSessionManager,
+    pending_client_calls: dict[str, str],
+    live: bool = False,
     on_client_audio: Callable[[], None] | None = None,
 ) -> None:
     while True:
@@ -321,9 +359,18 @@ async def _client_to_upstream(
         frame_type = frame.get("type")
         try:
             if frame_type == EVENT_INPUT_AUDIO:
-                await _forward_audio(frame, upstream, on_client_audio=on_client_audio)
+                await _forward_audio(
+                    frame, upstream, live=live, on_client_audio=on_client_audio
+                )
             elif frame_type == EVENT_INPUT_IMAGE:
-                await _forward_image(frame, upstream, session_id=session_id, manager=manager)
+                await _forward_image(
+                    frame,
+                    upstream,
+                    session_id=session_id,
+                    manager=manager,
+                    pending_client_calls=pending_client_calls,
+                    live=live,
+                )
             else:
                 await send_client(error_event(f"未知のイベント: {frame_type}", code="bad_event"))
         except (ValueError, binascii.Error) as error:
@@ -334,6 +381,7 @@ async def _forward_audio(
     frame: dict[str, Any],
     upstream: RealtimeUpstream,
     *,
+    live: bool = False,
     on_client_audio: Callable[[], None] | None = None,
 ) -> None:
     audio_b64 = frame.get("audio_base64") or frame.get("audio") or ""
@@ -345,6 +393,11 @@ async def _forward_audio(
     if on_client_audio is not None:
         # live_audio の無音ペーサーが使う最終到着時刻を更新する。
         on_client_audio()
+    if live:
+        # Live は commit / response.create を持たない。delegation 有効時に
+        # response.create が upstream へ通ってしまうと、クライアントの
+        # ターン確定ごとに委譲応答を起こしてしまうのでここでは送らない。
+        return
     if frame.get("commit", True):
         await upstream.send({"type": "input_audio_buffer.commit"})
     if frame.get("create_response", True):
@@ -357,6 +410,8 @@ async def _forward_image(
     *,
     session_id: str,
     manager: VoiceSessionManager,
+    pending_client_calls: dict[str, str],
+    live: bool = False,
 ) -> None:
     image_b64 = frame.get("image_base64") or frame.get("image") or ""
     media_type = frame.get("media_type") or "image/png"
@@ -367,20 +422,51 @@ async def _forward_image(
     if not isinstance(media_type, str) or not media_type.startswith("image/"):
         raise ValueError("input.image の media_type が不正")
     manager.record_user_text(session_id, str(prompt), kind="image_prompt")
-    content: list[dict[str, Any]] = [
-        {
-            "type": "input_image",
-            "image_url": f"data:{media_type};base64,{image_b64}",
-        },
-        {"type": "input_text", "text": str(prompt)},
-    ]
-    await upstream.send(
-        {
-            "type": "conversation.item.create",
-            "item": {"type": "message", "role": "user", "content": content},
-        }
+    image_item: dict[str, Any] = {
+        "type": "message",
+        "role": "user",
+        "content": [
+            {
+                "type": "input_image",
+                "image_url": f"data:{media_type};base64,{image_b64}",
+            },
+            {"type": "input_text", "text": str(prompt)},
+        ],
+    }
+    # client 側で実行した capture_screen の結果として届いた画像は、
+    # pending の function_call を解決する（fco + 画像メッセージ + response.create）。
+    capture_call_id = next(
+        (cid for cid, name in pending_client_calls.items() if name == "capture_screen"),
+        None,
     )
-    if frame.get("create_response", True):
+    if capture_call_id is not None:
+        pending_client_calls.pop(capture_call_id, None)
+        function_output: dict[str, Any] = {
+            "type": "function_call_output",
+            "call_id": capture_call_id,
+            "output": json.dumps(
+                {"success": True, "note": "画像は直前のメッセージ"},
+                ensure_ascii=False,
+            ),
+        }
+        if live:
+            await upstream.send({"type": "response.item.create", "item": image_item})
+            await upstream.send({"type": "response.item.create", "item": function_output})
+            await upstream.send({"type": "response.create"})
+        else:
+            await upstream.send(
+                {"type": "conversation.item.create", "item": image_item}
+            )
+            await upstream.send(
+                {"type": "conversation.item.create", "item": function_output}
+            )
+            await upstream.send(response_create_event())
+        return
+    # ユーザー能動の画像（pending 無し）は従来どおりメッセージとして積む。
+    # live では conversation.item.create が thinking.append へ変換される
+    # （画像は落ちてテキストのみ）。response.create は live では意味を持たない。
+    await upstream.send({"type": "conversation.item.create", "item": image_item})
+    if not live and frame.get("create_response", True):
         await upstream.send(response_create_event())
 
 
@@ -390,6 +476,8 @@ async def _upstream_to_client(
     *,
     session_id: str,
     manager: VoiceSessionManager,
+    executor: Any,
+    pending_client_calls: dict[str, str],
 ) -> None:
     while True:
         event = await upstream.receive()
@@ -406,7 +494,18 @@ async def _upstream_to_client(
                 manager.record_assistant_text(session_id, str(text))
             await send_client(assistant_text_event(text=text, done=True))
         elif event_type == "response.done":
-            await _emit_tool_calls(event, send_client, session_id=session_id, manager=manager)
+            response = event.get("response") or {}
+            output = response.get("output") or []
+            if isinstance(output, list):
+                await _run_function_calls(
+                    output,
+                    upstream=upstream,
+                    send_client=send_client,
+                    session_id=session_id,
+                    manager=manager,
+                    executor=executor,
+                    pending_client_calls=pending_client_calls,
+                )
         elif event_type == "conversation.item.input_audio_transcription.completed":
             transcript = str(event.get("transcript") or "").strip()
             if transcript:
@@ -422,32 +521,98 @@ async def _upstream_to_client(
             continue
 
 
-async def _emit_tool_calls(
-    event: dict[str, Any],
-    send_client: Any,
+def _call_arguments_str(raw: Any) -> str:
+    """function_call の arguments を executor/client 両対応の JSON 文字列へ。"""
+    if isinstance(raw, str):
+        return raw or "{}"
+    return json.dumps(raw or {}, ensure_ascii=False)
+
+
+async def _send_tool_result(
+    upstream: RealtimeUpstream,
     *,
+    call_id: str,
+    outcome: VoiceToolOutcome,
+    live: bool,
+) -> None:
+    """function_call_output（+ あれば画像メッセージ）を upstream へ積む。"""
+    item_create = "response.item.create" if live else "conversation.item.create"
+    if outcome.image_png:
+        image_item: dict[str, Any] = {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_image",
+                    "image_url": (
+                        "data:image/png;base64," + base64.b64encode(outcome.image_png).decode()
+                    ),
+                },
+                {"type": "input_text", "text": "ツール実行結果の画像"},
+            ],
+        }
+        await upstream.send({"type": item_create, "item": image_item})
+    await upstream.send(
+        {
+            "type": item_create,
+            "item": {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": outcome.output,
+            },
+        }
+    )
+
+
+async def _run_function_calls(
+    output: list[Any],
+    *,
+    upstream: RealtimeUpstream,
+    send_client: Any,
     session_id: str,
     manager: VoiceSessionManager,
+    executor: Any,
+    pending_client_calls: dict[str, str],
+    live: bool = False,
 ) -> None:
-    response = event.get("response") or {}
-    output = response.get("output") or []
-    if not isinstance(output, list):
-        return
+    """response.done / delegation の response.completed で溜めた function_call を処理。
+
+    - room 実行ツール: ``assistant.tool_activity`` を client へ通知し、
+      fco（+ 画像があればメッセージ）を upstream へ返す。
+    - client 実行ツール（capture_screen）: ``assistant.tool_call`` を送り、
+      pending へ登録。結果は input.image で届く。
+    - 全 room 側の結果を積み終え、かつ pending client call が無いときだけ
+      ``response.create`` を 1 回送る。
+    """
+    submitted = False
     for item in output:
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") != "function_call":
+        if not isinstance(item, dict) or item.get("type") != "function_call":
             continue
         name = str(item.get("name") or "")
-        arguments = str(item.get("arguments") or "{}")
+        call_id = str(item.get("call_id") or "")
+        arguments = _call_arguments_str(item.get("arguments"))
         manager.record_tool_call(session_id, name=name, arguments=arguments)
+        outcome = await executor.execute(name, arguments)
+        if outcome.client_side:
+            await send_client(
+                assistant_tool_call_event(name=name, call_id=call_id, arguments=arguments)
+            )
+            if call_id:
+                pending_client_calls[call_id] = name
+            continue
+        # room 実行ツールは旧 client が二重実行しないよう tool_call は送らず、
+        # 活動通知だけを送る。
         await send_client(
-            assistant_tool_call_event(
+            assistant_tool_activity_event(
                 name=name,
-                call_id=str(item.get("call_id") or ""),
-                arguments=arguments,
+                call_id=call_id,
+                status="done" if outcome.ok else "failed",
             )
         )
+        await _send_tool_result(upstream, call_id=call_id, outcome=outcome, live=live)
+        submitted = True
+    if submitted and not pending_client_calls:
+        await upstream.send({"type": "response.create"} if live else response_create_event())
 
 
 def _extract_error_message(event: dict[str, Any]) -> str:
@@ -464,6 +629,8 @@ async def _live_upstream_to_client(
     *,
     session_id: str,
     manager: VoiceSessionManager,
+    executor: Any,
+    pending_client_calls: dict[str, str],
 ) -> None:
     """live_audio モードの upstream → クライアント中継。
 
@@ -479,6 +646,12 @@ async def _live_upstream_to_client(
     assistant_transcript = ""
     output_active = False
     logged_types: set[str] = set()
+    #: session.delegation.created で記録する委譲 ID（responses バックエンドの 1 委譲）。
+    delegation_id: str | None = None
+    #: 内側 response.event の ``response.created`` で記録する委譲応答 ID。
+    delegated_response_id: str | None = None
+    #: response.completed までに output_item.done で集めた function_call。
+    delegated_calls: list[dict[str, Any]] = []
 
     async def flush_user(*, send: bool = True) -> None:
         nonlocal user_transcript
@@ -548,6 +721,50 @@ async def _live_upstream_to_client(
                     await send_client(
                         user_text_event(text=user_transcript, delta=delta, done=False)
                     )
+            elif event_type == "session.delegation.created":
+                delegation = event.get("delegation") or {}
+                delegation_id = str(delegation.get("id") or "")
+                delegated_response_id = str(event.get("response_id") or "") or None
+                # ユーザーの発話を履歴へ確定させてから委譲の記録を残す。
+                await flush_user()
+                await send_client(
+                    assistant_tool_activity_event(
+                        name="delegate",
+                        call_id=delegation_id,
+                        status="running",
+                    )
+                )
+            elif event_type == "response.event":
+                inner = event.get("event") or {}
+                inner_type = inner.get("type", "")
+                if inner_type == "response.created":
+                    delegated_response_id = str(
+                        (inner.get("response") or {}).get("id") or ""
+                    ) or delegated_response_id
+                elif inner_type == "response.output_item.done":
+                    item = inner.get("item") or {}
+                    if item.get("type") == "function_call":
+                        delegated_calls.append(item)
+                elif inner_type == "response.completed":
+                    # completed の output は意図的に空 — 集めた呼び出しで処理する。
+                    calls, delegated_calls = delegated_calls, []
+                    if calls:
+                        await flush_user()
+                        await _run_function_calls(
+                            calls,
+                            upstream=upstream,
+                            send_client=send_client,
+                            session_id=session_id,
+                            manager=manager,
+                            executor=executor,
+                            pending_client_calls=pending_client_calls,
+                            live=True,
+                        )
+                else:
+                    key = f"response.event:{inner_type}"
+                    if key not in logged_types:
+                        logged_types.add(key)
+                        logger.info("live delegation event (unhandled): %s", inner_type)
             elif event_type == "session.closed":
                 return
             elif event_type == "error":

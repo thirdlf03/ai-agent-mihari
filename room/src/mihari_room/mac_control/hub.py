@@ -777,8 +777,9 @@ class MacControlHub:
                     "job_title": run_state.job_title,
                     "scope": "whole_mac",
                     "note": (
-                        "この依頼の間、この Mac 全体の撮影・クリック・入力などの操作を"
-                        "許可しますか？ 既定は拒否です。キャンセル・ロック・終了で失効します。"
+                        "この依頼の間、この Mac の撮影・クリック・入力などの操作と、"
+                        "許可フォルダ内のファイル検索・参照・受け渡しの演出を許可しますか？"
+                        " 既定は拒否です。キャンセル・ロック・終了で失効します。"
                     ),
                 },
             )
@@ -901,7 +902,15 @@ class MacControlHub:
         params: dict[str, Any],
         display_ref: str | None,
     ) -> dict[str, Any] | None:
-        if kind == MacOpKind.CAPTURE or kind == MacOpKind.ACTIVATE_APP or kind == MacOpKind.KEY:
+        if kind in (
+            MacOpKind.CAPTURE,
+            MacOpKind.ACTIVATE_APP,
+            MacOpKind.KEY,
+            MacOpKind.FIND_FILES,
+            MacOpKind.FETCH_FILE,
+            MacOpKind.HAND_OFF_FILE,
+        ):
+            # 画面の座標を使わない操作は、画面構成の突き合わせをしない。
             return None
         if kind == MacOpKind.SCROLL:
             # 座標なしスクロールは現在のカーソル位置で行われる。突き合わせ不要。
@@ -1033,7 +1042,7 @@ def _params_key(params: dict[str, Any]) -> tuple[tuple[str, str], ...]:
 
 
 def _result_summary(kind: str, result: dict[str, Any]) -> dict[str, Any]:
-    """履歴に残す結果。capture は画像本体を載せず要約だけ。"""
+    """履歴に残す結果。capture / fetch は本体（画像・ファイル中身）を載せず要約だけ。"""
     if kind == MacOpKind.CAPTURE:
         return {
             "display_id": result.get("display_id"),
@@ -1041,6 +1050,26 @@ def _result_summary(kind: str, result: dict[str, Any]) -> dict[str, Any]:
             "height_px": result.get("height_px"),
             "path": result.get("path"),
             "bytes": result.get("bytes"),
+        }
+    if kind == MacOpKind.FIND_FILES:
+        files = result.get("files")
+        listed = files if isinstance(files, list) else []
+        trimmed = [
+            {"name": item.get("name"), "path": item.get("path")}
+            for item in listed[:20]
+            if isinstance(item, dict)
+        ]
+        return {"count": result.get("count"), "files": trimmed}
+    if kind == MacOpKind.FETCH_FILE:
+        # data_base64（ファイル本体）は履歴に残さない。
+        return {
+            key: result.get(key)
+            for key in ("name", "path", "size", "truncated")
+            if result.get(key) is not None
+        }
+    if kind == MacOpKind.HAND_OFF_FILE:
+        return {
+            key: result.get(key) for key in ("revealed", "presented") if result.get(key) is not None
         }
     out: dict[str, Any] = {}
     for key in (
@@ -1148,6 +1177,82 @@ def _normalize_op(kind: str, params: dict[str, Any]) -> tuple[dict[str, Any], st
             raise ValueError("bundle_id か app_name のどちらかは要る")
         raw["bundle_id"] = bundle_id or None
         raw["app_name"] = app_name or None
+    elif kind_name == MacOpKind.FIND_FILES:
+        query_raw = raw.get("query")
+        if not isinstance(query_raw, str):
+            raise ValueError("query は文字列で要る")
+        query = query_raw.strip()
+        if not query or len(query) > 200:
+            raise ValueError("query は 1〜200 文字で要る")
+        raw["query"] = query
+        scope = str(raw.get("scope") or "name").strip().lower()
+        if scope not in ("name", "content"):
+            raise ValueError("scope は name / content のどれか")
+        raw["scope"] = scope
+        raw["limit"] = _bounded_int(
+            raw.get("limit"), name="limit", minimum=1, maximum=50, default=10
+        )
+        dirs = raw.get("dirs")
+        if dirs is None:
+            raw.pop("dirs", None)
+        else:
+            if not isinstance(dirs, list) or len(dirs) > 8:
+                raise ValueError("dirs は 8 件までのリスト")
+            normalized_dirs: list[str] = []
+            for item in dirs:
+                if not isinstance(item, str):
+                    raise ValueError("dirs の各要素は文字列で要る")
+                text = item.strip()
+                if not text or len(text) > 512:
+                    raise ValueError("dirs の各要素は 1〜512 文字で要る")
+                normalized_dirs.append(text)
+            raw["dirs"] = normalized_dirs
+    elif kind_name == MacOpKind.FETCH_FILE:
+        raw["path"] = _required_path(raw.get("path"))
+        raw["max_bytes"] = _bounded_int(
+            raw.get("max_bytes"),
+            name="max_bytes",
+            minimum=1,
+            maximum=16_777_216,
+            default=8_388_608,
+        )
+    elif kind_name == MacOpKind.HAND_OFF_FILE:
+        raw["path"] = _required_path(raw.get("path"))
+        label = raw.get("label")
+        if label is None:
+            raw.pop("label", None)
+        else:
+            if not isinstance(label, str):
+                raise ValueError("label は文字列で要る")
+            text = label.strip()
+            if len(text) > 200:
+                raise ValueError("label は 200 文字まで")
+            raw["label"] = text or None
     else:
         raise ValueError(f"未対応の操作: {kind}")
     return raw, display_ref
+
+
+def _required_path(value: Any) -> str:
+    """ファイル系 op の path。1〜1024 文字の非空文字列。"""
+    if not isinstance(value, str):
+        raise ValueError("path は文字列で要る")
+    path = value.strip()
+    if not path or len(path) > 1024:
+        raise ValueError("path は 1〜1024 文字で要る")
+    return path
+
+
+def _bounded_int(value: Any, *, name: str, minimum: int, maximum: int, default: int) -> int:
+    """省略時は default、指定時は [minimum, maximum] の整数。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{name} が不正")
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} が不正") from None
+    if number < minimum or number > maximum:
+        raise ValueError(f"{name} は {minimum}〜{maximum} の範囲で要る")
+    return number

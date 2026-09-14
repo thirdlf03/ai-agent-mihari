@@ -156,6 +156,11 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         self.lifecycleMarker = lifecycleMarker
         // 操作中の表示と停止ボタンを結ぶ。
         macControl.operationIndicator = macControlIndicator
+        // 「手渡し」演出をペットのカットインへ結ぶ。
+        macControl.handoffPresenter = PetFileHandoffPresenter(
+            cutIn: cutIn,
+            pet: pet.controller
+        )
         observeVoiceMode()
     }
 

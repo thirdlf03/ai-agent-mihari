@@ -15,17 +15,38 @@ public protocol MacControlOperating: Sendable {
     func execute(op: MacControlOpFrame) async throws -> MacOpExecutionResult
 }
 
+/// ファイルの「手渡し」演出を出す口。
+///
+/// `AppCoordinator` が `PetFileHandoffPresenter`（ペットのカットイン）を差し込む。
+/// 未設定でも `hand_off_file` は失敗にせず、Finder での表示だけを結果に返す。
+public protocol MacFileHandoffPresenting: Sendable {
+    /// ファイルを手渡す演出を出す。出せたら true。
+    /// ペットがいない・カットイン画像が無いなどで出せなければ false。
+    func presentFile(at url: URL, label: String?) async -> Bool
+}
+
 /// CGEvent / ScreenCaptureKit を使う実装主体。
 public struct CGEventMacControlOperator: MacControlOperating {
 
     private let capture: MacControlCapturePerforming
     private let displays: MacControlDisplayListing
+    /// ファイル系 op が触れてよい範囲。`MIHARI_MAC_SEARCH_DIRS` で上書きできる。
+    private let filePolicy: MacFileAccessPolicy
+    /// Finder でファイルを選択状態にする口。テストでは記録用のスタブに差し替える。
+    private let revealInFinder: @Sendable ([URL]) -> Void
+    /// 手渡し演出の出し手。`MacControlCenter` があとから差し込む。
+    public var handoffPresenter: (any MacFileHandoffPresenting)?
     private let accessibilityIsTrusted: @Sendable () -> Bool
     private let screenRecordingIsGranted: @Sendable () -> Bool
 
     public init(
         capture: MacControlCapturePerforming = ScreenCaptureKitMacControlCapture(),
         displays: MacControlDisplayListing = CGMacControlDisplayListing(),
+        filePolicy: MacFileAccessPolicy = MacFileAccessPolicy(),
+        handoffPresenter: (any MacFileHandoffPresenting)? = nil,
+        revealInFinder: @escaping @Sendable ([URL]) -> Void = {
+            NSWorkspace.shared.activateFileViewerSelecting($0)
+        },
         accessibilityIsTrusted: @escaping @Sendable () -> Bool = { AXIsProcessTrusted() },
         screenRecordingIsGranted: @escaping @Sendable () -> Bool = {
             PermissionChecker.check(.screenRecording).grant == .granted
@@ -33,6 +54,9 @@ public struct CGEventMacControlOperator: MacControlOperating {
     ) {
         self.capture = capture
         self.displays = displays
+        self.filePolicy = filePolicy
+        self.revealInFinder = revealInFinder
+        self.handoffPresenter = handoffPresenter
         self.accessibilityIsTrusted = accessibilityIsTrusted
         self.screenRecordingIsGranted = screenRecordingIsGranted
     }
@@ -88,7 +112,96 @@ public struct CGEventMacControlOperator: MacControlOperating {
             return KeyboardPosting.pressKey(keycode: keycode, modifiers: op.modifiers)
         case .activateApp:
             return await AppActivation.activate(bundleID: op.bundleID, appName: op.appName)
+        case .findFiles:
+            return await performFindFiles(op: op)
+        case .fetchFile:
+            return performFetchFile(op: op)
+        case .handOffFile:
+            return await performHandOffFile(op: op)
+        case .unsupported:
+            // 知らない kind を click などへ倒さず、そのまま失敗として返す。
+            return .failure(code: "unsupported_op", message: "未知の操作種別: \(op.rawKind)")
         }
+    }
+
+    /// 許可フォルダ内でファイルを探す。`dirs` の指定は許可ルートの内側に絞る。
+    private func performFindFiles(op: MacControlOpFrame) async -> MacOpExecutionResult {
+        guard let query = op.query, !query.isEmpty else {
+            return .failure(code: "invalid_params", message: "query が空")
+        }
+        let scope = op.searchScope ?? "name"
+        guard scope == "name" || scope == "content" else {
+            return .failure(code: "invalid_params", message: "scope は name / content だけ")
+        }
+        let limit = min(max(op.searchLimit ?? 10, 1), 50)
+        do {
+            let dirs = try filePolicy.resolveSearchDirs(param: op.searchDirs)
+            let entries = await MacLocalFileSearch.find(query: query, scope: scope, dirs: dirs, limit: limit)
+            return .makeSuccess([
+                "files": entries.map(\.dictionary),
+                "count": entries.count,
+            ])
+        } catch let error as MacFileSearchError {
+            return .failure(code: error.code, message: error.message)
+        } catch {
+            return .failure(code: "execution_failed", message: error.localizedDescription)
+        }
+    }
+
+    /// 許可フォルダ内のファイルを読んで部屋へ返す。大きいものは `max_bytes` で切って truncated を立てる。
+    private func performFetchFile(op: MacControlOpFrame) -> MacOpExecutionResult {
+        guard let rawPath = op.filePath, !rawPath.isEmpty else {
+            return .failure(code: "invalid_params", message: "path が空")
+        }
+        let maxBytes = min(max(op.maxBytes ?? 8_388_608, 1), 16_777_216)
+        let url = MacFileAccessPolicy.fileURL(for: rawPath)
+        guard filePolicy.allows(url) else {
+            return .failure(
+                code: MacFileSearchError.pathNotAllowed.code,
+                message: MacFileSearchError.pathNotAllowed.message
+            )
+        }
+        do {
+            return .makeSuccess(try MacLocalFileSearch.fetchFile(url: url, maxBytes: maxBytes))
+        } catch let error as MacFileSearchError {
+            return .failure(code: error.code, message: error.message)
+        } catch {
+            return .failure(code: "execution_failed", message: error.localizedDescription)
+        }
+    }
+
+    /// 許可フォルダ内のファイルを Finder で見せ、ペットの「手渡し」演出を試す。
+    /// 演出を出す側が未接続でも失敗にはしない（revealed だけ返す）。
+    private func performHandOffFile(op: MacControlOpFrame) async -> MacOpExecutionResult {
+        guard let rawPath = op.filePath, !rawPath.isEmpty else {
+            return .failure(code: "invalid_params", message: "path が空")
+        }
+        let url = MacFileAccessPolicy.normalize(MacFileAccessPolicy.fileURL(for: rawPath))
+        guard filePolicy.allows(url) else {
+            return .failure(
+                code: MacFileSearchError.pathNotAllowed.code,
+                message: MacFileSearchError.pathNotAllowed.message
+            )
+        }
+        var isDirectory: ObjCBool = false
+        guard
+            FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+            !isDirectory.boolValue
+        else {
+            return .failure(
+                code: MacFileSearchError.fileNotFound.code,
+                message: MacFileSearchError.fileNotFound.message
+            )
+        }
+        revealInFinder([url])
+        var presented = false
+        if let handoffPresenter {
+            presented = await handoffPresenter.presentFile(at: url, label: op.handOffLabel)
+        }
+        return .makeSuccess([
+            "revealed": true,
+            "presented": presented,
+        ])
     }
 
     /// アクセシビリティ権限が無ければ failure を返す。CGEvent の送出に要る。

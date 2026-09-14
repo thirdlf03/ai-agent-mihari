@@ -21,6 +21,10 @@ DEFAULT_URL_TIMEOUT_SEC = 8.0
 DEFAULT_MAX_REDIRECTS = 5
 DEFAULT_PDF_MAX_CHARS = 20_000
 DEFAULT_QUEUE_SIZE = 256
+#: バックフィルは 1 回の history 呼び出しでこの件数まで遡る（内部で 100 件ずつ要求）。
+DEFAULT_BACKFILL_PAGE_SIZE = 1000
+#: ページ間の待機（秒）。Discord 側の 429 は discord.py が内部で処理するが、軽く間を置く。
+DEFAULT_BACKFILL_PAGE_INTERVAL = 0.3
 
 #: 添付を落として良い拡張子。実行ファイルや秘密系は最初から除外。
 ALLOWED_ATTACHMENT_EXTENSIONS = frozenset(
@@ -129,6 +133,9 @@ class ArchiveConfig:
     queue_size: int = DEFAULT_QUEUE_SIZE
     fetch_urls: bool = False
     fetch_attachments: bool = True
+    backfill_enabled: bool = True
+    backfill_page_size: int = DEFAULT_BACKFILL_PAGE_SIZE
+    backfill_page_interval: float = DEFAULT_BACKFILL_PAGE_INTERVAL
 
     @property
     def enabled(self) -> bool:
@@ -178,6 +185,13 @@ class ArchiveConfig:
             queue_size=_env_int("MIHARI_ARCHIVE_QUEUE_SIZE", DEFAULT_QUEUE_SIZE),
             fetch_urls=_env_bool("MIHARI_ARCHIVE_FETCH_URLS", False),
             fetch_attachments=_env_bool("MIHARI_ARCHIVE_FETCH_ATTACHMENTS", True),
+            backfill_enabled=_env_bool("MIHARI_ARCHIVE_BACKFILL", True),
+            backfill_page_size=_env_int(
+                "MIHARI_ARCHIVE_BACKFILL_PAGE_SIZE", DEFAULT_BACKFILL_PAGE_SIZE
+            ),
+            backfill_page_interval=_env_float(
+                "MIHARI_ARCHIVE_BACKFILL_INTERVAL", DEFAULT_BACKFILL_PAGE_INTERVAL
+            ),
         )
 
     def validate(self) -> None:
@@ -194,6 +208,10 @@ class ArchiveConfig:
             raise ValueError("MIHARI_ARCHIVE_QUEUE_SIZE は正の数にして")
         if self.max_redirects < 0:
             raise ValueError("MIHARI_ARCHIVE_MAX_REDIRECTS は 0 以上にして")
+        if self.backfill_page_size <= 0:
+            raise ValueError("MIHARI_ARCHIVE_BACKFILL_PAGE_SIZE は正の数にして")
+        if self.backfill_page_interval < 0:
+            raise ValueError("MIHARI_ARCHIVE_BACKFILL_INTERVAL は 0 以上にして")
 
 
 def load_archive_config(root: Path | None = None) -> ArchiveConfig:

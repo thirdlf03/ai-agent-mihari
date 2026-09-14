@@ -26,7 +26,7 @@ from mihari_room.store.file_store import FileJobStore
 from mihari_room.worker.hermes import HermesWorker
 
 #: アーカイブ CLI のサブコマンド。デーモン起動と見分ける。
-_ARCHIVE_COMMANDS = frozenset({"search", "context", "export"})
+_ARCHIVE_COMMANDS = frozenset({"search", "context", "export", "backfill", "status"})
 
 logger = logging.getLogger("mihari_room")
 
@@ -62,6 +62,32 @@ def _build_archive_ingester(config: RoomConfig):
     return ArchiveIngester(archive_config)
 
 
+async def _archive_catchup_then_backfill(archive: Any, client: Any) -> None:
+    """オフライン差分（catchup）を埋めてから、全履歴バックフィルを直列で続ける。
+
+    バックフィルは channel_progress に再開点を残すので、途中で止まっても
+    次回の起動・再接続で続きから進む。
+    """
+    try:
+        await archive.catchup_client(client)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("アーカイブ catchup に失敗")
+    if not getattr(getattr(archive, "config", None), "backfill_enabled", False):
+        return
+    guild_count = len(tuple(getattr(client, "guilds", ()) or ()))
+    logger.info("アーカイブ バックフィル開始: %d ギルド", guild_count)
+    try:
+        inserted = await archive.backfill_client(client)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("アーカイブ バックフィルに失敗")
+        return
+    logger.info("アーカイブ バックフィル完了: %d 件収録", inserted)
+
+
 async def _run_with_discord(config: RoomConfig) -> None:
     import discord
 
@@ -77,7 +103,9 @@ async def _run_with_discord(config: RoomConfig) -> None:
     @client.event
     async def on_ready() -> None:
         archive.start()
-        asyncio.create_task(archive.catchup_client(client), name="mihari-archive-catchup")
+        asyncio.create_task(
+            _archive_catchup_then_backfill(archive, client), name="mihari-archive-catchup"
+        )
         if config.forum_channel_id is None:
             logger.error("MIHARI_FORUM_CHANNEL_ID が無い")
             return

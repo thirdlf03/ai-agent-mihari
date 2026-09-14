@@ -44,6 +44,8 @@ public enum BundledVoiceKind: String, Sendable, CaseIterable, Identifiable {
     case clingy3
     case clingyEvidence
     case returned
+    /// Mac 制御の `hand_off_file` でファイルを手渡すとき。
+    case fileHandoff
 
     public var id: String { rawValue }
 
@@ -85,6 +87,7 @@ public enum BundledVoiceKind: String, Sendable, CaseIterable, Identifiable {
         case .clingy3: return "メンヘラ・終盤"
         case .clingyEvidence: return "メンヘラ・撮り直し"
         case .returned: return "戻ってきた"
+        case .fileHandoff: return "ファイル受け渡し"
         }
     }
 

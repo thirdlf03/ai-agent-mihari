@@ -1,6 +1,19 @@
 import AppKit
 import SwiftUI
 
+/// 「手渡し」カットインの帯に出すファイル 1 個ぶん。名前と Finder と同じアイコンを持つ。
+public struct AttendanceFileChip {
+    /// 表示するファイル名。
+    public let name: String
+    /// ファイルのアイコン（`NSWorkspace.icon(forFile:)` など）。
+    public let icon: NSImage
+
+    public init(name: String, icon: NSImage) {
+        self.name = name
+        self.icon = icon
+    }
+}
+
 /// カットインの表示状態。`AttendanceCutInPresenter` が書き換え、`AttendanceCutInView` が映す。
 ///
 /// 出るときのスライドインはビュー自身が `onAppear` で始める。状態を作った直後に
@@ -13,6 +26,8 @@ final class AttendanceCutInModel {
     var image: NSImage?
     /// いま出している絵の種類。文字の出し方をこれで決める。
     var kind: AttendanceCutInImage
+    /// 手渡すファイル。非 nil のあいだ、文字の帯はファイルチップに置き換わる。
+    var fileChip: AttendanceFileChip?
     /// 退場中か。true にすると画面の外へ滑っていく。
     var isLeaving = false
     /// 白フラッシュを出しているか。成功したときだけ true にする。
@@ -20,10 +35,16 @@ final class AttendanceCutInModel {
     /// 「視差効果を減らす」設定。true のあいだはスライドも点滅もしない。
     let isReduceMotionEnabled: Bool
 
-    init(image: NSImage, kind: AttendanceCutInImage, isReduceMotionEnabled: Bool) {
+    init(
+        image: NSImage,
+        kind: AttendanceCutInImage,
+        isReduceMotionEnabled: Bool,
+        fileChip: AttendanceFileChip? = nil
+    ) {
         self.image = image
         self.kind = kind
         self.isReduceMotionEnabled = isReduceMotionEnabled
+        self.fileChip = fileChip
     }
 }
 
@@ -67,7 +88,19 @@ struct AttendanceCutInView: View {
                         .frame(width: size.width, height: size.height)
                 }
 
-                if let caption = Self.caption(for: model.kind) {
+                if let chip = model.fileChip {
+                    // 手渡し中は「TOUCH」の帯を、渡すファイルのチップに置き換える。
+                    AttendanceFileChipView(chip: chip, fontSize: size.height * Self.captionFontRatio * 0.55)
+                        .frame(
+                            width: size.width * Self.captionWidthRatio,
+                            height: size.height * Self.captionHeightRatio,
+                            alignment: .leading
+                        )
+                        .offset(
+                            x: size.width * Self.captionMinXRatio,
+                            y: size.height * Self.captionMinYRatio
+                        )
+                } else if let caption = Self.caption(for: model.kind) {
                     AttendanceCutInCaption(
                         text: caption,
                         fontSize: size.height * Self.captionFontRatio,
@@ -124,6 +157,34 @@ struct AttendanceCutInView: View {
         case .touched: return "OK"
         case .failed: return nil
         }
+    }
+}
+
+/// 手渡すファイルのチップ。アイコンとファイル名を横に並べる。文字の帯と同じ場所に出る。
+private struct AttendanceFileChipView: View {
+    /// 文字の色。帯の文字と同じピンクに揃える。
+    private static let color = Color(red: 0.95, green: 0.55, blue: 0.70)
+
+    let chip: AttendanceFileChip
+    let fontSize: CGFloat
+
+    var body: some View {
+        HStack(spacing: fontSize * 0.35) {
+            Image(nsImage: chip.icon)
+                .resizable()
+                .scaledToFit()
+                .frame(width: fontSize * 1.2, height: fontSize * 1.2)
+            Text(chip.name)
+                .font(.system(size: fontSize, weight: .bold, design: .rounded))
+                .lineLimit(1)
+                .minimumScaleFactor(0.4)
+                .truncationMode(.middle)
+                .foregroundStyle(Self.color)
+                .shadow(color: .white.opacity(0.9), radius: fontSize * 0.10)
+        }
+        .padding(.horizontal, fontSize * 0.5)
+        .padding(.vertical, fontSize * 0.3)
+        .background(.white.opacity(0.75), in: Capsule())
     }
 }
 

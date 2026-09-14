@@ -13,6 +13,9 @@ enum VoiceRealtimeProtocol {
         static let assistantText = "assistant.text"
         static let assistantAudio = "assistant.audio"
         static let assistantToolCall = "assistant.tool_call"
+        /// room 側で実行したツールの活動通知（status: running / done / failed）。
+        /// client は実行しない（実行委譲は assistant.tool_call のみ）。
+        static let assistantToolActivity = "assistant.tool_activity"
         static let error = "error"
         static let sessionClosed = "session.closed"
     }
@@ -138,6 +141,8 @@ enum VoiceIncomingFrame: Equatable, Sendable {
     /// VC 済み音声の 1 チャンク（PCM16 24 kHz mono）。`done` が 1 発話の終端。
     case assistantAudio(pcm16: Data, done: Bool)
     case assistantToolCall(name: String, callID: String, arguments: String)
+    /// room が実行したツールの通知。client は表示だけ行い実行しない。
+    case assistantToolActivity(name: String, callID: String, status: String)
     case error(code: String, message: String)
     case sessionClosed(reason: String)
     case unknown(type: String)
@@ -187,6 +192,12 @@ enum VoiceIncomingFrame: Equatable, Sendable {
                 name: json["name"] as? String ?? "",
                 callID: json["call_id"] as? String ?? "",
                 arguments: json["arguments"] as? String ?? ""
+            )
+        case VoiceRealtimeProtocol.EventType.assistantToolActivity:
+            return .assistantToolActivity(
+                name: json["name"] as? String ?? "",
+                callID: json["call_id"] as? String ?? "",
+                status: json["status"] as? String ?? ""
             )
         case VoiceRealtimeProtocol.EventType.error:
             return .error(

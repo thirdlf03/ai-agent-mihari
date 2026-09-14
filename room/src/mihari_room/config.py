@@ -21,6 +21,10 @@ DEFAULT_VOICE_REALTIME_MODEL = "gpt-realtime-2.1-mini"
 DEFAULT_LIVE_MODEL = "gpt-live-1"
 DEFAULT_LIVE_VOICE = "marin"
 
+#: Live の session.delegation（Responses バックエンド）の既定モデル。
+#: ツール実行・長い推論はこちらへ委譲する。
+DEFAULT_LIVE_DELEGATION_MODEL = "gpt-5.6-terra"
+
 #: voice セッションの出力モード。text=テキストのみ / live_audio=gpt-live-1 音声+VC 中継。
 VOICE_OUTPUT_MODES = frozenset({"text", "live_audio"})
 DEFAULT_VOICE_OUTPUT_MODE = "text"
@@ -52,6 +56,10 @@ class RoomConfig:
     live_model: str = DEFAULT_LIVE_MODEL
     #: live_audio モードで upstream が返す声（VC 前の素の声）。
     live_voice: str = DEFAULT_LIVE_VOICE
+    #: live_audio で session.delegation（Responses 委譲）を有効にする。
+    live_delegation: bool = True
+    #: 委譲先の Responses モデル。
+    live_delegation_model: str = DEFAULT_LIVE_DELEGATION_MODEL
     #: 外部 VC サービスの base URL。空なら VC 無効（パススルー）。
     vc_url: str = ""
     #: VC サービスへの変換タイムアウト秒。
@@ -80,6 +88,11 @@ class RoomConfig:
         ).strip()
         live_model = (os.environ.get("MIHARI_LIVE_MODEL") or DEFAULT_LIVE_MODEL).strip()
         live_voice = (os.environ.get("MIHARI_LIVE_VOICE") or DEFAULT_LIVE_VOICE).strip()
+        live_delegation_raw = (os.environ.get("MIHARI_LIVE_DELEGATION") or "1").strip()
+        live_delegation = live_delegation_raw.lower() not in {"0", "false", "off", "no"}
+        live_delegation_model = (
+            os.environ.get("MIHARI_LIVE_DELEGATION_MODEL") or DEFAULT_LIVE_DELEGATION_MODEL
+        ).strip()
         vc_url = (os.environ.get("MIHARI_VC_URL") or "").strip()
         vc_timeout_raw = (os.environ.get("MIHARI_VC_TIMEOUT") or str(DEFAULT_VC_TIMEOUT)).strip()
         try:
@@ -105,6 +118,8 @@ class RoomConfig:
             voice_output_mode=voice_output_mode,
             live_model=live_model,
             live_voice=live_voice,
+            live_delegation=live_delegation,
+            live_delegation_model=live_delegation_model,
             vc_url=vc_url,
             vc_timeout=vc_timeout,
         )

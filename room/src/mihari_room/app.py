@@ -421,9 +421,7 @@ def _job_detail(orchestrator: RoomOrchestrator, job: Job) -> dict[str, Any]:
         "artifacts": artifacts,
         "temp_deploys": temp_deploys_for(job.directory),
         "screenshots": _screenshot_details(job),
-        "pending_questions": [
-            q.to_dict() for q in list_pending_questions(job.directory)
-        ],
+        "pending_questions": [q.to_dict() for q in list_pending_questions(job.directory)],
         "latest_event": journal.latest(),
     }
 
@@ -774,6 +772,9 @@ def create_app(
                 "mac_type_text",
                 "mac_key",
                 "mac_activate_app",
+                "mac_find_files",
+                "mac_fetch_file",
+                "mac_hand_off_file",
             ],
         }
 

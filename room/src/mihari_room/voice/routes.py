@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, status
 
 from mihari_room.auth import verify_token, verify_ws_token
-from mihari_room.voice.live_upstream import OpenAILiveUpstream
+from mihari_room.voice.live_upstream import OpenAILiveUpstream, live_responses_delegation
 from mihari_room.voice.protocol import PROTOCOL_VERSION
 from mihari_room.voice.sessions import ConcurrentVoiceSessionError, VoiceSessionManager
 from mihari_room.voice.stream import UpstreamFactory, handle_voice_stream
@@ -96,6 +96,9 @@ def build_voice_router(
             session_id=session_id,
             manager=manager,
             upstream_factory=factory,
+            orchestrator=getattr(websocket.app.state, "orchestrator", None),
+            mac_hub=getattr(websocket.app.state, "mac_control", None),
+            interactions=getattr(websocket.app.state, "job_interactions", None),
         )
 
     return router
@@ -107,10 +110,16 @@ def _default_upstream_factory_from_app(websocket: WebSocket) -> UpstreamFactory:
 
     def factory() -> RealtimeUpstream:
         if config.voice_output_mode == "live_audio":
+            delegation = None
+            if getattr(config, "live_delegation", False):
+                delegation = live_responses_delegation(
+                    model=config.live_delegation_model
+                )
             return OpenAILiveUpstream(
                 api_key=config.openai_api_key,
                 model=config.live_model,
                 voice=config.live_voice,
+                delegation=delegation,
             )
         return OpenAIRealtimeUpstream(
             api_key=config.openai_api_key,

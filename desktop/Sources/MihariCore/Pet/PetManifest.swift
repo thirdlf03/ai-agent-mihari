@@ -42,6 +42,19 @@ public struct PetDefinition: Identifiable, Hashable, Sendable {
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
+    /// 「手渡し」カットインの画像の位置。
+    ///
+    /// `cutin/deliver.png` があればそれを使う。専用画像を持たないペットは
+    /// `cutin/reach.png`（指を差し出す絵）に倒すので、演出自体が消えることはない。
+    public var fileHandoffImageURL: URL? {
+        let deliver =
+            directoryURL
+            .appendingPathComponent("cutin")
+            .appendingPathComponent("deliver.png")
+        if FileManager.default.fileExists(atPath: deliver.path) { return deliver }
+        return cutInImageURL(.reach)
+    }
+
     /// カットインに必要な画像が 3 枚とも揃っているか。揃っているペットだけが演出を出せる。
     public var hasCutInImages: Bool {
         AttendanceCutInImage.allCases.allSatisfy { cutInImageURL($0) != nil }

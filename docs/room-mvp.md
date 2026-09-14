@@ -108,6 +108,17 @@ desktop は詳細 refresh 時に `GET .../memory` を引き直すこと。
   初期上限は最大 100 ページ・処理 120 秒。暗号化・破損・上限超過は
   `success=false` と `code` で明示し、部分処理は `partial` / `truncated` で
   全件処理と偽らない
+- Mac ローカルファイル用の 3 ツールも `mihari_room` toolset で提供する
+  （認証付き room↔Mac WebSocket の既存の許可フロー経由・shell なし）：
+  `mac_find_files`（許可フォルダ内の名前 / 本文検索）/ `mac_fetch_file`（1 ファイルを
+  読んで `research/downloads/` へ保存。`max_bytes` 上限・既定 8MB・最大 16MB。
+  超過分は `truncated` で切り捨て）/ `mac_hand_off_file`（Finder で表示し、
+  ペットの「手渡し」カットインを出す）
+  - 触れるのは Mac 側の許可フォルダの内側だけ。既定は `~/Desktop`・`~/Documents`・
+    `~/Downloads` で、Mac 側の環境変数 `MIHARI_MAC_SEARCH_DIRS`（`:` 区切り・`~` 可）で
+    上書きできる。`..` や symlink 越しの外出は常に拒否
+  - 本文検索は Spotlight → 上限つきテキスト走査のフォールバック
+  - 操作履歴（`jobs/<id>/.mac/operations.jsonl`）にはファイル内容（base64）を残さない
 - 危険ツール名の最終扉として `delegate_task / skill_manage / cronjob_manage / terminal`
   等を agent 表面から名指し除去する（`skills_list / skill_view` の参照は残す）
 - **制限の正直な範囲**: `bash` 完全無制限化（opt-in 時）の書き込み先までは塞げない。
@@ -156,7 +167,17 @@ desktop は詳細 refresh 時に `GET .../memory` を引き直すこと。
   本番 URL の公開・非公開切替（上）の対象外
 - **アーカイブ**: 既定で Bot が見えるテキスト / スレッド / Forum を全部収録する。
   `MIHARI_ARCHIVE_CHANNEL_IDS` は任意の絞り込み（空なら全チャンネル）。
-  起動時に各チャンネルの最終収録以降を history で埋め直す。
+  起動時に各チャンネルの最終収録以降を history で埋め直す（catchup）。
+  さらに catchup 完了後、**全チャンネル全履歴のバックフィル**を既定で走らせる。
+  スコープ（`channel:<id>` / `thread:<id>`）ごとに `channel_progress` テーブルへ
+  再開点を残すので、途中で止まっても次回起動・再接続で続きから遡る。
+  Forbidden のチャンネルは done 扱いで skip し他を続行、それ以外の失敗は
+  進捗を残したまま次回再開する。`MIHARI_ARCHIVE_BACKFILL=0` で無効化、
+  `MIHARI_ARCHIVE_BACKFILL_PAGE_SIZE`（既定 1000）と
+  `MIHARI_ARCHIVE_BACKFILL_INTERVAL`（既定 0.3 秒）で調整できる。
+  デーモンを上げずに手動で回すには `python -m mihari_room.archive backfill`
+  （`DISCORD_BOT_TOKEN` 必須、REST のみ・Gateway は張らない）。
+  進捗は `python -m mihari_room.archive status` で見られる。
   検索・文脈・export は `python -m mihari_room.archive`（CLI）でも叩ける
 
 ## 環境変数

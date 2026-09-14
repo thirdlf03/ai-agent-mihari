@@ -21,11 +21,14 @@ from mihari_room.store.file_store import FileJobStore
 from mihari_room.voice.live_upstream import (
     LIVE_INSTRUCTIONS,
     OpenAILiveUpstream,
+    live_responses_delegation,
     live_session_start_event,
 )
 from mihari_room.voice.protocol import (
     EVENT_ASSISTANT_AUDIO,
     EVENT_ASSISTANT_TEXT,
+    EVENT_ASSISTANT_TOOL_ACTIVITY,
+    EVENT_ASSISTANT_TOOL_CALL,
     EVENT_SESSION_READY,
     EVENT_USER_TEXT,
 )
@@ -38,7 +41,7 @@ from mihari_room.voice.vc import (
     voice_converter_from_config,
 )
 from tests.recording import RecordingBoard, ScriptedWorker
-from tests.test_voice_realtime import _disconnect_and_idle
+from tests.test_voice_realtime import PNG_1X1, _disconnect_and_idle
 
 TOKEN = "room-secret"
 
@@ -95,6 +98,74 @@ class FakeLiveUpstream(RealtimeUpstream):
 
     def sent_events(self) -> list[dict]:
         return list(self._sent)
+
+
+class DelegatingLiveUpstream(FakeLiveUpstream):
+    """最初の append で session.delegation.created + response.event 列を返す。
+
+    delegation の function_call を 1 件だけ含み、response.completed で閉じる。
+    ``tool_name`` / ``call_id`` で呼ばせるツールを選べる。
+    """
+
+    def __init__(self, tool_name: str = "get_job_status", call_id: str = "call_live_1") -> None:
+        super().__init__()
+        self._tool_name = tool_name
+        self._call_id = call_id
+        self._delegated = False
+
+    async def send(self, event: dict) -> None:
+        if self._closed:
+            return
+        self._sent.append(event)
+        event_type = event.get("type")
+        if event_type == "response.create":
+            # 委譲継続（response.create）は「ツール結果を受け取った」合図として
+            # 1 発話ぶんの音声終端を返し、テスト側の待ち合わせに使う。
+            await self._queue.put({"type": "session.output_audio.done"})
+            return
+        if event_type != "input_audio_buffer.append" or self._delegated:
+            return
+        self._delegated = True
+        await self._queue.put(
+            {
+                "type": "session.delegation.created",
+                "delegation": {"id": "dlg-1", "target": "responses"},
+                "response_id": "resp_live_1",
+            }
+        )
+        await self._queue.put(
+            {
+                "type": "response.event",
+                "delegation_id": "dlg-1",
+                "event": {
+                    "type": "response.created",
+                    "response": {"id": "resp_live_1"},
+                },
+            }
+        )
+        await self._queue.put(
+            {
+                "type": "response.event",
+                "delegation_id": "dlg-1",
+                "event": {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "function_call",
+                        "name": self._tool_name,
+                        "call_id": self._call_id,
+                        "arguments": "{}",
+                    },
+                },
+            }
+        )
+        await self._queue.put(
+            {
+                "type": "response.event",
+                "delegation_id": "dlg-1",
+                "event": {"type": "response.completed", "response": {"id": "resp_live_1"}},
+            }
+        )
+
 
 
 class QuietLiveUpstream(FakeLiveUpstream):
@@ -430,3 +501,169 @@ def test_config_rejects_bad_output_mode(tmp_path: Path) -> None:
         RoomConfig(token=TOKEN, root=tmp_path, owner_id="owner", voice_output_mode="bogus")
     with pytest.raises(ValueError):
         RoomConfig(token=TOKEN, root=tmp_path, owner_id="owner", vc_url="ftp://x")
+
+
+def test_live_session_start_includes_delegation() -> None:
+    """delegation 指定時は session.delegation.responses にツール一式が載る。"""
+    delegation = live_responses_delegation(model="gpt-5.6-terra")
+    event = live_session_start_event("gpt-live-1", "marin", delegation=delegation)
+    session = event["session"]
+    assert session["delegation"]["type"] == "responses"
+    responses = session["delegation"]["responses"]
+    assert responses["model"] == "gpt-5.6-terra"
+    assert responses["instructions"]
+    assert responses["tool_choice"] == "auto"
+    assert responses["parallel_tool_calls"] is False
+    names = {tool["name"] for tool in responses["tools"]}
+    assert "submit_job" in names
+    assert "capture_screen" in names
+    # delegation 無しなら session.delegation を出さない。
+    bare = live_session_start_event("gpt-live-1", "marin")
+    assert "delegation" not in bare["session"]
+
+
+def test_live_send_passes_delegation_commands() -> None:
+    """delegation 有効時は response.item.create / response.create / session.update を通す。"""
+    upstream = OpenAILiveUpstream(
+        api_key="test-key",
+        model="gpt-live-1",
+        voice="marin",
+        delegation=live_responses_delegation(model="gpt-5.6-terra"),
+    )
+    ws = _RecordingWS()
+    upstream._ws = ws
+    asyncio.run(upstream.send({"type": "input_audio_buffer.commit"}))
+    asyncio.run(
+        upstream.send(
+            {
+                "type": "response.item.create",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": "c1",
+                    "output": "{}",
+                },
+            }
+        )
+    )
+    asyncio.run(
+        upstream.send(
+            {
+                "type": "response.create",
+                "response": {"output_modalities": ["text"]},
+            }
+        )
+    )
+    asyncio.run(upstream.send({"type": "session.update", "session": {"x": 1}}))
+    assert len(ws.frames) == 3
+    assert ws.frames[0]["type"] == "response.item.create"
+    # response.create の Realtime 形ボディは Live では意味を持たないので剥がす。
+    assert ws.frames[1] == {"type": "response.create"}
+    assert ws.frames[2]["type"] == "session.update"
+
+
+def test_live_delegation_tool_call_executes_and_continues(tmp_path: Path) -> None:
+    """response.event 内の function_call を room で実行し、fco + response.create を返す。"""
+    fake = DelegatingLiveUpstream()
+    client = _make_live_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01").decode()
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+        frames = _collect_until(
+            ws,
+            lambda f: f["type"] == EVENT_ASSISTANT_AUDIO and f.get("done"),
+        )
+        _disconnect_and_idle(ws, client, session_id)
+    activities = [f for f in frames if f["type"] == EVENT_ASSISTANT_TOOL_ACTIVITY]
+    assert activities[0]["name"] == "delegate"
+    assert activities[0]["status"] == "running"
+    tool_activity = activities[-1]
+    assert tool_activity["name"] == "get_job_status"
+    assert tool_activity["call_id"] == "call_live_1"
+    assert tool_activity["status"] == "done"
+    # room 実行ツールなので client へは tool_call を送らない。
+    assert not any(f["type"] == EVENT_ASSISTANT_TOOL_CALL for f in frames)
+    sent = fake.sent_events()
+    fco = [
+        e
+        for e in sent
+        if e.get("type") == "response.item.create"
+        and (e.get("item") or {}).get("type") == "function_call_output"
+    ]
+    assert len(fco) == 1
+    assert fco[0]["item"]["call_id"] == "call_live_1"
+    assert json.loads(fco[0]["item"]["output"])["success"] is True
+    creates_after = [
+        e for e in sent[sent.index(fco[0]) :] if e.get("type") == "response.create"
+    ]
+    assert len(creates_after) == 1
+
+
+def test_live_capture_screen_delegates_to_client(tmp_path: Path) -> None:
+    """capture_screen は client へ tool_call で渡り、input.image が結果として返る。"""
+    fake = DelegatingLiveUpstream(tool_name="capture_screen", call_id="call_live_cap")
+    client = _make_live_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01").decode()
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+        frames = _collect_until(ws, lambda f: f["type"] == EVENT_ASSISTANT_TOOL_CALL)
+        tool = frames[-1]
+        assert tool["name"] == "capture_screen"
+        assert tool["call_id"] == "call_live_cap"
+        # desktop が撮って返す input.image → fco + 画像メッセージ + response.create。
+        ws.send_json(
+            {
+                "type": "input.image",
+                "image_base64": PNG_1X1,
+                "media_type": "image/png",
+                "prompt": "見て",
+            }
+        )
+        # response.create を受けた fake が output_audio.done を返すのを待つ。
+        _collect_until(
+            ws,
+            lambda f: f["type"] == EVENT_ASSISTANT_AUDIO and f.get("done"),
+        )
+        _disconnect_and_idle(ws, client, session_id)
+    sent = fake.sent_events()
+    message_items = [
+        e
+        for e in sent
+        if e.get("type") == "response.item.create"
+        and (e.get("item") or {}).get("type") == "message"
+    ]
+    assert len(message_items) == 1
+    contents = message_items[0]["item"]["content"]
+    assert any(part.get("type") == "input_image" for part in contents)
+    fco = [
+        e
+        for e in sent
+        if e.get("type") == "response.item.create"
+        and (e.get("item") or {}).get("type") == "function_call_output"
+    ]
+    assert len(fco) == 1
+    assert fco[0]["item"]["call_id"] == "call_live_cap"
+    assert json.loads(fco[0]["item"]["output"])["success"] is True
+    creates_after = [
+        e for e in sent[sent.index(fco[0]) :] if e.get("type") == "response.create"
+    ]
+    assert len(creates_after) == 1
+
+
+def test_config_reads_live_delegation_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MIHARI_ROOM_TOKEN", TOKEN)
+    monkeypatch.setenv("MIHARI_ROOM_ROOT", str(tmp_path))
+    monkeypatch.setenv("MIHARI_LIVE_DELEGATION", "0")
+    monkeypatch.setenv("MIHARI_LIVE_DELEGATION_MODEL", "gpt-x")
+    cfg = RoomConfig.from_environment()
+    assert cfg.live_delegation is False
+    assert cfg.live_delegation_model == "gpt-x"
