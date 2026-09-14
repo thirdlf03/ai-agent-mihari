@@ -6,7 +6,6 @@ import asyncio
 import threading
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
 
 from fastapi.testclient import TestClient
 

@@ -36,7 +36,7 @@ from mihari_room.voice.protocol import (
 )
 from mihari_room.voice.stream import LIVE_DELEGATION_INPUT_LIMIT, _send_tool_result
 from mihari_room.voice.tools import VoiceToolOutcome
-from mihari_room.voice.upstream import RealtimeUpstream
+from mihari_room.voice.upstream import FakeRealtimeUpstream, RealtimeUpstream
 from mihari_room.voice.vc import (
     HTTPVoiceConverter,
     PassthroughConverter,
@@ -44,6 +44,7 @@ from mihari_room.voice.vc import (
     pcm16_to_f32,
     voice_converter_from_config,
 )
+from mihari_room.voice_gateway import create_gateway_app
 from tests.recording import RecordingBoard, ScriptedWorker
 from tests.test_voice_realtime import PNG_1X1, _disconnect_and_idle
 
@@ -55,11 +56,29 @@ PCM_BYTES = struct.pack(f"<{len(PCM_SAMPLES)}h", *PCM_SAMPLES)
 PCM_B64 = base64.b64encode(PCM_BYTES).decode()
 
 
+@pytest.fixture(autouse=True)
+def _fast_live_watchdogs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """実時間のウォッチドッグ既定値をテスト用に縮める。
+
+    本番の gap 既定は出力 1.1s / 入力 1.8s / tick 0.25s。テストでは発話の
+    「途切れ」を待つ必要があるため 1/10 程度に縮め、tick は gap より小さく
+    する（区切り検出の粒度を保つ）。
+    """
+    import mihari_room.voice.stream as stream_module
+
+    monkeypatch.setattr(stream_module, "_LIVE_WATCH_TICK_SEC", 0.05)
+    monkeypatch.setattr(stream_module, "_LIVE_OUTPUT_GAP_SEC", 0.15)
+    monkeypatch.setattr(stream_module, "_LIVE_INPUT_GAP_SEC", 0.2)
+
+
 class FakeLiveUpstream(RealtimeUpstream):
     """gpt-live-1 相当の応答を返すテスト用 upstream。
 
-    room からは Realtime 形のイベントが届くので、
+    room からは Realtime 形のイベントが届くので、非無音の
     ``input_audio_buffer.append`` を受けたら live 形のイベント列を返す。
+    ``session.output_audio.done``/``stopped`` は公式イベント一覧に存在
+    しないため送らない — 発話終端は room 側ウォッチドッグの出力活動
+    gap 判定が自前で作る。
     """
 
     def __init__(self) -> None:
@@ -76,11 +95,16 @@ class FakeLiveUpstream(RealtimeUpstream):
             return
         self._sent.append(event)
         if event.get("type") == "input_audio_buffer.append":
+            raw = base64.b64decode(event.get("audio") or "")
+            if not any(raw):
+                # 無音フレーム（無音ペーサー含む）には応答しない。
+                # 実機の Live も無音では出力を起こさず、応答し続けると
+                # 出力活動が途切れずウォッチドッグの区切りが来なくなる。
+                return
             await self._queue.put({"type": "session.input_transcript.delta", "delta": "こんにちは"})
             await self._queue.put({"type": "session.output_transcript.delta", "delta": "やあ、"})
             await self._queue.put({"type": "session.output_transcript.delta", "delta": "見てるよ"})
             await self._queue.put({"type": "session.output_audio.delta", "delta": PCM_B64})
-            await self._queue.put({"type": "session.output_audio.done"})
 
     async def receive(self) -> dict:
         if self._closed:
@@ -111,10 +135,16 @@ class DelegatingLiveUpstream(FakeLiveUpstream):
     ``tool_name`` / ``call_id`` で呼ばせるツールを選べる。
     """
 
-    def __init__(self, tool_name: str = "get_job_status", call_id: str = "call_live_1") -> None:
+    def __init__(
+        self,
+        tool_name: str = "get_job_status",
+        call_id: str = "call_live_1",
+        arguments: str = "{}",
+    ) -> None:
         super().__init__()
         self._tool_name = tool_name
         self._call_id = call_id
+        self._arguments = arguments
         self._delegated = False
 
     async def send(self, event: dict) -> None:
@@ -124,10 +154,16 @@ class DelegatingLiveUpstream(FakeLiveUpstream):
         event_type = event.get("type")
         if event_type == "response.create":
             # 委譲継続（response.create）は「ツール結果を受け取った」合図として
-            # 1 発話ぶんの音声終端を返し、テスト側の待ち合わせに使う。
-            await self._queue.put({"type": "session.output_audio.done"})
+            # 1 発話ぶんの音声を返す。終端は watchdog の gap 判定が作るので、
+            # テスト側は assistant.audio done を待ち合わせに使える。
+            await self._queue.put(
+                {"type": "session.output_audio.delta", "delta": PCM_B64}
+            )
             return
         if event_type != "input_audio_buffer.append" or self._delegated:
+            return
+        raw = base64.b64decode(event.get("audio") or "")
+        if not any(raw):
             return
         self._delegated = True
         await self._queue.put(
@@ -155,9 +191,10 @@ class DelegatingLiveUpstream(FakeLiveUpstream):
                     "type": "response.output_item.done",
                     "item": {
                         "type": "function_call",
+                        "status": "completed",
                         "name": self._tool_name,
                         "call_id": self._call_id,
-                        "arguments": "{}",
+                        "arguments": self._arguments,
                     },
                 },
             }
@@ -169,7 +206,6 @@ class DelegatingLiveUpstream(FakeLiveUpstream):
                 "event": {"type": "response.completed", "response": {"id": "resp_live_1"}},
             }
         )
-
 
 
 class TalkingDelegatingLiveUpstream(FakeLiveUpstream):
@@ -192,9 +228,14 @@ class TalkingDelegatingLiveUpstream(FakeLiveUpstream):
         self._sent.append(event)
         event_type = event.get("type")
         if event_type == "response.create":
-            await self._queue.put({"type": "session.output_audio.done"})
+            await self._queue.put(
+                {"type": "session.output_audio.delta", "delta": PCM_B64}
+            )
             return
         if event_type != "input_audio_buffer.append" or self._delegated:
+            return
+        raw = base64.b64decode(event.get("audio") or "")
+        if not any(raw):
             return
         self._delegated = True
         # 委譲前の発話断片。
@@ -230,6 +271,7 @@ class TalkingDelegatingLiveUpstream(FakeLiveUpstream):
                     "type": "response.output_item.done",
                     "item": {
                         "type": "function_call",
+                        "status": "completed",
                         "name": self._tool_name,
                         "call_id": self._call_id,
                         "arguments": "{}",
@@ -244,6 +286,126 @@ class TalkingDelegatingLiveUpstream(FakeLiveUpstream):
                 "event": {"type": "response.completed", "response": {"id": "resp_live_1"}},
             }
         )
+
+
+class TextOnlyDelegatingLiveUpstream(FakeLiveUpstream):
+    """テキストだけの委譲応答（function_call 無し）を返すバリアント。
+
+    実機で観測されたとおり、委譲応答の進行・テキスト・完了は
+    ``response.event`` 内側で届き、``session.output_audio.done`` 系の
+    区切りは来ない。非無音の最初の append への応答として流す。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._delegated = False
+
+    async def send(self, event: dict) -> None:
+        if self._closed:
+            return
+        self._sent.append(event)
+        if event.get("type") != "input_audio_buffer.append" or self._delegated:
+            return
+        raw = base64.b64decode(event.get("audio") or "")
+        if not any(raw):
+            return
+        self._delegated = True
+        await self._queue.put(
+            {"type": "session.input_transcript.delta", "delta": "今何してるんだっけ"}
+        )
+        await self._queue.put(
+            {
+                "type": "session.delegation.created",
+                "delegation": {"id": "dlg-1", "target": "responses"},
+                "response_id": "resp_live_1",
+            }
+        )
+        for inner in (
+            {"type": "response.in_progress"},
+            {"type": "response.created", "response": {"id": "resp_live_1"}},
+            {"type": "response.output_item.added", "item": {"type": "message"}},
+            {"type": "response.function_call_arguments.delta", "delta": "{"},
+            {"type": "response.function_call_arguments.done", "arguments": "{}"},
+            {"type": "response.content_part.added", "part": {"type": "output_text"}},
+            {"type": "response.output_text.delta", "delta": "調べたよ、"},
+            {"type": "response.output_text.delta", "delta": "結果はOKだった"},
+        ):
+            await self._queue.put(
+                {"type": "response.event", "delegation_id": "dlg-1", "event": inner}
+            )
+        # 委譲応答の途中でのユーザー発話。response.completed で確定するはず。
+        await self._queue.put(
+            {"type": "session.input_transcript.delta", "delta": "あ、そうなんだ"}
+        )
+        for inner in (
+            {"type": "response.output_text.done", "text": "調べたよ、結果はOKだった"},
+            {"type": "response.content_part.done"},
+            {"type": "response.completed", "response": {"id": "resp_live_1"}},
+        ):
+            await self._queue.put(
+                {"type": "response.event", "delegation_id": "dlg-1", "event": inner}
+            )
+        # 既知だが中継しないイベント。unhandled 警告を出さないことの観測用。
+        await self._queue.put(
+            {"type": "session.usage.updated", "usage": {"total_tokens": 42}}
+        )
+
+
+class CumulativeDeltaLiveUpstream(FakeLiveUpstream):
+    """transcript delta を累積全文形式・重複送出で返すバリアント（二重化対策用）。
+
+    実機で「今何してるんだっけ今何してるんだっけ」と連結表示された障害の
+    再現。非無音の append へのみ応答する。
+    """
+
+    async def send(self, event: dict) -> None:
+        if self._closed:
+            return
+        self._sent.append(event)
+        if event.get("type") != "input_audio_buffer.append":
+            return
+        raw = base64.b64decode(event.get("audio") or "")
+        if not any(raw):
+            return
+        # 同一文の重複送出 → 累積全文の追記。
+        await self._queue.put(
+            {"type": "session.input_transcript.delta", "delta": "今何してるんだっけ"}
+        )
+        await self._queue.put(
+            {"type": "session.input_transcript.delta", "delta": "今何してるんだっけ"}
+        )
+        await self._queue.put(
+            {
+                "type": "session.input_transcript.delta",
+                "delta": "今何してるんだっけ、えっと",
+            }
+        )
+        # assistant 側も累積全文形式で重複送出。
+        await self._queue.put(
+            {"type": "session.output_transcript.delta", "delta": "見てるよ"}
+        )
+        await self._queue.put(
+            {"type": "session.output_transcript.delta", "delta": "見てるよ、ちゃんと"}
+        )
+        await self._queue.put({"type": "session.output_audio.delta", "delta": PCM_B64})
+
+
+class _JobWatcherStubExecutor:
+    """``finished_jobs`` で 1 回だけ結果を返す executor スタブ（gateway 経路用）。"""
+
+    def __init__(self, results: list[dict]) -> None:
+        self._results = list(results)
+        self.closed = False
+
+    async def execute(self, name: str, arguments_json: str) -> VoiceToolOutcome:
+        return VoiceToolOutcome(output='{"success": true}')
+
+    async def finished_jobs(self) -> list[dict]:
+        results, self._results = self._results, []
+        return results
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 class NoTranscriptLiveUpstream(FakeLiveUpstream):
@@ -264,38 +426,39 @@ class NoTranscriptLiveUpstream(FakeLiveUpstream):
             return
         await self._queue.put({"type": "session.output_transcript.delta", "delta": "返事だよ"})
         await self._queue.put({"type": "session.output_audio.delta", "delta": PCM_B64})
-        await self._queue.put({"type": "session.output_audio.done"})
 
 
 class SilentTurnLiveUpstream(FakeLiveUpstream):
-    """input_transcript.delta を返さず、全 append に応答を積むバリアント。
+    """無音 append への応答で「発話ゼロのターン」を作るバリアント。
 
-    無音 append にも応答するので、無音だけのターンでも flush 区切りが来る
-    （「無音は発話として数えない」分岐の観測用）。
+    最初の append（無音ペーサー含む）へ 1 度だけ応答を積み、その後は
+    静かになる。区切りは watchdog の出力 gap 判定が作るので、無音だけの
+    ターンでも assistant.audio done が届き、かつ ``user.transcript_none``
+    は出ない（無音は発話として数えない）ことを観測する。
     """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._responded = False
 
     async def send(self, event: dict) -> None:
         if self._closed:
             return
         self._sent.append(event)
-        if event.get("type") == "input_audio_buffer.append":
-            await self._queue.put(
-                {"type": "session.output_transcript.delta", "delta": "返事だよ"}
-            )
-            await self._queue.put({"type": "session.output_audio.delta", "delta": PCM_B64})
-            await self._queue.put({"type": "session.output_audio.done"})
+        if event.get("type") != "input_audio_buffer.append" or self._responded:
+            return
+        self._responded = True
+        await self._queue.put(
+            {"type": "session.output_transcript.delta", "delta": "返事だよ"}
+        )
+        await self._queue.put({"type": "session.output_audio.delta", "delta": PCM_B64})
 
 
 class SpeechOnlyLiveUpstream(FakeLiveUpstream):
-    """非無音の append にだけ親の応答列を積む（ターン統計を確定的にするため）。"""
+    """非無音の append にだけ応答する（ターン統計を確定的にするための命名）。
 
-    async def send(self, event: dict) -> None:
-        if event.get("type") == "input_audio_buffer.append":
-            raw = base64.b64decode(event.get("audio") or "")
-            if not any(raw):
-                self._sent.append(event)
-                return
-        await super().send(event)
+    親クラスが既に無音フレームを弾くため振る舞いは同一。
+    """
 
 
 class QuietLiveUpstream(FakeLiveUpstream):
@@ -309,6 +472,238 @@ class QuietLiveUpstream(FakeLiveUpstream):
         if self._closed:
             return
         self._sent.append(event)
+
+
+class TranscriptOnlyLiveUpstream(FakeLiveUpstream):
+    """input_transcript.delta だけを返すバリアント（入力 watchdog の観測用）。
+
+    出力イベントは一切返さない。ユーザー発話の区切りは出力側ではなく
+    入力 transcript の gap ウォッチドッグで確定する。
+    """
+
+    async def send(self, event: dict) -> None:
+        if self._closed:
+            return
+        self._sent.append(event)
+        if event.get("type") != "input_audio_buffer.append":
+            return
+        raw = base64.b64decode(event.get("audio") or "")
+        if not any(raw):
+            return
+        await self._queue.put(
+            {"type": "session.input_transcript.delta", "delta": "声だけのターン"}
+        )
+
+
+class TimestampedTranscriptLiveUpstream(FakeLiveUpstream):
+    """start_ms/end_ms 付きの input_transcript.delta を返すバリアント。
+
+    発話区間が大きく離れた 2 delta を積み、room が時刻の飛びで
+    別発話として先に確定するかを見る（実機の発話区間グルーピング）。
+    """
+
+    async def send(self, event: dict) -> None:
+        if self._closed:
+            return
+        self._sent.append(event)
+        if event.get("type") != "input_audio_buffer.append":
+            return
+        raw = base64.b64decode(event.get("audio") or "")
+        if not any(raw):
+            return
+        await self._queue.put(
+            {
+                "type": "session.input_transcript.delta",
+                "delta": "一つ目",
+                "start_ms": 0,
+                "end_ms": 400,
+            }
+        )
+        await self._queue.put(
+            {
+                "type": "session.input_transcript.delta",
+                "delta": "二つ目",
+                "start_ms": 6000,
+                "end_ms": 6400,
+            }
+        )
+
+
+class DoneEmittingLiveUpstream(FakeLiveUpstream):
+    """``session.output_audio.done`` を明示的に送るバリアント（保険分岐用）。
+
+    公式イベント一覧には存在しないが、万一 upstream から届いた場合に
+    区切り処理へ進める保険として残した分岐を検証する。
+    """
+
+    async def send(self, event: dict) -> None:
+        if self._closed:
+            return
+        self._sent.append(event)
+        if event.get("type") != "input_audio_buffer.append":
+            return
+        raw = base64.b64decode(event.get("audio") or "")
+        if not any(raw):
+            return
+        await self._queue.put({"type": "session.output_audio.delta", "delta": PCM_B64})
+        await self._queue.put({"type": "session.output_audio.done"})
+
+
+class FailingDelegatingLiveUpstream(FakeLiveUpstream):
+    """委譲応答が response.failed で終わるバリアント（失敗通知の観測用）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._delegated = False
+
+    async def send(self, event: dict) -> None:
+        if self._closed:
+            return
+        self._sent.append(event)
+        if event.get("type") != "input_audio_buffer.append" or self._delegated:
+            return
+        raw = base64.b64decode(event.get("audio") or "")
+        if not any(raw):
+            return
+        self._delegated = True
+        await self._queue.put(
+            {
+                "type": "session.delegation.created",
+                "delegation": {"id": "dlg-1", "target": "responses"},
+                "response_id": "resp_fail_1",
+            }
+        )
+        for inner in (
+            {"type": "response.in_progress"},
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": "resp_fail_1",
+                    "error": {"message": "backend exploded"},
+                },
+            },
+        ):
+            await self._queue.put(
+                {"type": "response.event", "delegation_id": "dlg-1", "event": inner}
+            )
+
+
+class NonCompletedItemDelegatingLiveUpstream(FakeLiveUpstream):
+    """status != completed の function_call item を返すバリアント。
+
+    output_item.done でも実行中（in_progress 等）の item は実行対象に
+    しないことを観測する（completed 状態の item のみ回収）。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._delegated = False
+
+    async def send(self, event: dict) -> None:
+        if self._closed:
+            return
+        self._sent.append(event)
+        if event.get("type") != "input_audio_buffer.append" or self._delegated:
+            return
+        raw = base64.b64decode(event.get("audio") or "")
+        if not any(raw):
+            return
+        self._delegated = True
+        await self._queue.put(
+            {
+                "type": "session.delegation.created",
+                "delegation": {"id": "dlg-1", "target": "responses"},
+                "response_id": "resp_live_1",
+            }
+        )
+        for inner in (
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "status": "in_progress",
+                    "name": "get_job_status",
+                    "call_id": "call_live_1",
+                    "arguments": "{}",
+                },
+            },
+            {"type": "response.completed", "response": {"id": "resp_live_1"}},
+        ):
+            await self._queue.put(
+                {"type": "response.event", "delegation_id": "dlg-1", "event": inner}
+            )
+
+
+class RepeatedDelegatingLiveUpstream(FakeLiveUpstream):
+    """response.create ごとに新しい委譲を返すバリアント。
+
+    1 回目の委譲は function_call 付きで完了させ、room が fco +
+    response.create を返すと 2 回目の委譲（呼び出し無し）を流す。
+    ``delegated_calls`` が委譲ごとにクリアされていなければ、2 回目の
+    completed で同じ呼び出しが再実行されてしまう（回帰検出用）。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._delegated = False
+        self._followups = 0
+
+    async def send(self, event: dict) -> None:
+        if self._closed:
+            return
+        self._sent.append(event)
+        event_type = event.get("type")
+        if event_type == "response.create":
+            self._followups += 1
+            if self._followups == 1:
+                # 2 回目の委譲: function_call を含まずそのまま完了。
+                await self._queue.put(
+                    {
+                        "type": "session.delegation.created",
+                        "delegation": {"id": "dlg-2", "target": "responses"},
+                        "response_id": "resp_live_2",
+                    }
+                )
+                await self._queue.put(
+                    {
+                        "type": "response.event",
+                        "delegation_id": "dlg-2",
+                        "event": {
+                            "type": "response.completed",
+                            "response": {"id": "resp_live_2"},
+                        },
+                    }
+                )
+            return
+        if event_type != "input_audio_buffer.append" or self._delegated:
+            return
+        raw = base64.b64decode(event.get("audio") or "")
+        if not any(raw):
+            return
+        self._delegated = True
+        await self._queue.put(
+            {
+                "type": "session.delegation.created",
+                "delegation": {"id": "dlg-1", "target": "responses"},
+                "response_id": "resp_live_1",
+            }
+        )
+        for inner in (
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "status": "completed",
+                    "name": "get_job_status",
+                    "call_id": "call_live_1",
+                    "arguments": "{}",
+                },
+            },
+            {"type": "response.completed", "response": {"id": "resp_live_1"}},
+        ):
+            await self._queue.put(
+                {"type": "response.event", "delegation_id": "dlg-1", "event": inner}
+            )
 
 
 class _RecordingWS:
@@ -411,10 +806,11 @@ def test_live_audio_relayed_as_assistant_audio(tmp_path: Path) -> None:
     # FakeLiveUpstream は append しか反応しない。commit/response.create は届くが無害。
     sent_types = [e.get("type") for e in fake.sent_events()]
     assert "input_audio_buffer.append" in sent_types
-    assert fake.audio_output_events_seen() == 2
+    # output_audio.delta 1 回分のみ（done は実在しないので fake は送らない）。
+    assert fake.audio_output_events_seen() == 1
 
     detail = client.get(f"/voice/sessions/{session_id}", headers=_auth()).json()
-    assert detail["upstream_audio_output_events"] == 2
+    assert detail["upstream_audio_output_events"] == 1
     history = client.get(f"/voice/sessions/{session_id}/history", headers=_auth()).json()
     texts = [m["text"] for m in history["messages"]]
     assert "こんにちは" in texts
@@ -497,7 +893,8 @@ def test_live_silence_turn_does_not_send_transcript_none(tmp_path: Path) -> None
     ) as ws:
         assert ws.receive_json()["type"] == EVENT_SESSION_READY
         ws.send_json({"type": "input.audio", "audio_base64": silence_b64})
-        # 無音 append にも応答する fake なので、ここで flush 区切りが必ず来る。
+        # 最初の append へ 1 度だけ応答する fake。応答が途切れたあとは
+        # ウォッチドッグの出力 gap 判定で区切りが来る。
         frames = _collect_until(
             ws,
             lambda f: f["type"] == EVENT_ASSISTANT_AUDIO and f.get("done"),
@@ -544,7 +941,9 @@ def test_live_audio_passes_through_converter(
     session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
     with client.websocket_connect(f"/voice/sessions/{session_id}/stream", headers=_auth()) as ws:
         ws.receive_json()
-        ws.send_json({"type": "input.audio", "audio_base64": "AAAA"})
+        # 非無音でないと fake は応答しない（無音には Live も反応しない前提）。
+        audio_b64 = base64.b64encode(b"\x00\x01").decode()
+        ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
         frames = _collect_until(
             ws,
             lambda f: f["type"] == EVENT_ASSISTANT_AUDIO and f.get("done"),
@@ -843,7 +1242,8 @@ def test_live_capture_screen_delegates_to_client(tmp_path: Path) -> None:
                 "prompt": "見て",
             }
         )
-        # response.create を受けた fake が output_audio.done を返すのを待つ。
+        # response.create を受けた fake が 1 発話ぶんの音声を返し、
+        # その途切れを watchdog が done 区切りにするのを待つ。
         _collect_until(
             ws,
             lambda f: f["type"] == EVENT_ASSISTANT_AUDIO and f.get("done"),
@@ -902,7 +1302,8 @@ def test_live_delegation_flushes_assistant_transcript(tmp_path: Path) -> None:
     ) as ws:
         assert ws.receive_json()["type"] == EVENT_SESSION_READY
         ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
-        # response.create への応答として fake が返す output_audio.done まで読む。
+        # response.create への応答として fake が返す音声の途切れ
+        # （watchdog による done 区切り）まで読む。
         frames = _collect_until(
             ws,
             lambda f: f["type"] == EVENT_ASSISTANT_AUDIO and f.get("done"),
@@ -940,6 +1341,282 @@ def test_live_delegation_flushes_assistant_transcript(tmp_path: Path) -> None:
     assert "ちょっと待って" in assistant_texts
 
 
+def test_live_delegation_inner_text_and_completed_flush(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """委譲応答のテキストは発話レーンと分離し、response.completed でターン確定。
+
+    実機では委譲後に session.output_audio.done 系の区切りが来ないため、
+    内側イベントで user/assistant の flush を行う。委譲バックエンドの
+    ``response.output_text`` は「裏で考えた内容」で、発話内容を担う
+    ``session.output_transcript`` とは別ストリーム — assistant.text へは
+    流さず、履歴へ記録して delegate 活動行の title で抜粋表示する。
+    既知の中間イベント（in_progress / output_item.added / *_arguments.* /
+    content_part.added / usage.updated）は unhandled 警告を出さない。
+    """
+    fake = TextOnlyDelegatingLiveUpstream()
+    client = _make_live_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01").decode()
+    with caplog.at_level(logging.WARNING, logger="mihari_room.voice"):
+        with client.websocket_connect(
+            f"/voice/sessions/{session_id}/stream", headers=_auth()
+        ) as ws:
+            assert ws.receive_json()["type"] == EVENT_SESSION_READY
+            ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+            # 委譲途中のユーザー発話は response.completed の flush で done 確定。
+            # delegate 活動行の done はその直後に届くので、ここまで読めば両方拾える。
+            frames = _collect_until(
+                ws,
+                lambda f: f["type"] == EVENT_ASSISTANT_TOOL_ACTIVITY
+                and f.get("name") == "delegate"
+                and f.get("status") == "done",
+            )
+            _disconnect_and_idle(ws, client, session_id)
+
+    # 委譲バックエンドのテキストは assistant.text へ流れない
+    # （発話内容は表の session.output_transcript が担う。二重コンテンツ防止）。
+    assert not any(f["type"] == EVENT_ASSISTANT_TEXT for f in frames)
+
+    # delegate 活動行は running → done で閉じ、確定テキストを title で抜粋表示。
+    delegate = [
+        f
+        for f in frames
+        if f["type"] == EVENT_ASSISTANT_TOOL_ACTIVITY and f.get("name") == "delegate"
+    ]
+    assert [f["status"] for f in delegate] == ["running", "done"]
+    assert delegate[-1]["title"] == "調べたよ、結果はOKだった"
+
+    # ユーザーターンは 2 回とも done 確定している（出力区切り無しでも）。
+    user_dones = [
+        f["text"]
+        for f in frames
+        if f["type"] == EVENT_USER_TEXT and f.get("done")
+    ]
+    assert user_dones == ["今何してるんだっけ", "あ、そうなんだ"]
+
+    # 委譲テキストは履歴には残る（assistant.text としては表示しないだけ）。
+    history = client.get(
+        f"/voice/sessions/{session_id}/history", headers=_auth()
+    ).json()
+    user_texts = [m["text"] for m in history["messages"] if m["role"] == "user"]
+    assistant_texts = [
+        m["text"] for m in history["messages"] if m["role"] == "assistant"
+    ]
+    assert "今何してるんだっけ" in user_texts
+    assert "あ、そうなんだ" in user_texts
+    assert "調べたよ、結果はOKだった" in assistant_texts
+
+    # 既知の内側・外側イベントは unhandled 警告を出さない。
+    warnings = [record.getMessage() for record in caplog.records]
+    assert not any("unhandled" in message for message in warnings)
+
+
+def test_live_transcript_dedup_cumulative_delta(tmp_path: Path) -> None:
+    """累積全文形式・重複送出の transcript delta で二重化しない。"""
+    fake = CumulativeDeltaLiveUpstream()
+    client = _make_live_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01").decode()
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+        frames = _collect_until(
+            ws,
+            lambda f: f["type"] == EVENT_ASSISTANT_AUDIO and f.get("done"),
+        )
+        _disconnect_and_idle(ws, client, session_id)
+
+    user_done = [
+        f for f in frames if f["type"] == EVENT_USER_TEXT and f.get("done")
+    ]
+    assert user_done[-1]["text"] == "今何してるんだっけ、えっと"
+
+    # assistant 側も累積全文ではなく新規部分だけ client へ流れる。
+    text_frames = [f for f in frames if f["type"] == EVENT_ASSISTANT_TEXT]
+    deltas = "".join(f.get("delta") or "" for f in text_frames)
+    assert deltas == "見てるよ、ちゃんと"
+    assert text_frames[-1]["done"] is True
+    assert text_frames[-1]["text"] == "見てるよ、ちゃんと"
+
+    history = client.get(
+        f"/voice/sessions/{session_id}/history", headers=_auth()
+    ).json()
+    user_texts = [m["text"] for m in history["messages"] if m["role"] == "user"]
+    assert user_texts == ["今何してるんだっけ、えっと"]
+
+
+def _make_live_gateway_app(
+    tmp_path: Path,
+    *,
+    upstream_factory=None,
+    executor=None,
+) -> TestClient:
+    """orchestrator 無しの gateway 形 app（live_audio + 差し替え executor）。"""
+    config = RoomConfig(
+        token=TOKEN,
+        root=tmp_path,
+        owner_id="owner",
+        openai_api_key="test-openai-key",
+        voice_output_mode="live_audio",
+    )
+    app = create_gateway_app(config, room_url="")
+    if upstream_factory is not None:
+        app.state.voice_upstream_factory = upstream_factory
+    if executor is not None:
+        app.state.voice_tool_executor_factory = lambda _sid: executor
+    return TestClient(app)
+
+
+def _job_result() -> dict:
+    return {
+        "job_id": "job-abc123",
+        "title": "レポートを直して",
+        "status": "done",
+        "summary": "全部終わった",
+    }
+
+
+def test_live_job_result_injected_via_delegation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """委譲有効の live ではジョブ終端が response.item.create + response.create で注入。"""
+    import mihari_room.voice.stream as stream_module
+
+    monkeypatch.setattr(stream_module, "_JOB_WATCH_INTERVAL_SEC", 0.05)
+    fake = QuietLiveUpstream()
+    fake.delegation_enabled = True
+    executor = _JobWatcherStubExecutor([_job_result()])
+    client = _make_live_gateway_app(
+        tmp_path, upstream_factory=lambda: fake, executor=executor
+    )
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        frames = _collect_until(
+            ws,
+            lambda f: f["type"] == EVENT_ASSISTANT_TOOL_ACTIVITY
+            and f.get("name") == "submit_job",
+            limit=40,
+        )
+        _disconnect_and_idle(ws, client, session_id)
+
+    activity = frames[-1]
+    assert activity["status"] == "done"
+    assert activity["call_id"] == "job-abc123"
+    assert activity["title"] == "レポートを直して"
+
+    sent = fake.sent_events()
+    message_items = [
+        e
+        for e in sent
+        if e.get("type") == "response.item.create"
+        and (e.get("item") or {}).get("type") == "message"
+    ]
+    assert len(message_items) == 1
+    text = message_items[0]["item"]["content"][0]["text"]
+    assert "レポートを直して" in text
+    assert "全部終わった" in text
+    creates_after = [
+        e
+        for e in sent[sent.index(message_items[0]) :]
+        if e.get("type") == "response.create"
+    ]
+    assert len(creates_after) == 1
+
+
+def test_live_job_result_injected_via_commentary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """委譲無しの live では session.commentary.append で音声モデルへ直接伝える。"""
+    import mihari_room.voice.stream as stream_module
+
+    monkeypatch.setattr(stream_module, "_JOB_WATCH_INTERVAL_SEC", 0.05)
+    fake = QuietLiveUpstream()  # delegation_enabled 未設定 → False 扱い
+    executor = _JobWatcherStubExecutor([_job_result()])
+    client = _make_live_gateway_app(
+        tmp_path, upstream_factory=lambda: fake, executor=executor
+    )
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        _collect_until(
+            ws,
+            lambda f: f["type"] == EVENT_ASSISTANT_TOOL_ACTIVITY
+            and f.get("name") == "submit_job",
+            limit=40,
+        )
+        _disconnect_and_idle(ws, client, session_id)
+
+    sent = fake.sent_events()
+    commentary = [
+        e for e in sent if e.get("type") == "session.commentary.append"
+    ]
+    assert len(commentary) == 1
+    assert commentary[0]["delegation_id"] is None
+    assert "レポートを直して" in commentary[0]["content"]
+    assert "全部終わった" in commentary[0]["content"]
+    # delegation コマンドは使わない（upstream 側でも落とされる）。
+    assert not any(e.get("type") == "response.item.create" for e in sent)
+    assert not any(e.get("type") == "response.create" for e in sent)
+
+
+def test_text_mode_job_result_injected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """text（Realtime）モードでも conversation.item.create + response.create で注入。"""
+    import mihari_room.voice.stream as stream_module
+
+    monkeypatch.setattr(stream_module, "_JOB_WATCH_INTERVAL_SEC", 0.05)
+    fake = FakeRealtimeUpstream()
+    executor = _JobWatcherStubExecutor([_job_result()])
+    config = RoomConfig(
+        token=TOKEN,
+        root=tmp_path,
+        owner_id="owner",
+        openai_api_key="test-openai-key",
+    )
+    app = create_gateway_app(config, room_url="")
+    app.state.voice_upstream_factory = lambda: fake
+    app.state.voice_tool_executor_factory = lambda _sid: executor
+    client = TestClient(app)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        frames = _collect_until(
+            ws,
+            lambda f: f["type"] == EVENT_ASSISTANT_TOOL_ACTIVITY
+            and f.get("name") == "submit_job",
+            limit=40,
+        )
+        _disconnect_and_idle(ws, client, session_id)
+
+    assert frames[-1]["status"] == "done"
+    sent = fake.sent_events()
+    message_items = [
+        e
+        for e in sent
+        if e.get("type") == "conversation.item.create"
+        and (e.get("item") or {}).get("type") == "message"
+        and "レポートを直して" in str(e.get("item"))
+    ]
+    assert len(message_items) == 1
+    creates_after = [
+        e
+        for e in sent[sent.index(message_items[0]) :]
+        if e.get("type") == "response.create"
+    ]
+    assert len(creates_after) == 1
+
+
 def test_live_capture_screen_drops_oversized_image(tmp_path: Path) -> None:
     """delegation 入力上限を超える capture 画像は backend へ送らず note で伝える。"""
     fake = DelegatingLiveUpstream(tool_name="capture_screen", call_id="call_live_big")
@@ -964,7 +1641,8 @@ def test_live_capture_screen_drops_oversized_image(tmp_path: Path) -> None:
                 "prompt": "見て",
             }
         )
-        # fco + response.create を受けた fake が output_audio.done を返す。
+        # fco + response.create を受けた fake が 1 発話ぶんの音声を返し、
+        # その途切れを watchdog が done 区切りにするのを待つ。
         _collect_until(
             ws,
             lambda f: f["type"] == EVENT_ASSISTANT_AUDIO and f.get("done"),
@@ -1089,3 +1767,267 @@ async def test_send_tool_result_text_mode_unchanged() -> None:
         and (e.get("item") or {}).get("type") == "function_call_output"
     )
     assert fco["item"]["output"] == "x" * 5_000
+
+
+def test_live_transcript_only_turn_flushes_via_watchdog(tmp_path: Path) -> None:
+    """出力が一切無いターンでも input transcript の gap で user.text が確定する。
+
+    session.output_audio.done 相当の区切りは Live API に存在しないため、
+    ユーザー発話は transcript 途切れ（入力ウォッチドッグ）で畳む。
+    """
+    fake = TranscriptOnlyLiveUpstream()
+    client = _make_live_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01").decode()
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+        frames = _collect_until(
+            ws,
+            lambda f: f["type"] == EVENT_USER_TEXT and f.get("done"),
+        )
+        _disconnect_and_idle(ws, client, session_id)
+
+    assert frames[-1]["text"] == "声だけのターン"
+    # 出力イベントは一度も無いので assistant 側は何も送らない。
+    assert not any(f["type"] == EVENT_ASSISTANT_AUDIO for f in frames)
+    assert not any(f["type"] == EVENT_ASSISTANT_TEXT for f in frames)
+
+    history = client.get(f"/voice/sessions/{session_id}/history", headers=_auth()).json()
+    user_texts = [m["text"] for m in history["messages"] if m["role"] == "user"]
+    assert user_texts == ["声だけのターン"]
+
+
+def test_live_quiet_upstream_sends_transcript_none(tmp_path: Path) -> None:
+    """upstream が一切応答しないターンも音声到着だけで transcript_none が出る。
+
+    出力イベントも transcript も無い状況では、最後の非無音クライアント
+    音声からの入力 gap で区切りを判定し、desktop の発話プレースホルダを
+    user.transcript_none で解放する。
+    """
+    fake = QuietLiveUpstream()
+    client = _make_live_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01").decode()
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+        frames = _collect_until(
+            ws,
+            lambda f: f["type"] == EVENT_USER_TRANSCRIPT_NONE,
+        )
+        _disconnect_and_idle(ws, client, session_id)
+
+    assert len(frames) == 1
+    assert not any(f["type"] == EVENT_USER_TEXT for f in frames)
+
+
+def test_live_transcript_start_end_ms_splits_turns(tmp_path: Path) -> None:
+    """transcript delta の発話区間（start_ms/end_ms）が閾値以上離れたら別発話。
+
+    実機の input_transcript.delta は発話区間を持つため、壁時計の gap を
+    待たずに時刻の飛びで先の発話を確定できる（公式推奨の grouping）。
+    """
+    fake = TimestampedTranscriptLiveUpstream()
+    client = _make_live_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01").decode()
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+        frames = _collect_until(
+            ws,
+            lambda f: f["type"] == EVENT_USER_TEXT
+            and f.get("done")
+            and f.get("text") == "二つ目",
+        )
+        _disconnect_and_idle(ws, client, session_id)
+
+    user_dones = [
+        f["text"] for f in frames if f["type"] == EVENT_USER_TEXT and f.get("done")
+    ]
+    # start_ms の飛び（400→6000ms）で「一つ目」が先に確定し、
+    # 「二つ目」は後続の壁時計 gap で確定する。
+    assert user_dones == ["一つ目", "二つ目"]
+
+
+def test_live_output_audio_done_still_closes_turn(tmp_path: Path) -> None:
+    """公式には存在しない session.output_audio.done が届いても区切り処理が動く。
+
+    通常の区切りはウォッチドッグの出力 gap 判定。万一 upstream が
+    done/stopped を送ってきた場合の保険分岐の確認用。
+    """
+    fake = DoneEmittingLiveUpstream()
+    client = _make_live_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01").decode()
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+        frames = _collect_until(
+            ws,
+            lambda f: f["type"] == EVENT_ASSISTANT_AUDIO and f.get("done"),
+            limit=5,
+        )
+        _disconnect_and_idle(ws, client, session_id)
+
+    # gap を待たずイベント駆動で done が届く（delta + done の 2 枚）。
+    audio_frames = [f for f in frames if f["type"] == EVENT_ASSISTANT_AUDIO]
+    assert len(audio_frames) == 2
+    assert audio_frames[-1]["done"] is True
+
+
+def test_live_delegation_failed_notifies_error(tmp_path: Path) -> None:
+    """委譲応答が response.failed で終わったら delegate 行を failed で閉じ通知する。
+
+    失敗を沈黙させないため、確定できる断片を畳んだうえで
+    delegate 活動行（status=failed）と error フレームを client へ送る。
+    """
+    fake = FailingDelegatingLiveUpstream()
+    client = _make_live_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01").decode()
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+        frames = _collect_until(
+            ws,
+            lambda f: f["type"] == "error",
+        )
+        _disconnect_and_idle(ws, client, session_id)
+
+    delegate = [
+        f
+        for f in frames
+        if f["type"] == EVENT_ASSISTANT_TOOL_ACTIVITY and f.get("name") == "delegate"
+    ]
+    assert [f["status"] for f in delegate] == ["running", "failed"]
+    error = frames[-1]
+    assert error["code"] == "delegation_error"
+    assert "backend exploded" in error["message"]
+    # 失敗した委譲の呼び出しは実行しない（fco / response.create は送らない）。
+    sent = fake.sent_events()
+    assert not any(e.get("type") == "response.item.create" for e in sent)
+    assert not any(e.get("type") == "response.create" for e in sent)
+
+
+def test_live_delegation_skips_noncompleted_item(tmp_path: Path) -> None:
+    """output_item.done でも status != completed の function_call は実行しない。
+
+    Twilio 公式サンプル準拠 — 委譲応答から回収するのは completed 状態の
+    item のみ。in_progress の item が完了扱いされないことを確認する。
+    """
+    fake = NonCompletedItemDelegatingLiveUpstream()
+    client = _make_live_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01").decode()
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+        frames = _collect_until(
+            ws,
+            lambda f: f["type"] == EVENT_ASSISTANT_TOOL_ACTIVITY
+            and f.get("name") == "delegate"
+            and f.get("status") == "done",
+        )
+        _disconnect_and_idle(ws, client, session_id)
+
+    # in_progress の function_call は拾われない → ツール活動も upstream への
+    # fco / response.create も発生しない。
+    assert not any(
+        f["type"] == EVENT_ASSISTANT_TOOL_ACTIVITY and f.get("name") == "get_job_status"
+        for f in frames
+    )
+    sent = fake.sent_events()
+    assert not any(e.get("type") == "response.item.create" for e in sent)
+    assert not any(e.get("type") == "response.create" for e in sent)
+
+
+def test_live_delegation_clears_calls_between_delegations(tmp_path: Path) -> None:
+    """delegated_calls は委譲ごとにクリアされ、連続委譲で再実行されない。
+
+    1 回目の委譲で function_call を実行し、room の response.create に
+    応じた 2 回目の委譲（呼び出し無し）では何も起こらないことを確認する。
+    """
+    fake = RepeatedDelegatingLiveUpstream()
+    client = _make_live_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01").decode()
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+        delegate_dones = 0
+
+        def second_delegate_done(f: dict) -> bool:
+            nonlocal delegate_dones
+            if (
+                f["type"] == EVENT_ASSISTANT_TOOL_ACTIVITY
+                and f.get("name") == "delegate"
+                and f.get("status") == "done"
+            ):
+                delegate_dones += 1
+            return delegate_dones >= 2
+
+        _collect_until(ws, second_delegate_done, limit=40)
+        _disconnect_and_idle(ws, client, session_id)
+
+    assert delegate_dones == 2
+    sent = fake.sent_events()
+    # 呼び出しの再実行が無ければ fco は 1 件だけ（1 回目の get_job_status）。
+    fco = [
+        e
+        for e in sent
+        if e.get("type") == "response.item.create"
+        and (e.get("item") or {}).get("type") == "function_call_output"
+    ]
+    assert len(fco) == 1
+    assert fco[0]["item"]["call_id"] == "call_live_1"
+    creates = [e for e in sent if e.get("type") == "response.create"]
+    assert len(creates) == 1
+
+
+def test_live_submit_job_activity_carries_job_id(tmp_path: Path) -> None:
+    """委譲の submit_job 実行成功時、tool_activity に job_id と title を載せる。
+
+    desktop はこの job_id で RoomJobMonitor.attach して進捗購読を始める。
+    """
+    fake = DelegatingLiveUpstream(
+        tool_name="submit_job",
+        call_id="call_live_job",
+        arguments=json.dumps(
+            {"prompt": "レポートを書いて", "title": "レポート"}, ensure_ascii=False
+        ),
+    )
+    client = _make_live_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01").decode()
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+        frames = _collect_until(
+            ws,
+            lambda f: f["type"] == EVENT_ASSISTANT_TOOL_ACTIVITY
+            and f.get("name") == "submit_job",
+        )
+        _disconnect_and_idle(ws, client, session_id)
+
+    activity = frames[-1]
+    assert activity["status"] == "done"
+    assert activity["job_id"]
+    assert activity["title"] == "レポート"

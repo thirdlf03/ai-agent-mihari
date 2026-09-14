@@ -152,7 +152,27 @@ struct VoiceRealtimeProtocolTests {
                 == .assistantToolActivity(
                     name: "submit_job",
                     callID: "c1",
-                    status: "done"
+                    status: "done",
+                    jobID: nil,
+                    title: nil
+                )
+        )
+    }
+
+    @Test("assistant.tool_activity の job_id / title を読む")
+    func parsesAssistantToolActivityJobIDAndTitle() {
+        let json = """
+            {"type":"assistant.tool_activity","name":"submit_job","call_id":"c1","status":"done","job_id":"job-abc","title":"レポート"}
+            """
+        let frame = VoiceIncomingFrame.parse(data: Data(json.utf8))
+        #expect(
+            frame
+                == .assistantToolActivity(
+                    name: "submit_job",
+                    callID: "c1",
+                    status: "done",
+                    jobID: "job-abc",
+                    title: "レポート"
                 )
         )
     }
@@ -169,7 +189,9 @@ struct VoiceRealtimeProtocolTests {
                     == .assistantToolActivity(
                         name: "get_job_status",
                         callID: "c2",
-                        status: status
+                        status: status,
+                        jobID: nil,
+                        title: nil
                     )
             )
         }

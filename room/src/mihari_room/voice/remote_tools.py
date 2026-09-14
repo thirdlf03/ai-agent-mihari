@@ -64,6 +64,9 @@ class RemoteVoiceToolExecutor:
             )
             self._owns_client = True
         self._closed = False
+        #: submit_job で投げたジョブの追跡表（job_id → title）。終端に達した
+        #: 分は ``finished_jobs`` が返して会話へ結果を戻し、表から外す。
+        self._submitted_jobs: dict[str, str] = {}
 
     async def execute(self, name: str, arguments_json: str) -> VoiceToolOutcome:
         """function_call 1 件を room へ委譲する。例外は failure JSON に畳む。"""
@@ -97,18 +100,74 @@ class RemoteVoiceToolExecutor:
                 logger.warning(
                     "remote voice tool %s: image_base64 を読めない", name
                 )
-        return VoiceToolOutcome(
+        outcome = VoiceToolOutcome(
             output=str(payload.get("output") or ""),
             image_png=image_png,
             client_side=bool(payload.get("client_side")),
             ok=bool(payload.get("ok")),
         )
+        if name == "submit_job" and outcome.ok:
+            self._track_submitted_job(outcome.output)
+        return outcome
+
+    def _track_submitted_job(self, output: str) -> None:
+        """submit_job の受理 JSON から job_id ↔ title を追跡表へ登録する。"""
+        try:
+            payload = json.loads(output)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        job_id = str(payload.get("job_id") or "").strip()
+        if job_id:
+            self._submitted_jobs[job_id] = str(payload.get("title") or "")
+
+    async def finished_jobs(self) -> list[dict]:
+        """追跡中ジョブのうち終端に達したものを room へ問い合わせて返す。
+
+        ``VoiceToolExecutor.finished_jobs`` と同じ口。gateway には job store
+        が無いため ``GET /jobs/{id}`` をポーリングする。一時的な取得失敗は
+        追跡を維持したまま次の tick で再試行する。
+        """
+        if self._closed or not self._submitted_jobs:
+            return []
+        results: list[dict] = []
+        for job_id, title in list(self._submitted_jobs.items()):
+            try:
+                response = await self._client.get(
+                    f"/jobs/{job_id}",
+                    headers={TOKEN_HEADER: self._token},
+                )
+                if response.status_code == 404:
+                    self._submitted_jobs.pop(job_id, None)
+                    continue
+                response.raise_for_status()
+                payload = response.json()
+            except Exception:  # noqa: BLE001 -- 一時失敗は次の tick で再試行
+                continue
+            if not isinstance(payload, dict):
+                continue
+            status = str(payload.get("status") or "")
+            if status not in {"done", "failed", "cancelled"}:
+                continue
+            self._submitted_jobs.pop(job_id, None)
+            latest = payload.get("latest_event") or {}
+            results.append(
+                {
+                    "job_id": job_id,
+                    "title": str(payload.get("title") or title),
+                    "status": status,
+                    "summary": str(latest.get("text") or "").strip(),
+                }
+            )
+        return results
 
     async def close(self) -> None:
         """stream 終了時。room 側の session executor も畳む。失敗は握りつぶす。"""
         if self._closed:
             return
         self._closed = True
+        self._submitted_jobs.clear()
         try:
             await self._client.delete(
                 f"/voice/tools/execute/{self._session_id}",

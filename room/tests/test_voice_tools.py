@@ -9,6 +9,7 @@ from typing import Any
 
 from mihari_room.config import RoomConfig
 from mihari_room.contracts import CreateJobRequest, Job, JobSource, JobStatus
+from mihari_room.events import EventJournal, EventPhase, JournalKind
 from mihari_room.fakes import InMemoryJobStore
 from mihari_room.mac_control.errors import MacControlError, MacControlErrorCode
 from mihari_room.voice.sessions import VoiceSessionManager
@@ -466,3 +467,53 @@ async def test_tools_do_not_raise_without_orchestrator(tmp_path: Path) -> None:
     listing = _payload(await _run(executor, "list_running_jobs", {}))
     assert listing["success"] is True
     assert listing["jobs"] == []
+
+
+async def test_finished_jobs_reports_terminal_status_once(tmp_path: Path) -> None:
+    """submit_job したジョブが終端に達したら finished_jobs で 1 回だけ報告する。"""
+    orch = FakeOrchestrator(tmp_path)
+    executor = _make_executor(tmp_path, orchestrator=orch)
+    submitted = _payload(
+        await _run(executor, "submit_job", {"prompt": "おつかい", "title": "レポート"})
+    )
+    job_id = submitted["job_id"]
+    # 実行中は何も返さない。
+    assert await executor.finished_jobs() == []
+    # journal に結果行を置いて終端にする。
+    job = orch.store.get(job_id)
+    EventJournal.for_job(job.directory).append(
+        job_id=job_id,
+        phase=EventPhase.DONE,
+        kind=JournalKind.SUMMARY,
+        text="全部終わった",
+    )
+    orch.store.set_status(job_id, JobStatus.DONE)
+    results = await executor.finished_jobs()
+    assert len(results) == 1
+    assert results[0]["job_id"] == job_id
+    assert results[0]["title"] == "レポート"
+    assert results[0]["status"] == "done"
+    assert results[0]["summary"] == "全部終わった"
+    # 報告済みは追跡から外れる。
+    assert await executor.finished_jobs() == []
+
+
+async def test_finished_jobs_includes_failed_and_cancelled(tmp_path: Path) -> None:
+    """失敗・キャンセルも終端として報告される。"""
+    orch = FakeOrchestrator(tmp_path)
+    executor = _make_executor(tmp_path, orchestrator=orch)
+    first = _payload(await _run(executor, "submit_job", {"prompt": "a", "title": "A"}))
+    second = _payload(await _run(executor, "submit_job", {"prompt": "b", "title": "B"}))
+    orch.store.set_status(first["job_id"], JobStatus.FAILED)
+    orch.store.set_status(second["job_id"], JobStatus.CANCELLED)
+    results = await executor.finished_jobs()
+    by_id = {r["job_id"]: r for r in results}
+    assert by_id[first["job_id"]]["status"] == "failed"
+    assert by_id[second["job_id"]]["status"] == "cancelled"
+    # journal 無しの場合 summary は空。
+    assert by_id[first["job_id"]]["summary"] == ""
+
+
+async def test_finished_jobs_empty_without_submit(tmp_path: Path) -> None:
+    executor = _make_executor(tmp_path, orchestrator=FakeOrchestrator(tmp_path))
+    assert await executor.finished_jobs() == []

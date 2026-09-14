@@ -152,7 +152,8 @@ struct VoiceConversationControllerTests {
         factory: ScriptedSocketFactory? = nil,
         jobCollaboration: (any VoiceJobCollaborating)? = nil,
         pcmPlayer: (any PCMStreamPlaying)? = nil,
-        micPermission: PermissionGrant = .granted
+        micPermission: PermissionGrant = .granted,
+        onJobSubmitted: (@MainActor (String, String?) -> Void)? = nil
     ) -> (VoiceConversationController, StubMic, ScriptedSocket, ScriptedSocketFactory) {
         let factory = factory ?? ScriptedSocketFactory()
         factory.queue(socket)
@@ -201,7 +202,7 @@ struct VoiceConversationControllerTests {
                 screenCapture: StubScreenCapture(),
                 // 既定の実プレイヤーは AVAudioEngine を触るため、テストではスタブにする。
                 pcmPlayer: pcmPlayer ?? VoiceConversationControllerTestsStubPCMPlayer(),
-                onJobSubmitted: nil,
+                onJobSubmitted: onJobSubmitted,
                 checkMicPermission: { PermissionState(grant: micPermission, detail: "test") },
                 requestMicPermission: { micPermission == .granted }
             )
@@ -1555,6 +1556,114 @@ struct VoiceConversationControllerTests {
         #expect(controller.isMicLive == false)
         // statusText は接続処理に上書きされるため、履歴に残る文言を見る。
         #expect(controller.messages.contains(where: { $0.text.contains("マイクの利用許可") }))
+
+        controller.stop()
+    }
+
+    @Test("submit_job の活動通知は job_id で RoomJobMonitor へ attach する")
+    func submitJobActivityAttachesJobMonitor() async throws {
+        let socket = ScriptedSocket()
+        var attached: [(jobID: String, title: String?)] = []
+        let (controller, _, _, factory) = makeController(
+            socket: socket,
+            onJobSubmitted: { jobID, title in attached.append((jobID, title)) }
+        )
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        // 依頼時の活動通知は job_id フィールドにジョブ ID が載る。
+        socket.feed(
+            #"{"type":"assistant.tool_activity","name":"submit_job","call_id":"call-1","status":"done","job_id":"job-abc","title":"レポート"}"#
+        )
+        await waitUntil { controller.activeVoiceJobID == "job-abc" }
+
+        #expect(controller.activeVoiceJobID == "job-abc")
+        #expect(attached.count == 1)
+        #expect(attached[0].jobID == "job-abc")
+        #expect(attached[0].title == "レポート")
+
+        controller.stop()
+    }
+
+    @Test("submit_job の完了通知は call_id のジョブ ID で attach する")
+    func submitJobCompletionAttachesViaCallID() async throws {
+        let socket = ScriptedSocket()
+        var attached: [(jobID: String, title: String?)] = []
+        let (controller, _, _, factory) = makeController(
+            socket: socket,
+            onJobSubmitted: { jobID, title in attached.append((jobID, title)) }
+        )
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        // 完了通知（room のジョブ結果注入）は call_id = job_id で届く。
+        socket.feed(
+            #"{"type":"assistant.tool_activity","name":"submit_job","call_id":"job-xyz","status":"done","title":"レポート"}"#
+        )
+        await waitUntil { controller.activeVoiceJobID == "job-xyz" }
+
+        #expect(attached.count == 1)
+        #expect(attached[0].jobID == "job-xyz")
+
+        controller.stop()
+    }
+
+    @Test("done 後に遅れて届いた同内容の delta は新規 user 行を作らない")
+    func lateDeltaAfterDoneDoesNotDuplicateUserLine() async throws {
+        let socket = ScriptedSocket()
+        let (controller, _, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        socket.feed(#"{"type":"user.text","text":"今何してるんだっけ","delta":"今何してるんだっけ","done":false}"#)
+        socket.feed(#"{"type":"user.text","text":"今何してるんだっけ","done":true}"#)
+        await waitUntil {
+            controller.messages.contains(where: { $0.role == .user && $0.text == "今何してるんだっけ" })
+        }
+
+        // 確定後に遅れて届いた同一内容・累積全文の delta は同じ行を更新するだけ。
+        socket.feed(#"{"type":"user.text","text":"今何してるんだっけ","delta":"今何してるんだっけ","done":false}"#)
+        socket.feed(#"{"type":"user.text","text":"今何してるんだっけ、えっと","delta":"今何してるんだっけ、えっと","done":true}"#)
+        try await Task.sleep(for: .milliseconds(100))
+
+        let userTexts = controller.messages.filter { $0.role == .user }.map(\.text)
+        #expect(userTexts == ["今何してるんだっけ、えっと"])
+
+        controller.stop()
+    }
+
+    @Test("押下中に文字起こしが先行したターンはプレースホルダを積まない")
+    func transcriptDuringHoldSuppressesPlaceholder() async throws {
+        let socket = ScriptedSocket()
+        let (controller, mic, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(
+            #"{"type":"session.ready","session_id":"sess-test","model":"mini","output_modalities":["audio"]}"#
+        )
+
+        controller.beginPushToTalk()
+        mic.emit(data: Data(repeating: 0x33, count: 480), level: 0.5)
+        await waitUntil {
+            !self.parseSentAudioFrames(socket.sent).isEmpty
+        }
+        // フルデュプレックス: 押したまま文字起こしが先行して届く。
+        socket.feed(#"{"type":"user.text","text":"今何してるんだっけ","delta":"今何してるんだっけ","done":false}"#)
+        await waitUntil {
+            controller.messages.contains(where: { $0.role == .user && $0.text == "今何してるんだっけ" })
+        }
+
+        controller.endPushToTalk()
+        try await Task.sleep(for: .milliseconds(150))
+
+        // 発話行はすでに存在するので「（音声を送信）」の孤児行は積まれない。
+        let userTexts = controller.messages.filter { $0.role == .user }.map(\.text)
+        #expect(userTexts == ["今何してるんだっけ"])
+        #expect(!userTexts.contains("（音声を送信）"))
 
         controller.stop()
     }

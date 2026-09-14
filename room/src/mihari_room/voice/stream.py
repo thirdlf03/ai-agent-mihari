@@ -7,6 +7,7 @@ import base64
 import binascii
 import json
 import logging
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -58,6 +59,41 @@ _LIVE_QUIET_EVENTS = frozenset(
     }
 )
 
+#: ``response.event`` 内側の既知だが処理不要なライフサイクル中間イベント。
+#: delegation の委譲応答は Responses API のイベント名で届く（公式
+#: live-delegation ガイド。function_call の収集は output_item.done で行う）。
+_LIVE_DELEGATION_QUIET_EVENTS = frozenset(
+    {
+        "response.in_progress",
+        "response.output_item.added",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.content_part.added",
+    }
+)
+
+#: submit_job で投げたジョブの終端を監視するポーリング間隔（秒）。
+_JOB_WATCH_INTERVAL_SEC = 1.5
+
+#: live 受信ループの tick（秒）。receive() をこの周期で区切り、イベントの
+#: 途切れを検査するウォッチドッグを回す（200-300ms 程度が公式推奨の粒度）。
+_LIVE_WATCH_TICK_SEC = 0.25
+
+#: 出力区切りの無音判定（秒）。Live API の出力ストリームには発話終端
+#: イベントが無い（session.output_audio.done/stopped は公式イベント一覧に
+#: 存在しない）ため、最後の出力活動からこの gap が経ったら 1 発話の終端と
+#: 自前判定する。再生キュー追跡 + gap 判定が公式推奨のやり方。
+_LIVE_OUTPUT_GAP_SEC = (
+    float(os.environ.get("MIHARI_LIVE_OUTPUT_GAP_MS", "1100")) / 1000.0
+)
+
+#: 入力（ユーザー発話）区切り（秒）。session.input_transcript.delta がこの
+#: 時間途切れたらその発話を確定する。transcript が一度も来ない発話は
+#: 最後の非無音クライアント音声からの gap で確定し transcript_none を出す。
+_LIVE_INPUT_GAP_SEC = (
+    float(os.environ.get("MIHARI_LIVE_INPUT_GAP_MS", "1800")) / 1000.0
+)
+
 #: live_audio モードで upstream の入力ストリームを維持する無音ペーサーの周期（秒）。
 _LIVE_INPUT_PACER_INTERVAL = 0.1
 
@@ -92,15 +128,20 @@ class _ClientAudioClock:
 
     def __init__(self) -> None:
         self.last_at = asyncio.get_running_loop().time()
+        #: 最後に非無音（発話とみなせる）input.audio が届いた時刻。
+        #: transcript が一度も来ない発話の区切り検出はこの時刻を起点にする。
+        self.last_speech_at: float | None = None
         #: 直前のターン区切り以降に届いた非無音 input.audio の累積バイト数。
         #: live_audio では非押下中も無音チャンクが流れ続ける（room 側の無音
         #: ペーサーもある）ため、全ゼロ PCM はユーザー発話として数えない。
         self.speech_bytes = 0
 
     def note(self, pcm: bytes) -> None:
-        self.last_at = asyncio.get_running_loop().time()
+        now = asyncio.get_running_loop().time()
+        self.last_at = now
         if any(pcm):
             self.speech_bytes += len(pcm)
+            self.last_speech_at = now
 
 
 async def handle_voice_stream(
@@ -233,6 +274,20 @@ async def handle_voice_stream(
         stream_tasks = {client_task, upstream_task, close_task}
         if client_audio_clock is not None:
             stream_tasks.add(asyncio.create_task(_live_input_pacer(upstream, client_audio_clock)))
+        if callable(getattr(executor, "finished_jobs", None)):
+            # submit_job で投げたジョブの終端を会話へ戻す監視（live / text 共通）。
+            stream_tasks.add(
+                asyncio.create_task(
+                    _job_result_watcher(
+                        upstream,
+                        send_client,
+                        session_id=session_id,
+                        manager=manager,
+                        executor=executor,
+                        live=converter is not None,
+                    )
+                )
+            )
         try:
             done, pending = await asyncio.wait(
                 stream_tasks,
@@ -679,12 +734,25 @@ async def _run_function_calls(
                 pending_client_calls[call_id] = name
             continue
         # room 実行ツールは旧 client が二重実行しないよう tool_call は送らず、
-        # 活動通知だけを送る。
+        # 活動通知だけを送る。submit_job は受理された job_id・title を載せて、
+        # desktop の RoomJobMonitor がそのまま購読を始められるようにする。
+        activity_job_id = ""
+        activity_title = ""
+        if name == "submit_job" and outcome.ok:
+            try:
+                payload = json.loads(outcome.output)
+                if isinstance(payload, dict):
+                    activity_job_id = str(payload.get("job_id") or "")
+                    activity_title = str(payload.get("title") or "")
+            except (ValueError, TypeError):
+                pass
         await send_client(
             assistant_tool_activity_event(
                 name=name,
                 call_id=call_id,
                 status="done" if outcome.ok else "failed",
+                title=activity_title,
+                job_id=activity_job_id,
             )
         )
         await _send_tool_result(upstream, call_id=call_id, outcome=outcome, live=live)
@@ -695,9 +763,151 @@ async def _run_function_calls(
 
 def _extract_error_message(event: dict[str, Any]) -> str:
     error = event.get("error")
+    if not isinstance(error, dict):
+        # response.failed 系は error を response オブジェクトの内側に持つ。
+        nested = event.get("response")
+        if isinstance(nested, dict):
+            error = nested.get("error") or error
     if isinstance(error, dict):
         return str(error.get("message") or error.get("code") or "upstream error")
     return str(error or "upstream error")
+
+
+def _accumulate_transcript(accumulated: str, delta: str) -> tuple[str, str]:
+    """文字起こし delta の累積。重複送出・累積全文形式を潰す。
+
+    upstream は通常増分だけを送るが、実機では同一文の重複送出や
+    「それまでの累積全文」を delta として送るケースが観測されている。
+    ``delta`` が累積済み文字列で始まるときは累積全文形式（または完全な
+    重複送出）とみなして置き換え、そうでなければ通常の delta として連結する。
+    戻り値は ``(新しい累積, client へ流す新規部分)``。
+    """
+    if not accumulated:
+        return delta, delta
+    if delta.startswith(accumulated):
+        return delta, delta[len(accumulated) :]
+    return accumulated + delta, delta
+
+
+async def _job_result_watcher(
+    upstream: RealtimeUpstream,
+    send_client: Any,
+    *,
+    session_id: str,
+    manager: VoiceSessionManager,
+    executor: Any,
+    live: bool,
+) -> None:
+    """executor が追跡する submit_job 済みジョブの終端を会話へ注入する。
+
+    ジョブ状態の購読は executor 側に委ねる。room 本体の ``VoiceToolExecutor``
+    は同プロセスの job store を、voice gateway の ``RemoteVoiceToolExecutor``
+    は room の ``GET /jobs/{id}`` をそれぞれポーリングする。
+    """
+    poll = getattr(executor, "finished_jobs", None)
+    if not callable(poll):
+        return
+    while True:
+        await asyncio.sleep(_JOB_WATCH_INTERVAL_SEC)
+        session = manager.get(session_id)
+        if session is None or session.status in {
+            SessionStatus.CLOSED,
+            SessionStatus.ERROR,
+        }:
+            return
+        try:
+            results = await poll()
+        except Exception:
+            logger.debug("voice job watcher poll failed", exc_info=True)
+            continue
+        for result in results:
+            try:
+                await _inject_job_result(
+                    upstream,
+                    send_client,
+                    result=result,
+                    live=live,
+                )
+            except Exception:
+                logger.debug("voice job result inject failed", exc_info=True)
+
+
+async def _inject_job_result(
+    upstream: RealtimeUpstream,
+    send_client: Any,
+    *,
+    result: dict[str, Any],
+    live: bool,
+) -> None:
+    """終端に達したジョブ 1 件を client 通知 + upstream 注入で会話へ戻す。
+
+    upstream 注入はモードで分岐する:
+    - live + delegation 有効: ``response.item.create``（user メッセージ）+
+      ``response.create`` で委譲バックエンドへ知らせ、続きを生成させる
+      （公式 live-delegation ガイドの typed input と同じ手順）。
+    - live + delegation 無効: 上記コマンドは upstream に落とされるため、
+      ``session.commentary.append``（delegation_id=null、発話向け文脈）で
+      表の音声モデルへ直接伝える。
+    - text（Realtime）: ``conversation.item.create`` + ``response.create``。
+    """
+    job_id = str(result.get("job_id") or "")
+    title = str(result.get("title") or job_id)
+    status = str(result.get("status") or "")
+    summary = str(result.get("summary") or "").strip()
+    if len(summary) > _LIVE_FCO_OUTPUT_LIMIT:
+        summary = summary[:_LIVE_FCO_OUTPUT_LIMIT] + "…(truncated)"
+    terminal_word = {
+        "done": "完了",
+        "failed": "失敗",
+        "cancelled": "中断",
+    }.get(status, status or "不明")
+    # client へ活動通知。desktop は submit_job の完了行を出す。job_id は
+    # call_id と専用フィールドの両方へ載せる（RoomJobMonitor.attach 用）。
+    await send_client(
+        assistant_tool_activity_event(
+            name="submit_job",
+            call_id=job_id,
+            status="done" if status == "done" else "failed",
+            title=title,
+            job_id=job_id,
+        )
+    )
+    if live and not getattr(upstream, "delegation_enabled", False):
+        # commentary.append は 1 回 500 トークン上限の発話向け文脈注入。
+        # 結果そのものを話させる形で短く収める。
+        content = f"部屋の仕事「{title}」が{terminal_word}しました。"
+        if summary:
+            content += f"結果: {summary[:400]}"
+        await upstream.send(
+            {
+                "type": "session.commentary.append",
+                "event_id": f"job_result_{job_id}",
+                "delegation_id": None,
+                "content": content,
+            }
+        )
+        return
+    message_text = (
+        f"システム通知: 部屋の仕事「{title}」が{terminal_word}しました"
+        f"（job_id={job_id}）。"
+    )
+    if summary:
+        message_text += f"\n結果: {summary}"
+    message_text += "\nこの結果をユーザーへ短く報告してください。"
+    item_create = "response.item.create" if live else "conversation.item.create"
+    await upstream.send(
+        {
+            "type": item_create,
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": message_text}],
+            },
+        }
+    )
+    await upstream.send(
+        {"type": "response.create"} if live else response_create_event()
+    )
 
 
 async def _live_upstream_to_client(
@@ -716,12 +926,22 @@ async def _live_upstream_to_client(
     gpt-live-1 の ``session.output_audio.delta``（base64 PCM16 24kHz）を
     f32 に変換して VC へ通し、PCM16 に戻して ``assistant.audio`` で送る。
 
-    Live の文字起こしは断片（delta）しか無く「ターン完了」イベントが無い。
-    そのためユーザー発話は累積しておき、アシスタントの出力区切り
-    （出力セグメント開始 or done/stopped）で確定扱いにして履歴へ記録する。
-    発話音声が upstream へ届いたのに文字起こしが一度も来なかったターンは
-    ``user.transcript_none`` で client へ知らせ、desktop の発話プレースホルダ
-    が残り続けるのを防ぐ。未知のイベント type は 1 度だけ警告ログへ出して無視する。
+    Live の文字起こしは断片（delta）しか無く、出力にも「1 発話の終端」
+    イベントが無い（``session.output_audio.done``/``stopped`` は公式
+    イベント一覧に存在しない）。そのためターン区切りは自前判定する:
+
+    - ユーザー発話: ``session.input_transcript.delta`` の gap
+      （``_LIVE_INPUT_GAP_SEC``）、または delta が持つ ``start_ms``/``end_ms``
+      の発話区間の飛びで確定。音声だけ届いて transcript が一度も来ない
+      ターンは ``user.transcript_none`` で client へ知らせ、desktop の発話
+      プレースホルダが残り続けるのを防ぐ。
+    - assistant 出力: ``session.output_audio.delta`` /
+      ``session.output_transcript.delta`` の gap（``_LIVE_OUTPUT_GAP_SEC``）
+      で 1 発話の終端と判定し、converter の残りを吐いて done を送る。
+
+    receive() は ``_LIVE_WATCH_TICK_SEC`` で区切り、途切れ検査
+    （``check_watchdogs``）を回す。未知のイベント type は 1 度だけ警告
+    ログへ出して無視する。
     """
     user_transcript = ""
     #: 区切り間で受けた ``session.input_transcript.delta`` の回数（診断ログ用）。
@@ -730,7 +950,7 @@ async def _live_upstream_to_client(
     output_active = False
     logged_types: set[str] = set()
     #: ターン統計。flush_user が呼ばれるたびに累積し、assistant 出力区切り
-    #: （output_audio.done/stopped）で 1 行ログへ出してリセットする。
+    #: （ウォッチドッグの発話終端判定）で 1 行ログへ出してリセットする。
     turn_input_bytes = 0
     turn_transcript_deltas = 0
     turn_transcript_len = 0
@@ -740,6 +960,20 @@ async def _live_upstream_to_client(
     delegated_response_id: str | None = None
     #: response.completed までに output_item.done で集めた function_call。
     delegated_calls: list[dict[str, Any]] = []
+    #: 委譲バックエンドの応答テキスト（``response.output_text.delta`` の累積）。
+    #: 発話内容を担う ``session.output_transcript`` とは別ストリームなので、
+    #: assistant.text へは流さず履歴 + delegate 活動行へ畳む。
+    delegated_text = ""
+    #: ``flush_delegated`` で確定済みの最新委譲テキスト。``output_text.done``
+    #: で先に畳まれたあと、``response.completed`` の delegate 活動行 title
+    #: へ載せるために保持する（委譲ごとにクリア）。
+    delegated_last_text = ""
+    #: ウォッチドッグ用の最終活動時刻。出力は音声・文字起こし両方を見る。
+    last_output_activity_at: float | None = None
+    last_input_transcript_at: float | None = None
+    #: 発話区間グルーピング用。前 delta の ``end_ms`` を覚えておき、次 delta の
+    #: ``start_ms`` が閾値以上離れていたら別発話として先に確定する。
+    last_input_end_ms: float | None = None
 
     async def flush_user(*, send: bool = True) -> None:
         nonlocal user_transcript, transcript_deltas
@@ -770,13 +1004,92 @@ async def _live_upstream_to_client(
             await send_client(assistant_text_event(text=assistant_transcript, done=True))
         assistant_transcript = ""
 
+    async def flush_delegated() -> str:
+        """委譲バックエンドの応答テキストを確定する。戻り値は確定した全文。
+
+        発話レーン（assistant.text）とは別扱い: 履歴へ記録してログへ出すだけで、
+        client への表示は response.completed 時の delegate 活動行に任せる。
+        確定した全文は ``delegated_last_text`` にも残す（completed の title 用）。
+        """
+        nonlocal delegated_text, delegated_last_text
+        text = delegated_text.strip()
+        delegated_text = ""
+        if text:
+            delegated_last_text = text
+            manager.record_assistant_text(session_id, text)
+            logger.info("live delegated backend text: %s", text[:200])
+        return text
+
+    async def finish_output_turn() -> None:
+        """assistant 出力 1 発話分の区切り処理。
+
+        Live API に発話終端イベントは無いため、ウォッチドッグ（出力活動の
+        gap 検出）と、万一届いた ``session.output_audio.done``/``stopped``
+        の両方から呼ばれる。
+        """
+        nonlocal output_active
+        nonlocal turn_input_bytes, turn_transcript_deltas, turn_transcript_len
+        output_active = False
+        await flush_user()
+        await flush_assistant()
+        flushed = await converter.flush()
+        if flushed:
+            await send_client(
+                assistant_audio_event(
+                    audio_b64=base64.b64encode(f32_to_pcm16(flushed)).decode()
+                )
+            )
+        await send_client(assistant_audio_event(done=True))
+        # ターン診断。input_bytes が非ゼロで transcript_len=0 なら
+        # 無転写ターン（user.transcript_none を送った区切り）。
+        logger.info(
+            "live turn: input_bytes=%d transcript_deltas=%d transcript_len=%d",
+            turn_input_bytes,
+            turn_transcript_deltas,
+            turn_transcript_len,
+        )
+        turn_input_bytes = 0
+        turn_transcript_deltas = 0
+        turn_transcript_len = 0
+
+    async def check_watchdogs() -> None:
+        """イベント途切れを検査し、出力・入力の区切りを自前判定する。
+
+        - 出力: ``session.output_audio.delta``/``session.output_transcript.delta``
+          の最終到着から ``_LIVE_OUTPUT_GAP_SEC`` 経過 → 発話終端扱い。
+        - 入力: ``session.input_transcript.delta``（未転写なら最後の非無音
+          クライアント音声）の最終到着から ``_LIVE_INPUT_GAP_SEC`` 経過 →
+          ``flush_user``。音声だけ届いたターンは transcript_none が出る。
+        """
+        now = asyncio.get_running_loop().time()
+        if (
+            output_active
+            and last_output_activity_at is not None
+            and now - last_output_activity_at >= _LIVE_OUTPUT_GAP_SEC
+        ):
+            await finish_output_turn()
+        if user_transcript or audio_clock.speech_bytes:
+            anchors = [
+                t
+                for t in (last_input_transcript_at, audio_clock.last_speech_at)
+                if t is not None
+            ]
+            if anchors and now - max(anchors) >= _LIVE_INPUT_GAP_SEC:
+                await flush_user()
+
     try:
         while True:
-            event = await upstream.receive()
+            try:
+                async with asyncio.timeout(_LIVE_WATCH_TICK_SEC):
+                    event = await upstream.receive()
+            except TimeoutError:
+                await check_watchdogs()
+                continue
             event_type = event.get("type", "")
             if event_type in LIVE_AUDIO_OUTPUT_EVENTS:
                 manager.note_upstream_audio_output(session_id)
             if event_type == "session.output_audio.delta":
+                last_output_activity_at = asyncio.get_running_loop().time()
                 if not output_active:
                     output_active = True
                     await flush_user()
@@ -794,48 +1107,56 @@ async def _live_upstream_to_client(
                 "session.output_audio.done",
                 "session.output_audio.stopped",
             }:
-                output_active = False
-                await flush_user()
-                await flush_assistant()
-                flushed = await converter.flush()
-                if flushed:
-                    await send_client(
-                        assistant_audio_event(
-                            audio_b64=base64.b64encode(f32_to_pcm16(flushed)).decode()
-                        )
-                    )
-                await send_client(assistant_audio_event(done=True))
-                # ターン診断。input_bytes が非ゼロで transcript_len=0 なら
-                # 無転写ターン（user.transcript_none を送った区切り）。
-                logger.info(
-                    "live turn: input_bytes=%d transcript_deltas=%d transcript_len=%d",
-                    turn_input_bytes,
-                    turn_transcript_deltas,
-                    turn_transcript_len,
-                )
-                turn_input_bytes = 0
-                turn_transcript_deltas = 0
-                turn_transcript_len = 0
+                # 公式イベント一覧には存在しない（発話終端はウォッチドッグが
+                # gap で判定する）。万一 upstream から届いた場合の保険として残置。
+                await finish_output_turn()
             elif event_type == "session.output_transcript.delta":
+                last_output_activity_at = asyncio.get_running_loop().time()
                 if not output_active:
                     output_active = True
                     await flush_user()
                 delta = str(event.get("delta") or "")
                 if delta:
-                    assistant_transcript += delta
-                    await send_client(assistant_text_event(delta=delta, done=False))
+                    assistant_transcript, piece = _accumulate_transcript(
+                        assistant_transcript, delta
+                    )
+                    if piece:
+                        await send_client(assistant_text_event(delta=piece, done=False))
             elif event_type == "session.input_transcript.delta":
+                last_input_transcript_at = asyncio.get_running_loop().time()
+                # 発話区間が取れるなら時刻で別発話を切る（公式推奨の grouping）。
+                # 前 delta の end_ms と次の start_ms が大きく離れていたら、
+                # ここまでの分を先に確定してから新しい発話として累積する。
+                start_ms = event.get("start_ms")
+                end_ms = event.get("end_ms")
+                if (
+                    user_transcript
+                    and isinstance(start_ms, (int, float))
+                    and last_input_end_ms is not None
+                    and start_ms - last_input_end_ms > _LIVE_INPUT_GAP_SEC * 1000
+                ):
+                    await flush_user()
                 transcript_deltas += 1
+                if isinstance(end_ms, (int, float)):
+                    last_input_end_ms = float(end_ms)
                 delta = str(event.get("delta") or "")
                 if delta:
-                    user_transcript += delta
-                    await send_client(
-                        user_text_event(text=user_transcript, delta=delta, done=False)
+                    user_transcript, piece = _accumulate_transcript(
+                        user_transcript, delta
                     )
+                    if piece:
+                        await send_client(
+                            user_text_event(text=user_transcript, delta=piece, done=False)
+                        )
             elif event_type == "session.delegation.created":
                 delegation = event.get("delegation") or {}
                 delegation_id = str(delegation.get("id") or "")
                 delegated_response_id = str(event.get("response_id") or "") or None
+                # 前の委譲で集めた function_call・確定テキストを引きずらない。
+                # 連続委譲で古い呼び出しが次の response.completed に混入したり、
+                # 前委譲のテキストが次の活動行 title に出るのを防ぐ。
+                delegated_calls.clear()
+                delegated_last_text = ""
                 # ユーザーの発話を履歴へ確定させてから委譲の記録を残す。
                 await flush_user()
                 # 委譲前の発話断片も確定する。ここで閉じないと desktop 側で
@@ -849,6 +1170,8 @@ async def _live_upstream_to_client(
                     )
                 )
             elif event_type == "response.event":
+                # delegation（Responses バックエンド）の内側イベント。
+                # 委譲応答の進行・完了・テキストはこの内側で届く。
                 inner = event.get("event") or {}
                 inner_type = inner.get("type", "")
                 if inner_type == "response.created":
@@ -857,16 +1180,58 @@ async def _live_upstream_to_client(
                     ) or delegated_response_id
                 elif inner_type == "response.output_item.done":
                     item = inner.get("item") or {}
-                    if item.get("type") == "function_call":
+                    # function_call の回収は completed 状態の item のみ
+                    # （Twilio 公式サンプル準拠。in_progress 等は拾わない）。
+                    if (
+                        item.get("type") == "function_call"
+                        and item.get("status") == "completed"
+                    ):
                         delegated_calls.append(item)
+                    elif item.get("type") == "function_call":
+                        logger.debug(
+                            "live delegation: skip function_call status=%s",
+                            item.get("status"),
+                        )
+                elif inner_type == "response.output_text.delta":
+                    # 委譲バックエンドの応答テキスト。発話内容は表の
+                    # session.output_transcript が担うため、こちらは別レーン
+                    # （delegated_text）に累積し、assistant.text へは流さない
+                    # （喋った内容≠表示の二重コンテンツ防止）。
+                    delta = str(inner.get("delta") or "")
+                    if delta:
+                        delegated_text, _ = _accumulate_transcript(
+                            delegated_text, delta
+                        )
+                elif inner_type in {
+                    "response.output_text.done",
+                    "response.content_part.done",
+                }:
+                    # 委譲テキストの区切り。履歴へ確定するだけで表示は
+                    # response.completed の delegate 活動行に任せる。
+                    await flush_delegated()
                 elif inner_type == "response.completed":
+                    # 委譲ターンの確定区切り。function_call の有無に関わらず
+                    # ユーザー・assistant 両方をここで確定する。
+                    await flush_user()
+                    await flush_assistant()
+                    snippet = await flush_delegated()
+                    # 「裏で考えた」活動行を閉じる。確定テキストは title で
+                    # 抜粋表示（subdued、発話バブルと混ざらないレーン）。
+                    # output_text.done で先に畳まれた分は delegated_last_text
+                    # に残っているので、それを拾って表示に使う。
+                    title = (snippet or delegated_last_text)[:120]
+                    delegated_last_text = ""
+                    await send_client(
+                        assistant_tool_activity_event(
+                            name="delegate",
+                            call_id=delegation_id or delegated_response_id or "",
+                            status="done",
+                            title=title,
+                        )
+                    )
                     # completed の output は意図的に空 — 集めた呼び出しで処理する。
                     calls, delegated_calls = delegated_calls, []
                     if calls:
-                        await flush_user()
-                        # ツール実行前に発話中の断片を確定させ、tool_activity と
-                        # 続き発話のバブルを分ける。
-                        await flush_assistant()
                         await _run_function_calls(
                             calls,
                             upstream=upstream,
@@ -877,13 +1242,48 @@ async def _live_upstream_to_client(
                             pending_client_calls=pending_client_calls,
                             live=True,
                         )
+                elif inner_type in {
+                    "response.failed",
+                    "response.incomplete",
+                    "error",
+                }:
+                    # 委譲失敗を沈黙させない。確定できる断片は畳んでから
+                    # delegate 活動行を failed で閉じ、エラーを通知する。
+                    await flush_user()
+                    await flush_assistant()
+                    await flush_delegated()
+                    delegated_calls.clear()
+                    delegated_last_text = ""
+                    await send_client(
+                        assistant_tool_activity_event(
+                            name="delegate",
+                            call_id=delegation_id or delegated_response_id or "",
+                            status="failed",
+                        )
+                    )
+                    await send_client(
+                        error_event(
+                            _extract_error_message(inner),
+                            code="delegation_error",
+                        )
+                    )
+                elif inner_type in _LIVE_DELEGATION_QUIET_EVENTS:
+                    continue
                 else:
+                    # 内側の音声イベント（response.output_audio.* / response.audio.*
+                    # 等）は live-delegation ドキュメントに記載なし。万一届いても
+                    # 中継せず type 名だけログへ出す（委譲バックエンドはテキスト
+                    # 応答で、音声は表の Live モデルが session.output_audio.* で
+                    # 出す想定）。
                     key = f"response.event:{inner_type}"
                     if key not in logged_types:
                         logged_types.add(key)
                         logger.warning(
                             "live delegation event (unhandled): %s", inner_type
                         )
+            elif event_type == "session.usage.updated":
+                # 既知イベント。中継はしないが usage だけログへ残す。
+                logger.debug("live session usage: %s", event.get("usage") or event)
             elif event_type == "session.closed":
                 return
             elif event_type == "error":
@@ -895,10 +1295,14 @@ async def _live_upstream_to_client(
                 if event_type not in logged_types:
                     logged_types.add(event_type)
                     logger.warning("live upstream event (unhandled): %s", event_type)
+            # イベントが TICK 未満の間隔で流れ続けても gap 判定を取りこぼさない
+            # よう、処理後にもウォッチドッグを回す。
+            await check_watchdogs()
     finally:
         # クライアントへ送り切れなかった未確定の断片も履歴には残す。
         try:
             await flush_user(send=False)
             await flush_assistant(send=False)
+            await flush_delegated()
         except Exception:
             pass

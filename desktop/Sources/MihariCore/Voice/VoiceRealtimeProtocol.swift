@@ -146,7 +146,15 @@ enum VoiceIncomingFrame: Equatable, Sendable {
     case assistantAudio(pcm16: Data, done: Bool)
     case assistantToolCall(name: String, callID: String, arguments: String)
     /// room が実行したツールの通知。client は表示だけ行い実行しない。
-    case assistantToolActivity(name: String, callID: String, status: String)
+    /// `jobID` は `submit_job` で受理された仕事の ID（`RoomJobMonitor.attach` 用）。
+    /// `title` は補助ラベル（委譲テキストの抜粋や仕事名）。
+    case assistantToolActivity(
+        name: String,
+        callID: String,
+        status: String,
+        jobID: String?,
+        title: String?
+    )
     case error(code: String, message: String)
     case sessionClosed(reason: String)
     case unknown(type: String)
@@ -203,7 +211,9 @@ enum VoiceIncomingFrame: Equatable, Sendable {
             return .assistantToolActivity(
                 name: json["name"] as? String ?? "",
                 callID: json["call_id"] as? String ?? "",
-                status: json["status"] as? String ?? ""
+                status: json["status"] as? String ?? "",
+                jobID: (json["job_id"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                title: (json["title"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             )
         case VoiceRealtimeProtocol.EventType.error:
             return .error(

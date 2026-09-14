@@ -28,6 +28,7 @@ desktop 側は ``MIHARI_VOICE_GATEWAY_URL`` があればそこへ voice を向�
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 from pathlib import Path
 
@@ -102,6 +103,11 @@ def main() -> None:
     args = parser.parse_args()
 
     load_dotenv()
+    # room 本体（cli.py）と同じく root ロガーを用意し、mihari_room.* の
+    # INFO ログ（live turn 診断など）が uvicorn から見えるようにする。
+    # uvicorn 既定の log_config は uvicorn 系ロガーしか触らないので、
+    # basicConfig なしだと INFO が一切出ない。
+    logging.basicConfig(level=logging.INFO)
     try:
         config = build_config()
     except ValueError as error:

@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 
 from mihari_room.app import create_app
 from mihari_room.config import TOKEN_HEADER, RoomConfig
+from mihari_room.contracts import JobStatus
 from mihari_room.orchestrator import RoomOrchestrator
 from mihari_room.queue.file_queue import FileJobQueue
 from mihari_room.store.file_store import FileJobStore
@@ -440,6 +441,43 @@ def test_gateway_stream_delegates_tool_to_room(tmp_path: Path) -> None:
     ]
     assert len(fco) == 1
     assert json.loads(fco[0]["item"]["output"])["success"] is True
+
+
+async def test_remote_executor_finished_jobs_polls_room(tmp_path: Path) -> None:
+    """RemoteVoiceToolExecutor.finished_jobs は GET /jobs/{id} で終端を拾う。
+
+    gateway には job store が無いため room の HTTP API をポーリングする。
+    終端に達した job は追跡から外れ、2 回目は空を返す。
+    """
+    room_app, _, store = _make_room(tmp_path / "room")
+    transport = httpx.ASGITransport(app=room_app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://room"
+    ) as http:
+        executor = RemoteVoiceToolExecutor(
+            session_id="sess-remote-job",
+            room_url="http://room",
+            token=TOKEN,
+            client=http,
+        )
+        outcome = await executor.execute(
+            "submit_job", json.dumps({"prompt": "おつかい", "title": "レポート"})
+        )
+        payload = json.loads(outcome.output)
+        assert payload["success"] is True
+        job_id = payload["job_id"]
+        # 実行中は空。
+        assert await executor.finished_jobs() == []
+        # room 側で終端にする。
+        store.set_status(job_id, JobStatus.DONE)
+        results = await executor.finished_jobs()
+        assert len(results) == 1
+        assert results[0]["job_id"] == job_id
+        assert results[0]["status"] == "done"
+        assert results[0]["title"] == "レポート"
+        # 2 回目は空（追跡から外れる）。
+        assert await executor.finished_jobs() == []
+        await executor.close()
 
 
 def test_room_stream_ignores_factory_when_orchestrator_present(tmp_path: Path) -> None:

@@ -121,6 +121,11 @@ public final class VoiceConversationController: ObservableObject {
     /// 次の発話は新しい行から始める。
     private var streamingUserMessageID: UUID?
 
+    /// 「話す」押下で始まった現在のターンに user.text が届いたか。
+    /// フルデュプレックスでは押下中に文字起こしが先行することがあり、届いていれば
+    /// 確定時の「（音声を送信）」プレースホルダは不要（孤児化の残存経路を塞ぐ）。
+    private var userTranscriptSeenThisTurn = false
+
     public init(deps: Dependencies) {
         self.deps = deps
         // assistant.audio の 1 発話を鳴らし切ったらエコー対策を解除する。
@@ -200,6 +205,8 @@ public final class VoiceConversationController: ObservableObject {
     public func beginPushToTalk() {
         guard isActive, !isTalking else { return }
         isTalking = true
+        // 新しい発話ターンの開始。前ターンの transcript 到着フラグは降ろす。
+        userTranscriptSeenThisTurn = false
         if echoGuardActive || deps.speechPlayer.isSpeaking {
             bargeIn()
         }
@@ -572,11 +579,21 @@ public final class VoiceConversationController: ObservableObject {
             handleToolCall(name: name, arguments: arguments)
             return false
 
-        case .assistantToolActivity(let name, _, let status):
+        case .assistantToolActivity(let name, let callID, let status, let jobID, let title):
             // room が実行したツールの通知。client では実行しない。
             // tool_call と同じく、下書きを確定してから活動行を置く。
             finalizeAssistantMessage()
-            appendSystem(VoiceToolActivityLabel.text(name: name, status: status))
+            appendSystem(VoiceToolActivityLabel.text(name: name, status: status, title: title))
+            if name == "submit_job" {
+                // 依頼時の活動通知は job_id フィールド、完了通知は call_id に
+                // ジョブ ID が入る。届いたら RoomJobMonitor へ attach し、
+                // 以降の進捗・完了発話・pending questions は既存の購読に任せる。
+                let target = (jobID?.isEmpty == false ? jobID : nil) ?? callID
+                if !target.isEmpty {
+                    activeVoiceJobID = target
+                    deps.onJobSubmitted?(target, title)
+                }
+            }
             return false
 
         case .error(_, let message):
@@ -677,9 +694,15 @@ public final class VoiceConversationController: ObservableObject {
         // 押下中に送ったチャンクを再送しない。commit + create_response だけ送る。
         if hasStreamedAudioInTurn {
             sendAudioChunk(Self.commitOnlyPCM, commit: true, createResponse: true)
-            appendUserPlaceholder()
+            // このターンの user.text が既に届いている（= フルデュプレックスで
+            // 文字起こしが先行した）なら、発話行はすでに存在するので
+            // 「（音声を送信）」を新たに積まない（残ると孤児行になる）。
+            if !userTranscriptSeenThisTurn {
+                appendUserPlaceholder()
+            }
         }
         hasStreamedAudioInTurn = false
+        userTranscriptSeenThisTurn = false
     }
 
     /// 確定専用の最小 PCM16（1 サンプル無音）。room は空 base64 を拒否する。
@@ -856,6 +879,7 @@ public final class VoiceConversationController: ObservableObject {
     /// 従来形式（`text` のみ）は非破壊のまま、プレースホルダ置換か新規行追加を行う。
     private func applyUserTranscript(_ text: String, delta: String?, done: Bool?) {
         guard delta != nil || done != nil else {
+            if !text.isEmpty { userTranscriptSeenThisTurn = true }
             applyUserTranscriptFinal(text)
             return
         }
@@ -863,6 +887,7 @@ public final class VoiceConversationController: ObservableObject {
             if done == true { streamingUserMessageID = nil }
         }
         guard !text.isEmpty else { return }
+        userTranscriptSeenThisTurn = true
 
         // 進行中の発話行を追いかけて書き換える。途中に assistant/system 行が
         // 挟まっても ID で引き当てるため、同じ発話で行が増殖しない。
@@ -881,6 +906,19 @@ public final class VoiceConversationController: ObservableObject {
             streamingUserMessageID = messages[index].id
             messages[index].text = text
             return
+        }
+        // done 確定後に遅れて届いた同一発話の delta は新規行にしない。
+        // 直近 user 行と一致/包含なら同じ発話の続きとみなし、その行を引き継ぐ
+        // （「今何してるんだっけ」が確定後にもう一度 delta で届く実機不具合の対策）。
+        if let lastUser = messages.lastIndex(where: { $0.role == .user }) {
+            let lastText = messages[lastUser].text
+            if lastText != Self.userPlaceholderText,
+                lastText == text || text.hasPrefix(lastText) || lastText.hasPrefix(text)
+            {
+                messages[lastUser].text = text.count > lastText.count ? text : lastText
+                streamingUserMessageID = messages[lastUser].id
+                return
+            }
         }
         let message = VoiceConversationMessage(role: .user, text: text)
         streamingUserMessageID = message.id

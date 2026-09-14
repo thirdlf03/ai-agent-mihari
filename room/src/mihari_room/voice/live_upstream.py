@@ -13,10 +13,13 @@ Realtime（``wss://.../v1/realtime``）とは別プロトコル。フルデュ�
 - 入力音声は ``session.input_audio.append``（base64 PCM16 24kHz mono）。
   commit 相当は無く、無音も含めて流し続ける前提。
 - 出力は ``session.output_audio.delta``（``delta`` = base64 PCM16 24kHz）。
-  ``session.output_audio.done`` / ``.stopped`` が 1 発話分の終端。
+  ``session.output_audio.done`` / ``.stopped`` は公式イベント一覧に
+  存在しない — 1 発話分の終端は出力活動の gap を自前判定する
+  （room 側ウォッチドッグ、``_LIVE_OUTPUT_GAP_SEC``）。
 - 文字起こしは ``session.input_transcript.delta``（ユーザー）と
   ``session.output_transcript.delta``（アシスタント）。断片のみで
-  「ターン完了」の確定イベントは無い。
+  「ターン完了」の確定イベントは無い。入力側の区切りも transcript の
+  gap / 発話区間（start_ms・end_ms）の飛びで自前判定する。
 - 途中のコンテキスト注入は ``session.instructions.append`` /
   ``session.thinking.append`` / ``session.commentary.append``
   （``delegation_id`` 必須、セッション全体なら null）。
@@ -149,6 +152,11 @@ class OpenAILiveUpstream(RealtimeUpstream):
         self._event_seq = itertools.count(1)
         #: connect() で session.started 待ちのあいだに受けたイベントの先出しキュー。
         self._pending: deque[dict[str, Any]] = deque()
+
+    @property
+    def delegation_enabled(self) -> bool:
+        """Responses 委譲が有効か。``response.*`` 系コマンドの通過可否と一致。"""
+        return self._delegation_enabled
 
     async def connect(self) -> None:
         import websockets

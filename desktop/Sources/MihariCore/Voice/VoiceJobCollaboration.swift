@@ -367,20 +367,25 @@ enum VoiceToolActivityLabel {
 
     /// `assistant.tool_activity` の 1 行表示。「みはり: …」の形で返す。
     /// `status` は `running` / `done` / `failed`（それ以外は `done` 扱い）。
-    static func text(name: String, status: String) -> String {
-        guard let forms = knownForms[VoiceToolName.normalize(name)] else {
+    /// `title` があれば補助ラベルとして末尾へ添える（委譲テキストの抜粋・仕事名など）。
+    static func text(name: String, status: String, title: String? = nil) -> String {
+        let base: String
+        if let forms = knownForms[VoiceToolName.normalize(name)] {
+            switch status {
+            case "running": base = "みはり: \(forms.running)"
+            case "failed": base = "みはり: \(forms.failed)"
+            default: base = "みはり: \(forms.done)"
+            }
+        } else {
             // 未知のツールは生名をそのまま出す。
             switch status {
-            case "running": return "みはり: \(name) を実行中…"
-            case "failed": return "みはり: \(name) に失敗"
-            default: return "みはり: \(name) を実行した"
+            case "running": base = "みはり: \(name) を実行中…"
+            case "failed": base = "みはり: \(name) に失敗"
+            default: base = "みはり: \(name) を実行した"
             }
         }
-        switch status {
-        case "running": return "みはり: \(forms.running)"
-        case "failed": return "みはり: \(forms.failed)"
-        default: return "みはり: \(forms.done)"
-        }
+        guard let title, !title.isEmpty else { return base }
+        return "\(base): \(title)"
     }
 }
 

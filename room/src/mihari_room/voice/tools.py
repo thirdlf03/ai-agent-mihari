@@ -25,7 +25,8 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mihari_room.archive.pathutil import ensure_contained, sanitize_filename
-from mihari_room.contracts import CreateJobRequest, Job, JobSource
+from mihari_room.contracts import CreateJobRequest, Job, JobSource, JobStatus
+from mihari_room.events import EventJournal
 from mihari_room.job_interactions import list_pending_questions
 from mihari_room.mac_control.errors import MacControlError, MacControlErrorCode
 from mihari_room.mac_control.protocol import MacOpKind
@@ -64,6 +65,11 @@ _DOWNLOADS_DIRNAME = "downloads"
 
 #: room では実行せず desktop へ委譲するツール名。
 CLIENT_SIDE_TOOLS = frozenset({"capture_screen"})
+
+#: submit_job で投げたジョブの終端。これに達したら会話へ結果を戻す。
+_JOB_TERMINAL_STATUSES = frozenset(
+    {JobStatus.DONE, JobStatus.FAILED, JobStatus.CANCELLED}
+)
 
 
 def _fn(
@@ -318,6 +324,9 @@ class VoiceToolExecutor:
         self.voice_dir = root / "voice" / session_id
         self.downloads_dir = self.voice_dir / _DOWNLOADS_DIRNAME
         self._last_job_id: str | None = None
+        #: submit_job で投げたジョブの追跡表（job_id → title）。終端に達した
+        #: 分は ``finished_jobs`` が返して会話へ結果を戻し、表から外す。
+        self._submitted_jobs: dict[str, str] = {}
         self._mac_job_id = f"voice-{session_id}"
         self._mac_run_id = f"{self._mac_job_id}-{uuid4().hex[:8]}"
         self._mac_begun = False
@@ -357,6 +366,38 @@ class VoiceToolExecutor:
             )
         except Exception:
             logger.debug("voice mac run end failed", exc_info=True)
+
+    async def finished_jobs(self) -> list[dict[str, Any]]:
+        """このセッションが submit したジョブのうち終端に達したものを返す。
+
+        voice stream のジョブ完了ウォッチャーが定期的に呼ぶ。返したジョブは
+        追跡から外す（1 回だけ報告）。store 無し・未提出なら空リスト。
+        orchestrator が新規イベントを push する口は無いため、job store の
+        状態をポーリングして終端を検知する。
+        """
+        store = self._store()
+        if store is None or not self._submitted_jobs:
+            return []
+        results: list[dict[str, Any]] = []
+        for job_id, title in list(self._submitted_jobs.items()):
+            try:
+                job = store.get(job_id)
+            except KeyError:
+                # 台帳から消えた job は報告のしようがないので追跡を外す。
+                self._submitted_jobs.pop(job_id, None)
+                continue
+            if job.status not in _JOB_TERMINAL_STATUSES:
+                continue
+            self._submitted_jobs.pop(job_id, None)
+            results.append(
+                {
+                    "job_id": job.id,
+                    "title": job.title or title,
+                    "status": job.status.value,
+                    "summary": _job_result_summary(job),
+                }
+            )
+        return results
 
     # --- 共通ヘルパ -----------------------------------------------------------
 
@@ -428,6 +469,9 @@ class VoiceToolExecutor:
             attachments=attachments,
         )
         self._last_job_id = job.id
+        # 終端検知用に job_id ↔ セッションの対応を残す。``finished_jobs`` が
+        # store を見て終端に達した分を stream のウォッチャーへ返す。
+        self._submitted_jobs[job.id] = job.title
         return self._outcome(
             _ok(
                 {
@@ -697,6 +741,16 @@ class VoiceToolExecutor:
             params["label"] = label
         outcome = await self._run_mac_op(MacOpKind.HAND_OFF_FILE, params)
         return self._outcome(_json(outcome))
+
+
+def _job_result_summary(job: Job) -> str:
+    """完了報告に載せる成果物サマリ。job の journal 最新行の本文を使う。
+
+    DONE なら worker の最終発話（SUMMARY 行）、FAILED なら失敗理由を含む
+    行が最後に残る。journal が空なら空文字。
+    """
+    latest = EventJournal.for_job(job.directory).latest()
+    return str((latest or {}).get("text") or "").strip()
 
 
 #: ツール名 → 実行メソッドの dispatch 表。``CLIENT_SIDE_TOOLS`` はここにも

@@ -110,15 +110,31 @@ def assistant_tool_call_event(*, name: str, call_id: str, arguments: str) -> dic
 
 
 def assistant_tool_activity_event(
-    *, name: str, call_id: str, status: str
+    *,
+    name: str,
+    call_id: str,
+    status: str,
+    title: str = "",
+    job_id: str = "",
 ) -> dict[str, Any]:
-    """room 実行ツールの活動通知。tool_call と違い client は実行しない。"""
-    return client_event(
+    """room 実行ツールの活動通知。tool_call と違い client は実行しない。
+
+    ``title`` はジョブ完了通知など任意の表示用ラベル。``job_id`` は
+    ``submit_job`` で受理された room ジョブの ID（desktop の
+    ``RoomJobMonitor.attach`` 用）。未知フィールドを無視する client では
+    従来どおりの見え方になる。
+    """
+    payload = client_event(
         EVENT_ASSISTANT_TOOL_ACTIVITY,
         name=name,
         call_id=call_id,
         status=status,
     )
+    if title:
+        payload["title"] = title
+    if job_id:
+        payload["job_id"] = job_id
+    return payload
 
 
 def assistant_audio_event(*, audio_b64: str = "", done: bool = False) -> dict[str, Any]:
