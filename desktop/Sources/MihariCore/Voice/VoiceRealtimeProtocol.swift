@@ -127,7 +127,9 @@ struct VoiceHistorySyncEntry: Equatable, Sendable {
 
 /// room → client の 1 フレーム。
 enum VoiceIncomingFrame: Equatable, Sendable {
-    case sessionReady(sessionID: String, model: String)
+    /// `outputModalities` は room が upstream に設定した出力種別（例: `["audio","text"]`）。
+    /// 送らない古い room では空配列になる。
+    case sessionReady(sessionID: String, model: String, outputModalities: [String])
     case historySync(messages: [VoiceHistorySyncEntry])
     /// `delta` / `done` は live_audio モードだけに付く逐次フィールド。
     /// 従来形式（text のみ）では両方 nil。
@@ -151,7 +153,8 @@ enum VoiceIncomingFrame: Equatable, Sendable {
         case VoiceRealtimeProtocol.EventType.sessionReady:
             return .sessionReady(
                 sessionID: json["session_id"] as? String ?? "",
-                model: json["model"] as? String ?? ""
+                model: json["model"] as? String ?? "",
+                outputModalities: json["output_modalities"] as? [String] ?? []
             )
         case VoiceRealtimeProtocol.EventType.historySync:
             let rawMessages = json["messages"] as? [[String: Any]] ?? []
@@ -172,7 +175,8 @@ enum VoiceIncomingFrame: Equatable, Sendable {
             )
         case VoiceRealtimeProtocol.EventType.assistantAudio:
             // done 通知だけのフレームは audio_base64 が空なので、欠落・不正は空データにする。
-            let pcm16 = (json["audio_base64"] as? String)
+            let pcm16 =
+                (json["audio_base64"] as? String)
                 .flatMap { Data(base64Encoded: $0) } ?? Data()
             return .assistantAudio(
                 pcm16: pcm16,

@@ -88,7 +88,8 @@ struct VoiceConversationControllerTests {
         func steer(jobID: String, instruction: String) async throws -> JobSteerResponse {
             JobSteerResponse(jobID: jobID, seq: 1, text: instruction, delivered: true)
         }
-        func answerQuestion(jobID: String, questionID: String, answer: String) async throws -> JobQuestionAnswerResponse {
+        func answerQuestion(jobID: String, questionID: String, answer: String) async throws -> JobQuestionAnswerResponse
+        {
             JobQuestionAnswerResponse(
                 jobID: jobID,
                 question: RoomPendingQuestion(id: questionID, question: "?", status: "answered", answer: answer)
@@ -386,7 +387,8 @@ struct VoiceConversationControllerTests {
         await waitUntil { factory.makeCount >= 1 }
 
         socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
-        let chunk = Data([0x01, 0x00])
+        // 可聴フレーム（振幅 > 閾値 512）でないとエコーガードが立たず割り込みにならない。
+        let chunk = Data([0x00, 0x20])
         socket.feed(
             """
             {"type":"assistant.audio","audio_base64":"\(chunk.base64EncodedString())","done":false}
@@ -563,9 +565,11 @@ struct VoiceConversationControllerTests {
         #expect(jobs.steerCalls.count == 1)
         #expect(jobs.steerCalls[0].jobID == "job-active")
         #expect(jobs.steerCalls[0].instruction == "左側を優先")
-        #expect(controller.messages.contains(where: {
-            $0.role == .system && $0.text.contains("指示を送った")
-        }))
+        #expect(
+            controller.messages.contains(where: {
+                $0.role == .system && $0.text.contains("指示を送った")
+            })
+        )
 
         controller.stop()
     }
@@ -611,9 +615,11 @@ struct VoiceConversationControllerTests {
         )
         try await Task.sleep(for: .milliseconds(200))
 
-        #expect(controller.messages.contains(where: {
-            $0.role == .system && $0.text.contains("エラー: Realtime が落ちた")
-        }))
+        #expect(
+            controller.messages.contains(where: {
+                $0.role == .system && $0.text.contains("エラー: Realtime が落ちた")
+            })
+        )
 
         controller.stop()
     }
@@ -642,9 +648,11 @@ struct VoiceConversationControllerTests {
         await waitUntil { factory.makeCount >= 2 }
 
         #expect(factory.makeCount == 2)
-        #expect(controller.messages.contains(where: {
-            $0.role == .system && $0.text.contains("新規セッション")
-        }))
+        #expect(
+            controller.messages.contains(where: {
+                $0.role == .system && $0.text.contains("新規セッション")
+            })
+        )
 
         controller.stop()
     }
@@ -716,6 +724,126 @@ struct VoiceConversationControllerTests {
         try await Task.sleep(for: .milliseconds(200))
         #expect(parseSentAudioFrames(socket.sent).isEmpty)
         #expect(controller.isMicLive == false)
+
+        controller.stop()
+    }
+
+    @Test("live_audio では押していないあいだ同じ長さの無音チャンクを流し続ける")
+    func liveAudioStreamsSilenceWhileNotTalking() async throws {
+        let socket = ScriptedSocket()
+        let (controller, mic, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(
+            #"{"type":"session.ready","session_id":"sess-test","model":"gpt-live-1","output_modalities":["audio","text"]}"#
+        )
+        // output_modalities の反映を確実にしてからチャンクを供給する。
+        await waitUntil { controller.connectionState == .ready }
+
+        mic.emit(data: Data(repeating: 0x77, count: 480), level: 0.5)
+
+        await waitUntil {
+            !self.parseSentAudioFrames(socket.sent).isEmpty
+        }
+
+        let frames = parseSentAudioFrames(socket.sent)
+        let streaming = try #require(frames.first)
+        #expect(streaming["commit"] as? Bool == false)
+        #expect(streaming["create_response"] as? Bool == false)
+        // 実音声ではなく、入力チャンクと同じバイト長の PCM16 無音が流れる。
+        let silence = Data(
+            base64Encoded: try #require(streaming["audio_base64"] as? String)
+        )
+        #expect(silence == Data(count: 480))
+        // isMicLive は「実音声を流しているか」なので無音送信中は false のまま。
+        #expect(controller.isMicLive == false)
+
+        controller.stop()
+    }
+
+    @Test("live_audio の再生中(エコーガード中)も無音チャンクを流し続ける")
+    func liveAudioStreamsSilenceDuringEchoGuard() async throws {
+        let socket = ScriptedSocket()
+        let pcm = VoiceConversationControllerTestsStubPCMPlayer()
+        let (controller, mic, _, factory) = makeController(socket: socket, pcmPlayer: pcm)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(
+            #"{"type":"session.ready","session_id":"sess-test","model":"gpt-live-1","output_modalities":["audio","text"]}"#
+        )
+        await waitUntil { controller.connectionState == .ready }
+        // 可聴レベルの assistant.audio でエコーガードを立てる。
+        let audible = Data([0x00, 0x10])
+        socket.feed(
+            """
+            {"type":"assistant.audio","audio_base64":"\(audible.base64EncodedString())","done":false}
+            """
+        )
+        await waitUntil { controller.statusText == "再生中…" }
+
+        mic.emit(data: Data(repeating: 0x77, count: 480), level: 0.5)
+
+        await waitUntil {
+            !self.parseSentAudioFrames(socket.sent).isEmpty
+        }
+
+        let streaming = try #require(parseSentAudioFrames(socket.sent).first)
+        let silence = Data(
+            base64Encoded: try #require(streaming["audio_base64"] as? String)
+        )
+        #expect(silence == Data(count: 480))
+
+        controller.stop()
+    }
+
+    @Test("text モードでは output_modalities があっても押していないあいだは送らない")
+    func textModeDropsMicChunksUnlessTalking() async throws {
+        let socket = ScriptedSocket()
+        let (controller, mic, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(
+            #"{"type":"session.ready","session_id":"sess-test","model":"mini","output_modalities":["text"]}"#
+        )
+        await waitUntil { controller.connectionState == .ready }
+
+        mic.emit(data: Data(repeating: 0x44, count: 480), level: 0.5)
+
+        // 送信は非同期なので、流れていれば届く程度の時間だけ待ってから確認する。
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(parseSentAudioFrames(socket.sent).isEmpty)
+
+        controller.stop()
+    }
+
+    @Test("live_audio でも押下中は従来どおり実音声を送る")
+    func liveAudioSendsRealAudioWhileTalking() async throws {
+        let socket = ScriptedSocket()
+        let (controller, mic, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(
+            #"{"type":"session.ready","session_id":"sess-test","model":"gpt-live-1","output_modalities":["audio","text"]}"#
+        )
+        await waitUntil { controller.connectionState == .ready }
+
+        let chunk = Data(repeating: 0xAA, count: 480)
+        controller.beginPushToTalk()
+        mic.emit(data: chunk, level: 0.5)
+
+        await waitUntil {
+            self.parseSentAudioFrames(socket.sent)
+                .contains { ($0["commit"] as? Bool) == false }
+        }
+
+        let streaming = parseSentAudioFrames(socket.sent).filter { ($0["commit"] as? Bool) == false }
+        let payloads = streaming.compactMap { $0["audio_base64"] as? String }
+            .compactMap { Data(base64Encoded: $0) }
+        #expect(payloads.contains(chunk))
 
         controller.stop()
     }

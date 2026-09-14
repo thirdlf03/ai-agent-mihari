@@ -300,6 +300,7 @@ Hermes が clarify 等でユーザー入力待ちになったとき、ジョブ 
 
 - `session.ready` の `output_modalities` は `["audio", "text"]`。
 - `input.audio` は従来どおり PCM16 24 kHz mono base64。`commit` / `create_response` フィールドは受け付けるが、Live API はフルデュプレックス（commit/response.create 相当のイベントが無い）なので upstream 側で捨てられる。発話区切りはモデルが自律的に決める。
+- Live API は入力音声ストリームでセッションの時間が進むため、クライアント音声が途切れた区間は room が 100ms 周期の無音フレーム（PCM16 24 kHz のゼロ埋め）を `input_audio_buffer.append` として補填する。クライアントは発話中のみ `input.audio` を送ればよい。
 - upstream の `session.output_audio.delta`（base64 PCM16 24kHz）を PCM16 → f32 に変換して VC サービスへ送り、戻りの f32 を PCM16 に戻して `assistant.audio` で中継する。
 - 文字起こし（`session.input_transcript.delta` / `session.output_transcript.delta`）は断片のみでターン完了イベントが無い。room はユーザー分を累積し、アシスタント出力の区切りで確定（履歴記録 + `done: true`）する。
 

@@ -109,6 +109,11 @@ public final class VoiceConversationController: ObservableObject {
     /// 返すため、以降の `assistant.text` では VOICEVOX 合成・再生を行わない（二重発話防止）。
     private var assistantAudioMode = false
 
+    /// upstream が無音も含めて入力音声を流し続ける前提のフルデュプレックスか
+    /// （`session.ready` の `output_modalities` に `audio` を含む live_audio モード）。
+    /// true のあいだは非押下中も無音チャンクを流してセッションのタイムラインを維持する。
+    private var upstreamNeedsContinuousAudio = false
+
     /// 押下中に commit:false で送ったか（確定時に全体を再送しない）。
     private var hasStreamedAudioInTurn = false
 
@@ -142,6 +147,7 @@ public final class VoiceConversationController: ObservableObject {
         messages = []
         pendingQuestions = []
         assistantAudioMode = false
+        upstreamNeedsContinuousAudio = false
         streamingUserMessageID = nil
         connectionState = .connecting
         statusText = "接続中…"
@@ -266,7 +272,7 @@ public final class VoiceConversationController: ObservableObject {
                 await performGetJobStatus(jobID: jobID)
             case .showQuestion(let jobID, let questionID, let prompt):
                 mergePendingQuestions([
-                    VoicePendingQuestion(jobID: jobID, questionID: questionID, prompt: prompt),
+                    VoicePendingQuestion(jobID: jobID, questionID: questionID, prompt: prompt)
                 ])
             case .unsupported:
                 break
@@ -495,7 +501,8 @@ public final class VoiceConversationController: ObservableObject {
     @discardableResult
     private func handleIncoming(_ frame: VoiceIncomingFrame) -> Bool {
         switch frame {
-        case .sessionReady(let sessionID, let model):
+        case .sessionReady(let sessionID, let model, let outputModalities):
+            upstreamNeedsContinuousAudio = outputModalities.contains("audio")
             connectionState = .ready
             statusText = "接続済み (\(model))"
             appendSystem("セッション \(sessionID) が準備できた")
@@ -618,11 +625,19 @@ public final class VoiceConversationController: ObservableObject {
     }
 
     private func handleMicChunk(data: Data, level _: Float) {
-        // 「話す」を押していない間のチャンクと、再生中のエコーは捨てる。
-        guard isActive, isTalking, !echoGuardActive else { return }
-        updateMicLive()
-        hasStreamedAudioInTurn = true
-        sendAudioChunk(data, commit: false, createResponse: false)
+        guard isActive else { return }
+        if isTalking && !echoGuardActive {
+            // 「話す」押下中は従来どおり実音声を送る。
+            updateMicLive()
+            hasStreamedAudioInTurn = true
+            sendAudioChunk(data, commit: false, createResponse: false)
+            return
+        }
+        // live_audio は入力が止まると upstream の応答も止まるため、話していない
+        // あいだは同じ長さの無音をマイクのケイデンスで流し続ける。
+        // text モードでは無音が確定ターンの input buffer を汚染するので送らない。
+        guard upstreamNeedsContinuousAudio else { return }
+        sendAudioChunk(Data(count: data.count), commit: false, createResponse: false)
     }
 
     private func commitUserTurn() {
@@ -668,19 +683,40 @@ public final class VoiceConversationController: ObservableObject {
 
     // MARK: - 合成・再生
 
+    /// 無音扱いにする PCM16 振幅の閾値。実測で無音フレームは peak 数十、
+    /// 発話は数千〜1 万超なので十分に分離できる。
+    private static let audiblePeakThreshold: Int16 = 512
+
     /// `assistant.audio`: room が VC 済みの音声を PCM で返すモード。
     /// 一度でも届いたらこのセッションでは VOICEVOX 経路へ流さない。
     private func handleAssistantAudio(pcm16: Data, done: Bool) {
         assistantAudioMode = true
-        // 再生中はマイク送信を止める（エコー対策）。鳴らし切ると onDrained から解除する。
-        echoGuardActive = true
-        updateMicLive()
         if !pcm16.isEmpty {
             deps.pcmPlayer.enqueue(pcm16: pcm16)
             statusText = "再生中…"
+            // Live API は発話のあいだも無音フレームを垂れ流す。無音のたびに
+            // エコーガードを立てるとマイクが常時ミュートになり会話が止まるので、
+            // 実際に音が入っているフレームのときだけ立てる。
+            if Self.hasAudibleSignal(pcm16) {
+                echoGuardActive = true
+                updateMicLive()
+            }
         }
         if done {
             deps.pcmPlayer.finish()
+        }
+    }
+
+    /// PCM16 LE モノラルに可聴レベルの信号があるか（無音フレームの判定用）。
+    private static func hasAudibleSignal(_ pcm16: Data) -> Bool {
+        pcm16.withUnsafeBytes { raw in
+            for i in stride(from: 0, to: raw.count - 1, by: 2) {
+                let s = Int16(bitPattern: UInt16(raw[i]) | (UInt16(raw[i + 1]) << 8))
+                if s > audiblePeakThreshold || s < -audiblePeakThreshold {
+                    return true
+                }
+            }
+            return false
         }
     }
 
@@ -917,5 +953,6 @@ public final class VoiceConversationController: ObservableObject {
         sendTail = nil
         // セッション単位のフラグ。新しいセッションでは audio モードを引き継がない。
         assistantAudioMode = false
+        upstreamNeedsContinuousAudio = false
     }
 }

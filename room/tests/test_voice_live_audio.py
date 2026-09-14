@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import struct
+import time
 from pathlib import Path
 
 import httpx
@@ -94,6 +95,19 @@ class FakeLiveUpstream(RealtimeUpstream):
 
     def sent_events(self) -> list[dict]:
         return list(self._sent)
+
+
+class QuietLiveUpstream(FakeLiveUpstream):
+    """応答イベントを積まない静かなバリアント（無音ペーサーの観測用）。
+
+    親の send は ``input_audio_buffer.append`` ごとに応答イベントをキューへ
+    積むため、読み取らないテストでは溢れる。ここでは送信記録だけ残す。
+    """
+
+    async def send(self, event: dict) -> None:
+        if self._closed:
+            return
+        self._sent.append(event)
 
 
 class _RecordingWS:
@@ -204,6 +218,28 @@ def test_live_audio_relayed_as_assistant_audio(tmp_path: Path) -> None:
     texts = [m["text"] for m in history["messages"]]
     assert "こんにちは" in texts
     assert "やあ、見てるよ" in texts
+
+
+def test_live_input_pacer_fills_silence(tmp_path: Path) -> None:
+    """クライアントが音声を送らなくても upstream の入力が枯渇しない。
+
+    Live API は入力ストリームで時間が進むため、room が 100ms 周期の
+    無音フレーム（PCM16 24kHz mono = 4800 バイトのゼロ）を補填する。
+    """
+    fake = QuietLiveUpstream()
+    client = _make_live_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    with client.websocket_connect(f"/voice/sessions/{session_id}/stream", headers=_auth()) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        # 何も送らずに待つと、ペーサーの無音 append が複数回 upstream へ届く。
+        time.sleep(0.45)
+        _disconnect_and_idle(ws, client, session_id)
+    appends = [e for e in fake.sent_events() if e.get("type") == "input_audio_buffer.append"]
+    assert len(appends) >= 2
+    for event in appends:
+        raw = base64.b64decode(event["audio"], validate=True)
+        assert len(raw) == 4800
+        assert raw == b"\x00" * 4800
 
 
 def test_live_audio_passes_through_converter(

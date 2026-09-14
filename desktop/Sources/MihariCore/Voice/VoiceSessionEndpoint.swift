@@ -1,13 +1,19 @@
 import Foundation
 
-/// voice Realtime の接続先。依頼窓・部屋購読と同じ環境変数を使う。
+/// voice Realtime の接続先。既定は依頼窓・部屋購読と同じ部屋 URL。
+/// `MIHARI_VOICE_GATEWAY_URL` を立てると音声会話だけローカル gateway
+/// （`mihari_room.voice_gateway`）へ向き、仕事依頼は従来どおり部屋へ行く。
 struct VoiceSessionEndpoint: Sendable, Equatable {
+    /// voice セッションだけを向かせたい先を決める環境変数。
+    static let gatewayURLEnvironmentKey = "MIHARI_VOICE_GATEWAY_URL"
+
     let baseURL: URL
     let token: String
 
     static func fromEnvironment() -> VoiceSessionEndpoint {
-        VoiceSessionEndpoint(
-            baseURL: JobRequestClient.defaultBaseURL,
+        let raw = ProcessInfo.processInfo.environment[gatewayURLEnvironmentKey] ?? ""
+        return VoiceSessionEndpoint(
+            baseURL: URL(string: raw) ?? JobRequestClient.defaultBaseURL,
             token: JobRequestClient.defaultToken()
         )
     }

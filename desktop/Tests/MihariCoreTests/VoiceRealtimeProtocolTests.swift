@@ -9,8 +9,8 @@ struct VoiceRealtimeProtocolTests {
     @Test("assistant.text を delta + done で組み立てる")
     func parsesAssistantText() {
         let json = """
-        {"type":"assistant.text","delta":"こん","done":false}
-        """
+            {"type":"assistant.text","delta":"こん","done":false}
+            """
         let frame = VoiceIncomingFrame.parse(data: Data(json.utf8))
         #expect(frame == .assistantText(delta: "こん", text: "", done: false))
     }
@@ -18,11 +18,11 @@ struct VoiceRealtimeProtocolTests {
     @Test("user.text の逐次形式を delta / done 付きで読む")
     func parsesStreamingUserText() {
         let partial = """
-        {"type":"user.text","text":"こんに","delta":"に","done":false}
-        """
+            {"type":"user.text","text":"こんに","delta":"に","done":false}
+            """
         let final = """
-        {"type":"user.text","text":"こんにちは","done":true}
-        """
+            {"type":"user.text","text":"こんにちは","done":true}
+            """
         #expect(
             VoiceIncomingFrame.parse(data: Data(partial.utf8))
                 == .userText(text: "こんに", delta: "に", done: false)
@@ -36,8 +36,8 @@ struct VoiceRealtimeProtocolTests {
     @Test("user.text の従来形式は delta / done が nil になる")
     func parsesLegacyUserText() {
         let json = """
-        {"type":"user.text","text":"今日の予定を教えて"}
-        """
+            {"type":"user.text","text":"今日の予定を教えて"}
+            """
         let frame = VoiceIncomingFrame.parse(data: Data(json.utf8))
         #expect(frame == .userText(text: "今日の予定を教えて", delta: nil, done: nil))
     }
@@ -67,21 +67,44 @@ struct VoiceRealtimeProtocolTests {
     @Test("session.ready を読む")
     func parsesSessionReady() {
         let json = """
-        {"type":"session.ready","session_id":"abc","model":"gpt-realtime-2.1-mini"}
-        """
+            {"type":"session.ready","session_id":"abc","model":"gpt-realtime-2.1-mini"}
+            """
         let frame = VoiceIncomingFrame.parse(data: Data(json.utf8))
-        #expect(frame == .sessionReady(sessionID: "abc", model: "gpt-realtime-2.1-mini"))
+        #expect(
+            frame
+                == .sessionReady(
+                    sessionID: "abc",
+                    model: "gpt-realtime-2.1-mini",
+                    outputModalities: []
+                )
+        )
+    }
+
+    @Test("session.ready の output_modalities を読む")
+    func parsesSessionReadyOutputModalities() {
+        let json = """
+            {"type":"session.ready","session_id":"abc","model":"gpt-live-1","output_modalities":["audio","text"]}
+            """
+        let frame = VoiceIncomingFrame.parse(data: Data(json.utf8))
+        #expect(
+            frame
+                == .sessionReady(
+                    sessionID: "abc",
+                    model: "gpt-live-1",
+                    outputModalities: ["audio", "text"]
+                )
+        )
     }
 
     @Test("history.sync を messages 付きで読む")
     func parsesHistorySync() {
         let json = """
-        {"type":"history.sync","messages":[\
-        {"role":"user","text":"こんにちは","ts":1.0,"kind":"text"},\
-        {"role":"assistant","text":"やあ","ts":2.0,"kind":"text"},\
-        {"role":"user","text":"画面見て","ts":3.0,"kind":"image_prompt"}\
-        ]}
-        """
+            {"type":"history.sync","messages":[\
+            {"role":"user","text":"こんにちは","ts":1.0,"kind":"text"},\
+            {"role":"assistant","text":"やあ","ts":2.0,"kind":"text"},\
+            {"role":"user","text":"画面見て","ts":3.0,"kind":"image_prompt"}\
+            ]}
+            """
         let frame = VoiceIncomingFrame.parse(data: Data(json.utf8))
         guard case .historySync(let messages) = frame else {
             Issue.record("history.sync として解釈されるべき")
@@ -112,26 +135,27 @@ struct VoiceRealtimeProtocolTests {
     @Test("assistant.tool_call を name / call_id / arguments 付きで読む")
     func parsesAssistantToolCall() {
         let json = """
-        {"type":"assistant.tool_call","name":"steer_job","call_id":"c9","arguments":"{\\"instruction\\":\\"急いで\\"}"}
-        """
+            {"type":"assistant.tool_call","name":"steer_job","call_id":"c9","arguments":"{\\"instruction\\":\\"急いで\\"}"}
+            """
         let frame = VoiceIncomingFrame.parse(data: Data(json.utf8))
         #expect(
-            frame == .assistantToolCall(
-                name: "steer_job",
-                callID: "c9",
-                arguments: #"{"instruction":"急いで"}"#
-            )
+            frame
+                == .assistantToolCall(
+                    name: "steer_job",
+                    callID: "c9",
+                    arguments: #"{"instruction":"急いで"}"#
+                )
         )
     }
 
     @Test("error と session.closed を読む")
     func parsesErrorAndSessionClosed() {
         let errorJSON = """
-        {"type":"error","code":"upstream_timeout","message":"部屋がタイムアウトした"}
-        """
+            {"type":"error","code":"upstream_timeout","message":"部屋がタイムアウトした"}
+            """
         let closedJSON = """
-        {"type":"session.closed","reason":"idle"}
-        """
+            {"type":"session.closed","reason":"idle"}
+            """
         #expect(
             VoiceIncomingFrame.parse(data: Data(errorJSON.utf8))
                 == .error(code: "upstream_timeout", message: "部屋がタイムアウトした")
@@ -146,8 +170,8 @@ struct VoiceRealtimeProtocolTests {
     func parsesAssistantAudio() {
         let pcm = Data([0x01, 0x00, 0xFF, 0x7F])
         let json = """
-        {"type":"assistant.audio","audio_base64":"\(pcm.base64EncodedString())","done":false}
-        """
+            {"type":"assistant.audio","audio_base64":"\(pcm.base64EncodedString())","done":false}
+            """
         let frame = VoiceIncomingFrame.parse(data: Data(json.utf8))
         #expect(frame == .assistantAudio(pcm16: pcm, done: false))
     }
@@ -155,8 +179,8 @@ struct VoiceRealtimeProtocolTests {
     @Test("assistant.audio の done 通知だけのフレームは空音声になる")
     func parsesAssistantAudioDoneOnly() {
         let json = """
-        {"type":"assistant.audio","audio_base64":"","done":true}
-        """
+            {"type":"assistant.audio","audio_base64":"","done":true}
+            """
         let frame = VoiceIncomingFrame.parse(data: Data(json.utf8))
         #expect(frame == .assistantAudio(pcm16: Data(), done: true))
     }
@@ -164,8 +188,8 @@ struct VoiceRealtimeProtocolTests {
     @Test("assistant.text は text フィールドも delta として扱う")
     func parsesAssistantTextFromTextField() {
         let json = """
-        {"type":"assistant.text","text":"全文","done":true}
-        """
+            {"type":"assistant.text","text":"全文","done":true}
+            """
         let frame = VoiceIncomingFrame.parse(data: Data(json.utf8))
         #expect(frame == .assistantText(delta: "", text: "全文", done: true))
     }
@@ -228,8 +252,8 @@ struct VoiceRealtimeProtocolTests {
     @Test("created セッションは isReconnectable")
     func createdSessionIsReconnectable() throws {
         let json = """
-        {"session_id":"s1","model":"gpt-realtime-2.1-mini","status":"created","error":null}
-        """
+            {"session_id":"s1","model":"gpt-realtime-2.1-mini","status":"created","error":null}
+            """
         let status = try JSONDecoder().decode(VoiceSessionStatusResponse.self, from: Data(json.utf8))
         #expect(status.isReconnectable)
     }
