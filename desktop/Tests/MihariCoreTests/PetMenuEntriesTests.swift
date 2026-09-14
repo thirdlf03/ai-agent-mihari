@@ -52,6 +52,28 @@ struct PetMenuEntriesTests {
         #expect(actions.voiceConversationEnds == 1)
     }
 
+    @Test("「Mac 操作を常に許可」のチェックは常時許可の入り / 切りを映し、押すと切り替わる")
+    func macControlAlwaysAllowEntryReflectsAndTogglesTheSetting() throws {
+        let presenter = makePresenter()
+        let actions = StubPetMenuActions()
+
+        let disabled = try #require(
+            findItem("Mac 操作を常に許可", in: PetMenuEntries.make(actions: actions, presenter: presenter))
+        )
+        #expect(disabled.isChecked == false)
+
+        disabled.action()
+        #expect(actions.isMacControlAlwaysAllowed)
+
+        let enabled = try #require(
+            findItem("Mac 操作を常に許可", in: PetMenuEntries.make(actions: actions, presenter: presenter))
+        )
+        #expect(enabled.isChecked)
+
+        enabled.action()
+        #expect(!actions.isMacControlAlwaysAllowed)
+    }
+
     @Test("「スクショに写り込む」のチェックは写り込みの入り / 切りを映し、押すと切り替わる")
     func photobombEntryReflectsAndTogglesTheSetting() throws {
         let presenter = makePresenter()

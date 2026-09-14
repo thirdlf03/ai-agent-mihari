@@ -45,7 +45,7 @@ struct VoiceRealtimeProtocolTests {
     @Test("input.image を base64 付きで組み立てる")
     func buildsInputImage() throws {
         let png = Data([0x89, 0x50, 0x4E, 0x47])
-        let text = try VoiceOutgoingFrame.inputImage(png: png, prompt: "Describe")
+        let text = try VoiceOutgoingFrame.inputImage(data: png, prompt: "Describe")
         let json = try #require(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
         #expect(json["type"] as? String == "input.image")
         #expect(json["image_base64"] as? String == png.base64EncodedString())
@@ -269,7 +269,7 @@ struct VoiceRealtimeProtocolTests {
     @Test("input.image は create_response を省略可能")
     func buildsInputImageWithoutAutoResponse() throws {
         let png = Data([0x01])
-        let text = try VoiceOutgoingFrame.inputImage(png: png, prompt: "見て", createResponse: false)
+        let text = try VoiceOutgoingFrame.inputImage(data: png, prompt: "見て", createResponse: false)
         let json = try #require(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
         #expect(json["create_response"] as? Bool == false)
     }

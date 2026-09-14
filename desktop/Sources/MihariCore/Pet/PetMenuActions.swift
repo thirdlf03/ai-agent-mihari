@@ -14,6 +14,8 @@ public protocol PetMenuActions: AnyObject, ObservableObject {
     var isStatusPanelVisible: Bool { get }
     /// スクショに写り込むか。メニューのチェックに使う。
     var isPhotobombEnabled: Bool { get }
+    /// Mac 操作の許可を依頼ごとに確認せず常に許すか。「Mac 操作を常に許可」のチェックに使う。
+    var isMacControlAlwaysAllowed: Bool { get }
     /// いまの音声モード。デバッグメニューのチェックに使う。
     var voiceMode: VoiceMode { get }
     /// 集中継続を褒める間隔(秒)。デバッグメニューのチェックに使う。
@@ -61,6 +63,8 @@ public protocol PetMenuActions: AnyObject, ObservableObject {
     func toggleStatusPanel()
     /// スクショへの写り込みを入れる / 切る。
     func setPhotobombEnabled(_ enabled: Bool)
+    /// 「Mac 操作を常に許可」を入れる / 切る。切れば次の依頼から再び確認が出る。
+    func setMacControlAlwaysAllowed(_ allowed: Bool)
     /// 音声モードを切り替える。再起動なしで効く。
     func setVoiceMode(_ mode: VoiceMode)
     /// 集中継続を褒める間隔を変える。

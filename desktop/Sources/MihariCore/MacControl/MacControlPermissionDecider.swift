@@ -13,9 +13,43 @@ public protocol MacControlPermissionDeciding: Sendable {
 @MainActor
 public final class AlertMacControlPermissionDecider: MacControlPermissionDeciding {
 
-    public init() {}
+    /// 「今後は確認せず許可する」が選ばれたことを覚えておく `UserDefaults` のキー。
+    /// ペットメニューの「Mac 操作を常に許可」が同じキーを反転させて解除できる。
+    public static let alwaysAllowKey = "macControlAlwaysAllow"
+
+    private let defaults: UserDefaults
+    /// アラートを出して応答を返す口。テストではアラートを出さずに応答と
+    /// suppression の状態を差し替える。
+    private let runAlert: @MainActor (NSAlert) async -> NSApplication.ModalResponse
+
+    /// - Parameters:
+    ///   - defaults: 常時許可の保存先。テストでは隔離した suite を渡す。
+    ///   - runAlert: アラートの出し方。nil ならシート / モーダルで実際に出す。
+    public init(
+        defaults: UserDefaults = .standard,
+        runAlert: (@MainActor (NSAlert) async -> NSApplication.ModalResponse)? = nil
+    ) {
+        self.defaults = defaults
+        self.runAlert = runAlert ?? Self.presentAlert
+    }
 
     public func decide(request: MacControlRequest) async -> MacControlWire.Decision {
+        // 以前「今後は確認せず許可する」が選ばれていれば、確認を出さずに許す。
+        if defaults.bool(forKey: Self.alwaysAllowKey) {
+            return .allow
+        }
+
+        let alert = makeAlert(for: request)
+        let response = await runAlert(alert)
+        guard response == .alertSecondButtonReturn else { return .deny }
+        // 「この依頼の間だけ許可」+「今後は確認せず許可する」のときだけ覚える。
+        if alert.suppressionButton?.state == .on {
+            defaults.set(true, forKey: Self.alwaysAllowKey)
+        }
+        return .allow
+    }
+
+    private func makeAlert(for request: MacControlRequest) -> NSAlert {
         let alert = NSAlert()
         let title = request.jobTitle.isEmpty ? "この依頼" : request.jobTitle
         alert.messageText = "「\(title)」が Mac の操作を求めています"
@@ -30,17 +64,20 @@ public final class AlertMacControlPermissionDecider: MacControlPermissionDecidin
         alert.addButton(withTitle: "拒否")
         alert.addButton(withTitle: "この依頼の間だけ許可")
         alert.alertStyle = .warning
+        // 「今後は確認せず許可する」チェック。許可と一緒に押されたときだけ覚える。
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "今後は確認せず許可する"
         alert.window.level = .floating
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        return alert
+    }
 
-        let response: NSApplication.ModalResponse
+    private static func presentAlert(_ alert: NSAlert) async -> NSApplication.ModalResponse {
         if let window = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible }) {
-            response = await alert.runSheetModal(for: window)
-        } else {
-            // 何もウィンドウが無い極端な状態。シートに乗せられないので、その場でモーダルを回す。
-            response = alert.runModal()
+            return await alert.runSheetModal(for: window)
         }
-        return response == .alertSecondButtonReturn ? .allow : .deny
+        // 何もウィンドウが無い極端な状態。シートに乗せられないので、その場でモーダルを回す。
+        return alert.runModal()
     }
 }
 

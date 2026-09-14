@@ -242,6 +242,148 @@ enum VoiceToolCallHandler {
     }
 }
 
+/// `assistant.tool_activity` のツール名を日本語の動作説明へ写す。
+///
+/// 生のツール名（`mac_find_files` など）は利用者に読みにくいため、既知の
+/// ツールは「何をしているか」だけが分かる短い日本語に置き換える。
+/// 未知のツール名は生名をそのまま出す。
+enum VoiceToolActivityLabel {
+    /// 1 ツール分の状態ごとの表示形。
+    private struct Forms {
+        /// 日本語ラベル（「仕事を依頼」「Mac のファイルを探す」など）。
+        let label: String
+        /// `done` で出す文（例: 「Mac のファイルを探した」）。
+        let done: String
+        /// `running` で出す文（例: 「Mac のファイルを探している…」）。末尾の … まで含める。
+        let running: String
+        /// `failed` で出す文（例: 「Mac のファイル探しに失敗」）。
+        let failed: String
+    }
+
+    /// 既知ツールの日本語表示。キーは `VoiceToolName.normalize` 済みのツール名。
+    private static let knownForms: [String: Forms] = [
+        "capture_screen": Forms(
+            label: "画面を見る",
+            done: "画面を見た",
+            running: "画面を見ている…",
+            failed: "画面を見るのに失敗"
+        ),
+        "submit_job": Forms(
+            label: "仕事を依頼",
+            done: "仕事を依頼した",
+            running: "仕事を依頼している…",
+            failed: "仕事の依頼に失敗"
+        ),
+        "steer_job": Forms(
+            label: "仕事へ指示",
+            done: "仕事へ指示した",
+            running: "仕事へ指示している…",
+            failed: "仕事への指示に失敗"
+        ),
+        "get_job_status": Forms(
+            label: "進捗を確認",
+            done: "進捗を確認した",
+            running: "進捗を確認している…",
+            failed: "進捗の確認に失敗"
+        ),
+        "list_running_jobs": Forms(
+            label: "進捗を確認",
+            done: "進捗を確認した",
+            running: "進捗を確認している…",
+            failed: "進捗の確認に失敗"
+        ),
+        "answer_job_question": Forms(
+            label: "質問に回答",
+            done: "質問に回答した",
+            running: "質問に回答している…",
+            failed: "質問への回答に失敗"
+        ),
+        "cancel_job": Forms(
+            label: "仕事を中止",
+            done: "仕事を中止した",
+            running: "仕事を中止している…",
+            failed: "仕事の中止に失敗"
+        ),
+        "discord_search": Forms(
+            label: "Discord を検索",
+            done: "Discord を検索した",
+            running: "Discord を検索している…",
+            failed: "Discord の検索に失敗"
+        ),
+        "discord_recent": Forms(
+            label: "Discord を確認",
+            done: "Discord を確認した",
+            running: "Discord を確認している…",
+            failed: "Discord の確認に失敗"
+        ),
+        "discord_channels": Forms(
+            label: "チャンネル一覧",
+            done: "チャンネル一覧を見た",
+            running: "チャンネル一覧を見ている…",
+            failed: "チャンネル一覧の取得に失敗"
+        ),
+        "discord_message": Forms(
+            label: "メッセージを確認",
+            done: "メッセージを確認した",
+            running: "メッセージを確認している…",
+            failed: "メッセージの確認に失敗"
+        ),
+        "discord_context": Forms(
+            label: "メッセージを確認",
+            done: "メッセージを確認した",
+            running: "メッセージを確認している…",
+            failed: "メッセージの確認に失敗"
+        ),
+        "mac_find_files": Forms(
+            label: "Mac のファイルを探す",
+            done: "Mac のファイルを探した",
+            running: "Mac のファイルを探している…",
+            failed: "Mac のファイル探しに失敗"
+        ),
+        "mac_fetch_file": Forms(
+            label: "ファイルを取り込む",
+            done: "ファイルを取り込んだ",
+            running: "ファイルを取り込んでいる…",
+            failed: "ファイルの取り込みに失敗"
+        ),
+        "mac_hand_off_file": Forms(
+            label: "ファイルを手渡す",
+            done: "ファイルを手渡した",
+            running: "ファイルを手渡している…",
+            failed: "ファイルの手渡しに失敗"
+        ),
+        "delegate": Forms(
+            label: "裏で考える",
+            done: "裏で考えた",
+            running: "裏で考えている…",
+            failed: "裏で考えるのに失敗"
+        ),
+    ]
+
+    /// ツール名の日本語ラベル（例: `submit_job` → 「仕事を依頼」）。未知は生名を返す。
+    static func label(for name: String) -> String {
+        knownForms[VoiceToolName.normalize(name)]?.label ?? name
+    }
+
+    /// `assistant.tool_activity` の 1 行表示。「みはり: …」の形で返す。
+    /// `status` は `running` / `done` / `failed`（それ以外は `done` 扱い）。
+    static func text(name: String, status: String) -> String {
+        guard let forms = knownForms[VoiceToolName.normalize(name)] else {
+            // 未知のツールは生名をそのまま出す。
+            switch status {
+            case "running": return "みはり: \(name) を実行中…"
+            case "failed": return "みはり: \(name) に失敗"
+            default: return "みはり: \(name) を実行した"
+            }
+        }
+        switch status {
+        case "running": return "みはり: \(forms.running)"
+        case "failed": return "みはり: \(forms.failed)"
+        default: return "みはり: \(forms.done)"
+        }
+    }
+}
+
 /// 仕事詳細から `pending_questions` を拾う。
 enum VoiceJobQuestionParser {
     static func pendingQuestions(from detail: RoomJobDetail) -> [VoicePendingQuestion] {

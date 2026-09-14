@@ -643,6 +643,18 @@ public final class AppCoordinator: ObservableObject, PetMenuActions {
         isStatusPanelVisible = statusPanel.isVisible
     }
 
+    /// 「Mac 操作を常に許可」の状態。許可ダイアログの「今後は確認せず許可する」と
+    /// 同じキーを見るので、ダイアログで選んでもメニューで切っても同じ設定になる。
+    public var isMacControlAlwaysAllowed: Bool {
+        UserDefaults.standard.bool(forKey: AlertMacControlPermissionDecider.alwaysAllowKey)
+    }
+
+    /// メニューから常時許可を切り替える。切れば次の依頼から再び確認ダイアログが出る。
+    public func setMacControlAlwaysAllowed(_ allowed: Bool) {
+        UserDefaults.standard.set(allowed, forKey: AlertMacControlPermissionDecider.alwaysAllowKey)
+        objectWillChange.send()
+    }
+
     /// スクショへの写り込みを入れる / 切る。切り替えた結果は次の起動にも引き継ぐ。
     ///
     /// 見張り始める前に入れられても、見張りを始めるときに `begin()` が起こす。

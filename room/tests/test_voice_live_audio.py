@@ -32,6 +32,8 @@ from mihari_room.voice.protocol import (
     EVENT_SESSION_READY,
     EVENT_USER_TEXT,
 )
+from mihari_room.voice.stream import LIVE_DELEGATION_INPUT_LIMIT, _send_tool_result
+from mihari_room.voice.tools import VoiceToolOutcome
 from mihari_room.voice.upstream import RealtimeUpstream
 from mihari_room.voice.vc import (
     HTTPVoiceConverter,
@@ -166,6 +168,80 @@ class DelegatingLiveUpstream(FakeLiveUpstream):
             }
         )
 
+
+
+class TalkingDelegatingLiveUpstream(FakeLiveUpstream):
+    """委譲の前後にアシスタント発話が挟まるバリアント（turn 確定の観測用）。
+
+    ``session.delegation.created`` の前と ``response.completed`` の直前に
+    ``session.output_transcript.delta`` を流し、room 側がツール行の前に
+    ``assistant.text(done=True)`` で断片を確定するかを見る。
+    """
+
+    def __init__(self, tool_name: str = "get_job_status", call_id: str = "call_live_1") -> None:
+        super().__init__()
+        self._tool_name = tool_name
+        self._call_id = call_id
+        self._delegated = False
+
+    async def send(self, event: dict) -> None:
+        if self._closed:
+            return
+        self._sent.append(event)
+        event_type = event.get("type")
+        if event_type == "response.create":
+            await self._queue.put({"type": "session.output_audio.done"})
+            return
+        if event_type != "input_audio_buffer.append" or self._delegated:
+            return
+        self._delegated = True
+        # 委譲前の発話断片。
+        await self._queue.put(
+            {"type": "session.output_transcript.delta", "delta": "調べるね、"}
+        )
+        await self._queue.put(
+            {
+                "type": "session.delegation.created",
+                "delegation": {"id": "dlg-1", "target": "responses"},
+                "response_id": "resp_live_1",
+            }
+        )
+        await self._queue.put(
+            {
+                "type": "response.event",
+                "delegation_id": "dlg-1",
+                "event": {
+                    "type": "response.created",
+                    "response": {"id": "resp_live_1"},
+                },
+            }
+        )
+        # 委譲中（ツール呼び出し確定前）の続き断片。
+        await self._queue.put(
+            {"type": "session.output_transcript.delta", "delta": "ちょっと待って"}
+        )
+        await self._queue.put(
+            {
+                "type": "response.event",
+                "delegation_id": "dlg-1",
+                "event": {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "function_call",
+                        "name": self._tool_name,
+                        "call_id": self._call_id,
+                        "arguments": "{}",
+                    },
+                },
+            }
+        )
+        await self._queue.put(
+            {
+                "type": "response.event",
+                "delegation_id": "dlg-1",
+                "event": {"type": "response.completed", "response": {"id": "resp_live_1"}},
+            }
+        )
 
 
 class QuietLiveUpstream(FakeLiveUpstream):
@@ -667,3 +743,208 @@ def test_config_reads_live_delegation_env(
     cfg = RoomConfig.from_environment()
     assert cfg.live_delegation is False
     assert cfg.live_delegation_model == "gpt-x"
+
+
+def test_live_delegation_flushes_assistant_transcript(tmp_path: Path) -> None:
+    """委譲・ツール実行の前に発話中の断片が assistant.text(done=True) で確定する。
+
+    desktop は tool_activity 受信で draft を閉じるが、room 側でも
+    delegation.created / response.completed の時点で transcript を
+    flush してターンを区切る必要がある。
+    """
+    fake = TalkingDelegatingLiveUpstream()
+    client = _make_live_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01").decode()
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+        # response.create への応答として fake が返す output_audio.done まで読む。
+        frames = _collect_until(
+            ws,
+            lambda f: f["type"] == EVENT_ASSISTANT_AUDIO and f.get("done"),
+        )
+        _disconnect_and_idle(ws, client, session_id)
+
+    activities = [
+        (i, f)
+        for i, f in enumerate(frames)
+        if f["type"] == EVENT_ASSISTANT_TOOL_ACTIVITY
+    ]
+    delegate_idx = next(i for i, f in activities if f["name"] == "delegate")
+    tool_idx = next(i for i, f in activities if f["name"] == "get_job_status")
+
+    def done_texts(start: int, stop: int) -> list[str]:
+        return [
+            str(f.get("text") or "")
+            for f in frames[start:stop]
+            if f["type"] == EVENT_ASSISTANT_TEXT and f.get("done")
+        ]
+
+    # delegation.created の前に「調べるね、」が done=True で確定している。
+    assert done_texts(0, delegate_idx) == ["調べるね、"]
+    # response.completed（ツール実行）の前に「ちょっと待って」が確定している。
+    assert done_texts(delegate_idx, tool_idx) == ["ちょっと待って"]
+
+    # flush は履歴にも残る（切断時の send=False フラッシュに回らない）。
+    history = client.get(
+        f"/voice/sessions/{session_id}/history", headers=_auth()
+    ).json()
+    assistant_texts = [
+        m["text"] for m in history["messages"] if m["role"] == "assistant"
+    ]
+    assert "調べるね、" in assistant_texts
+    assert "ちょっと待って" in assistant_texts
+
+
+def test_live_capture_screen_drops_oversized_image(tmp_path: Path) -> None:
+    """delegation 入力上限を超える capture 画像は backend へ送らず note で伝える。"""
+    fake = DelegatingLiveUpstream(tool_name="capture_screen", call_id="call_live_big")
+    client = _make_live_app(tmp_path, upstream_factory=lambda: fake)
+    session_id = client.post("/voice/sessions", headers=_auth()).json()["session_id"]
+    audio_b64 = base64.b64encode(b"\x00\x01").decode()
+    big_b64 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20_000).decode()
+    assert len(big_b64) > LIVE_DELEGATION_INPUT_LIMIT // 2
+    with client.websocket_connect(
+        f"/voice/sessions/{session_id}/stream", headers=_auth()
+    ) as ws:
+        assert ws.receive_json()["type"] == EVENT_SESSION_READY
+        ws.send_json({"type": "input.audio", "audio_base64": audio_b64})
+        frames = _collect_until(ws, lambda f: f["type"] == EVENT_ASSISTANT_TOOL_CALL)
+        assert frames[-1]["name"] == "capture_screen"
+        assert frames[-1]["call_id"] == "call_live_big"
+        ws.send_json(
+            {
+                "type": "input.image",
+                "image_base64": big_b64,
+                "media_type": "image/png",
+                "prompt": "見て",
+            }
+        )
+        # fco + response.create を受けた fake が output_audio.done を返す。
+        _collect_until(
+            ws,
+            lambda f: f["type"] == EVENT_ASSISTANT_AUDIO and f.get("done"),
+        )
+        _disconnect_and_idle(ws, client, session_id)
+    sent = fake.sent_events()
+    # 画像の message item は送られない。
+    message_items = [
+        e
+        for e in sent
+        if e.get("type") == "response.item.create"
+        and (e.get("item") or {}).get("type") == "message"
+    ]
+    assert message_items == []
+    fco = [
+        e
+        for e in sent
+        if e.get("type") == "response.item.create"
+        and (e.get("item") or {}).get("type") == "function_call_output"
+    ]
+    assert len(fco) == 1
+    assert fco[0]["item"]["call_id"] == "call_live_big"
+    output = json.loads(fco[0]["item"]["output"])
+    assert output["success"] is True
+    assert "入力上限" in output["note"]
+    creates_after = [
+        e for e in sent[sent.index(fco[0]) :] if e.get("type") == "response.create"
+    ]
+    assert len(creates_after) == 1
+
+
+async def test_send_tool_result_live_drops_oversized_image() -> None:
+    """room 実行ツールの画像結果も live では上限超過なら送らず note で伝える。"""
+    upstream = FakeLiveUpstream()
+    outcome = VoiceToolOutcome(
+        output=json.dumps({"success": True, "saved_as": "a.png"}, ensure_ascii=False),
+        image_png=b"\x89PNG\r\n\x1a\n" + b"\x00" * 20_000,
+    )
+    await _send_tool_result(upstream, call_id="c1", outcome=outcome, live=True)
+    sent = upstream.sent_events()
+    message_items = [
+        e
+        for e in sent
+        if e.get("type") == "response.item.create"
+        and (e.get("item") or {}).get("type") == "message"
+    ]
+    assert message_items == []
+    fco = next(
+        e
+        for e in sent
+        if e.get("type") == "response.item.create"
+        and (e.get("item") or {}).get("type") == "function_call_output"
+    )
+    output = json.loads(fco["item"]["output"])
+    assert output["success"] is True
+    assert output["saved_as"] == "a.png"
+    assert "入力上限" in output["note"]
+
+
+async def test_send_tool_result_live_sends_small_image() -> None:
+    """上限以内の画像は従来どおり message item として送る。"""
+    upstream = FakeLiveUpstream()
+    outcome = VoiceToolOutcome(
+        output=json.dumps({"success": True}, ensure_ascii=False),
+        image_png=base64.b64decode(PNG_1X1),
+    )
+    await _send_tool_result(upstream, call_id="c2", outcome=outcome, live=True)
+    sent = upstream.sent_events()
+    message_items = [
+        e
+        for e in sent
+        if e.get("type") == "response.item.create"
+        and (e.get("item") or {}).get("type") == "message"
+    ]
+    assert len(message_items) == 1
+    contents = message_items[0]["item"]["content"]
+    assert any(part.get("type") == "input_image" for part in contents)
+    fco = next(
+        e
+        for e in sent
+        if (e.get("item") or {}).get("type") == "function_call_output"
+    )
+    assert json.loads(fco["item"]["output"])["success"] is True
+
+
+async def test_send_tool_result_live_truncates_output() -> None:
+    """live では fco output を ~4000 文字に切り詰めて末尾に印を付ける。"""
+    upstream = FakeLiveUpstream()
+    outcome = VoiceToolOutcome(output="あ" * 5_000)
+    await _send_tool_result(upstream, call_id="c3", outcome=outcome, live=True)
+    sent = upstream.sent_events()
+    fco = next(
+        e
+        for e in sent
+        if (e.get("item") or {}).get("type") == "function_call_output"
+    )
+    output = fco["item"]["output"]
+    assert output.endswith("…(truncated)")
+    assert len(output) == 4_000 + len("…(truncated)")
+
+
+async def test_send_tool_result_text_mode_unchanged() -> None:
+    """text（Realtime）モードは上限ガード無し。画像も長文 output もそのまま。"""
+    upstream = FakeLiveUpstream()
+    outcome = VoiceToolOutcome(
+        output="x" * 5_000,
+        image_png=b"\x89PNG\r\n\x1a\n" + b"\x00" * 20_000,
+    )
+    await _send_tool_result(upstream, call_id="c4", outcome=outcome, live=False)
+    sent = upstream.sent_events()
+    message_items = [
+        e
+        for e in sent
+        if e.get("type") == "conversation.item.create"
+        and (e.get("item") or {}).get("type") == "message"
+    ]
+    assert len(message_items) == 1
+    fco = next(
+        e
+        for e in sent
+        if e.get("type") == "conversation.item.create"
+        and (e.get("item") or {}).get("type") == "function_call_output"
+    )
+    assert fco["item"]["output"] == "x" * 5_000

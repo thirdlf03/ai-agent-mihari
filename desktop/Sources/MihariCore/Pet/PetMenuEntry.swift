@@ -74,6 +74,11 @@ public enum PetMenuEntries {
                 title: "権限の確認…",
                 action: { actions.openPermissions() }
             ),
+            .item(
+                title: "Mac 操作を常に許可",
+                isChecked: actions.isMacControlAlwaysAllowed,
+                action: { actions.setMacControlAlwaysAllowed(!actions.isMacControlAlwaysAllowed) }
+            ),
             .separator,
             .submenu(
                 title: "サイズ",

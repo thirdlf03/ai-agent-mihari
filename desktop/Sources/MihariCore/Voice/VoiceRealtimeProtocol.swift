@@ -229,15 +229,16 @@ enum VoiceOutgoingFrame {
     }
 
     /// マウスがあるディスプレイ 1 枚を room へ送る `input.image`。
+    /// `mediaType` は `data` の実形式（"image/png" / "image/jpeg"）。
     static func inputImage(
-        png: Data,
+        data: Data,
         prompt: String,
         createResponse: Bool = true,
         mediaType: String = "image/png"
     ) throws -> String {
         let payload: [String: Any] = [
             "type": VoiceRealtimeProtocol.EventType.inputImage,
-            "image_base64": png.base64EncodedString(),
+            "image_base64": data.base64EncodedString(),
             "media_type": mediaType,
             "prompt": prompt,
             "create_response": createResponse,

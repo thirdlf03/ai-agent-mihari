@@ -306,14 +306,135 @@ struct VoiceConversationControllerTests {
         )
 
         await waitUntil {
-            controller.messages.contains { $0.text.contains("submit_job") }
+            controller.messages.contains { $0.text.contains("仕事を依頼した") }
         }
         // room 側ツールの通知なので、client は input.image 等を送り返さない。
         try await Task.sleep(for: .milliseconds(200))
         #expect(!socket.sent.contains { $0.contains("\"input.image\"") })
-        #expect(
-            controller.messages.contains { $0.text.contains("submit_job") }
+        // ツール名の生名は出さず、日本語ラベルで表示する。
+        #expect(controller.messages.contains { $0.text == "みはり: 仕事を依頼している…" })
+        #expect(controller.messages.contains { $0.text == "みはり: 仕事を依頼した" })
+        #expect(!controller.messages.contains { $0.text.contains("submit_job") })
+
+        controller.stop()
+    }
+
+    @Test("assistant.tool_activity のツール名は日本語ラベルで出る")
+    func toolActivityShowsJapaneseLabels() async throws {
+        let socket = ScriptedSocket()
+        let (controller, _, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        socket.feed(
+            #"{"type":"assistant.tool_activity","name":"mac_find_files","call_id":"c1","status":"running"}"#
         )
+        socket.feed(
+            #"{"type":"assistant.tool_activity","name":"mac_find_files","call_id":"c1","status":"done"}"#
+        )
+        socket.feed(
+            #"{"type":"assistant.tool_activity","name":"discord_search","call_id":"c2","status":"done"}"#
+        )
+        socket.feed(
+            #"{"type":"assistant.tool_activity","name":"delegate","call_id":"c3","status":"running"}"#
+        )
+        socket.feed(
+            #"{"type":"assistant.tool_activity","name":"mac_fetch_file","call_id":"c4","status":"failed"}"#
+        )
+        // 未知のツール名は生名をそのまま出す。
+        socket.feed(
+            #"{"type":"assistant.tool_activity","name":"unknown_tool_x","call_id":"c5","status":"done"}"#
+        )
+
+        await waitUntil {
+            controller.messages.contains { $0.text.contains("unknown_tool_x") }
+        }
+
+        #expect(controller.messages.contains { $0.text == "みはり: Mac のファイルを探している…" })
+        #expect(controller.messages.contains { $0.text == "みはり: Mac のファイルを探した" })
+        #expect(controller.messages.contains { $0.text == "みはり: Discord を検索した" })
+        #expect(controller.messages.contains { $0.text == "みはり: 裏で考えている…" })
+        #expect(controller.messages.contains { $0.text == "みはり: ファイルの取り込みに失敗" })
+        #expect(controller.messages.contains { $0.text.contains("unknown_tool_x") })
+        // 既知のツール名は生名を出さない。
+        #expect(!controller.messages.contains { $0.text.contains("mac_find_files") })
+
+        controller.stop()
+    }
+
+    @Test("tool_activity で進行中の応答を確定し、続きはツール行の下の新バブルになる")
+    func toolActivityFinalizesDraftAndStartsNewBubble() async throws {
+        let socket = ScriptedSocket()
+        let (controller, _, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        socket.feed(#"{"type":"assistant.text","delta":"前半の返事","done":false}"#)
+        await waitUntil {
+            controller.messages.contains { $0.role == .assistant && $0.text == "前半の返事" }
+        }
+
+        socket.feed(
+            #"{"type":"assistant.tool_activity","name":"mac_find_files","call_id":"c1","status":"done"}"#
+        )
+        await waitUntil {
+            controller.messages.contains { $0.text == "みはり: Mac のファイルを探した" }
+        }
+
+        socket.feed(#"{"type":"assistant.text","delta":"後半の返事","done":false}"#)
+        socket.feed(#"{"type":"assistant.text","text":"後半の返事","done":true}"#)
+
+        await waitUntil {
+            controller.messages.contains { $0.role == .assistant && $0.text == "後半の返事" }
+        }
+
+        // ツール行を境に 2 つの assistant バブルになる（前半へ追記されない）。
+        let assistantTexts = controller.messages.filter { $0.role == .assistant }.map(\.text)
+        #expect(assistantTexts == ["前半の返事", "後半の返事"])
+
+        let texts = controller.messages.map(\.text)
+        let firstIndex = try #require(texts.firstIndex(of: "前半の返事"))
+        let toolIndex = try #require(texts.firstIndex(of: "みはり: Mac のファイルを探した"))
+        let secondIndex = try #require(texts.firstIndex(of: "後半の返事"))
+        #expect(firstIndex < toolIndex)
+        #expect(toolIndex < secondIndex)
+
+        controller.stop()
+    }
+
+    @Test("tool_call でも進行中の応答を確定してからツール行を出す")
+    func toolCallFinalizesDraftBeforeToolLine() async throws {
+        let socket = ScriptedSocket()
+        let (controller, _, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+        socket.feed(#"{"type":"assistant.text","delta":"途中の返事","done":false}"#)
+        await waitUntil {
+            controller.messages.contains { $0.role == .assistant && $0.text == "途中の返事" }
+        }
+
+        socket.feed(
+            #"{"type":"assistant.tool_call","name":"capture_screen","call_id":"c1","arguments":"{\"prompt\":\"見て\"}"}"#
+        )
+        await waitUntil {
+            controller.messages.contains { $0.text == "ツール呼び出し: capture_screen" }
+        }
+
+        socket.feed(#"{"type":"assistant.text","text":"新しい返事","done":true}"#)
+        await waitUntil {
+            controller.messages.contains { $0.role == .assistant && $0.text == "新しい返事" }
+        }
+
+        let texts = controller.messages.map(\.text)
+        let draftIndex = try #require(texts.firstIndex(of: "途中の返事"))
+        let toolIndex = try #require(texts.firstIndex(of: "ツール呼び出し: capture_screen"))
+        let nextIndex = try #require(texts.firstIndex(of: "新しい返事"))
+        #expect(draftIndex < toolIndex)
+        #expect(toolIndex < nextIndex)
 
         controller.stop()
     }
@@ -1000,6 +1121,140 @@ struct VoiceConversationControllerTests {
 
         let userTexts = controller.messages.filter { $0.role == .user }.map(\.text)
         #expect(userTexts == ["最初の発話", "次の発話"])
+
+        controller.stop()
+    }
+
+    @Test("assistant 行が先に来ても、残ったプレースホルダを置き換える")
+    func userTextReplacesPlaceholderBehindAssistantLine() async throws {
+        let socket = ScriptedSocket()
+        let (controller, mic, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+
+        controller.beginPushToTalk()
+        mic.emit(data: Data(repeating: 0x33, count: 480), level: 0.5)
+        await waitUntil {
+            !self.parseSentAudioFrames(socket.sent).isEmpty
+        }
+        controller.endPushToTalk()
+
+        await waitUntil {
+            controller.messages.contains { $0.role == .user && $0.text == "（音声を送信）" }
+        }
+
+        // live_audio はフルデュプレックスで、文字起こし確定より先に応答が履歴へ載ることがある。
+        socket.feed(#"{"type":"assistant.text","text":"先に返事をする","done":true}"#)
+        await waitUntil {
+            controller.messages.contains { $0.role == .assistant && $0.text == "先に返事をする" }
+        }
+
+        socket.feed(#"{"type":"user.text","text":"文字起こしの結果"}"#)
+        await waitUntil {
+            controller.messages.contains { $0.role == .user && $0.text == "文字起こしの結果" }
+        }
+
+        // 孤児のプレースホルダ行が残らず、発話は新しい行ではなく元の位置に収まる。
+        let userMessages = controller.messages.filter { $0.role == .user }
+        #expect(userMessages.count == 1)
+        #expect(userMessages.first?.text == "文字起こしの結果")
+        #expect(!controller.messages.contains { $0.text == "（音声を送信）" })
+
+        let texts = controller.messages.map(\.text)
+        let userIndex = try #require(texts.firstIndex(of: "文字起こしの結果"))
+        let assistantIndex = try #require(texts.firstIndex(of: "先に返事をする"))
+        #expect(userIndex < assistantIndex)
+
+        controller.stop()
+    }
+
+    @Test("逐次 user.text も、間に assistant 行が挟まったプレースホルダを置き換える")
+    func streamingUserTextReplacesPlaceholderBehindAssistantLine() async throws {
+        let socket = ScriptedSocket()
+        let (controller, mic, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+
+        controller.beginPushToTalk()
+        mic.emit(data: Data(repeating: 0x44, count: 480), level: 0.5)
+        await waitUntil {
+            !self.parseSentAudioFrames(socket.sent).isEmpty
+        }
+        controller.endPushToTalk()
+
+        await waitUntil {
+            controller.messages.contains { $0.role == .user && $0.text == "（音声を送信）" }
+        }
+
+        socket.feed(#"{"type":"assistant.text","text":"先に返事をする","done":true}"#)
+        await waitUntil {
+            controller.messages.contains { $0.role == .assistant && $0.text == "先に返事をする" }
+        }
+
+        socket.feed(#"{"type":"user.text","text":"逐次の起こし","delta":"逐次の起こし","done":true}"#)
+        await waitUntil {
+            controller.messages.contains { $0.role == .user && $0.text == "逐次の起こし" }
+        }
+
+        let userMessages = controller.messages.filter { $0.role == .user }
+        #expect(userMessages.count == 1)
+        #expect(userMessages.first?.text == "逐次の起こし")
+        #expect(!controller.messages.contains { $0.text == "（音声を送信）" })
+
+        let texts = controller.messages.map(\.text)
+        let userIndex = try #require(texts.firstIndex(of: "逐次の起こし"))
+        let assistantIndex = try #require(texts.firstIndex(of: "先に返事をする"))
+        #expect(userIndex < assistantIndex)
+
+        controller.stop()
+    }
+
+    @Test("プレースホルダが残っている間に再度確定しても、プレースホルダを増やさない")
+    func secondCommitDoesNotDuplicatePlaceholder() async throws {
+        let socket = ScriptedSocket()
+        let (controller, mic, _, factory) = makeController(socket: socket)
+        controller.start()
+        await waitUntil { factory.makeCount >= 1 }
+
+        socket.feed(#"{"type":"session.ready","session_id":"sess-test","model":"mini"}"#)
+
+        // 1 回目の発話確定でプレースホルダが置かれる。
+        controller.beginPushToTalk()
+        mic.emit(data: Data(repeating: 0x55, count: 480), level: 0.5)
+        await waitUntil {
+            !self.parseSentAudioFrames(socket.sent).isEmpty
+        }
+        controller.endPushToTalk()
+        await waitUntil {
+            controller.messages.contains { $0.text == "（音声を送信）" }
+        }
+
+        // 文字起こしが届かないまま 2 回目を確定しても、プレースホルダは増えない。
+        controller.beginPushToTalk()
+        mic.emit(data: Data(repeating: 0x66, count: 480), level: 0.5)
+        await waitUntil {
+            self.parseSentAudioFrames(socket.sent)
+                .filter { ($0["commit"] as? Bool) == false }.count >= 2
+        }
+        controller.endPushToTalk()
+        await waitUntil {
+            self.parseSentAudioFrames(socket.sent)
+                .filter { ($0["commit"] as? Bool) == true }.count >= 2
+        }
+
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(controller.messages.filter { $0.text == "（音声を送信）" }.count == 1)
+
+        // 届いた文字起こしは残っているプレースホルダを置き換える。
+        socket.feed(#"{"type":"user.text","text":"まとめて起こされた"}"#)
+        await waitUntil {
+            controller.messages.contains { $0.role == .user && $0.text == "まとめて起こされた" }
+        }
+        #expect(!controller.messages.contains { $0.text == "（音声を送信）" })
 
         controller.stop()
     }

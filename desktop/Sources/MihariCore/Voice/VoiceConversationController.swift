@@ -283,9 +283,17 @@ public final class VoiceConversationController: ObservableObject {
     private func performCaptureAndSend(prompt: String) async {
         statusText = "画面を撮影中…"
         do {
-            let capture = try await deps.screenCapture.captureMouseDisplayPNG()
-            try await sendInputImage(png: capture.pngData, prompt: prompt)
-            let thumbnail = VoiceScreenThumbnail.png(from: capture.pngData)
+            // live_audio の delegation backend は入力履歴（128 items / 32768 UTF-8 bytes）が
+            // 小さく、フル解像度 PNG の base64 が収まらず「input history is limited」で
+            // 落ちた実績がある。そのモードでは縮小 JPEG（≤12KB 目標）で送る。
+            let capture =
+                upstreamNeedsContinuousAudio
+                ? try await deps.screenCapture.captureMouseDisplayJPEG(
+                    maxBytes: Self.liveImageMaxBytes
+                )
+                : try await deps.screenCapture.captureMouseDisplayPNG()
+            try await sendInputImage(data: capture.data, mediaType: capture.mediaType, prompt: prompt)
+            let thumbnail = VoiceScreenThumbnail.png(from: capture.data)
             appendMessage(
                 VoiceConversationMessage(
                     role: .user,
@@ -300,7 +308,11 @@ public final class VoiceConversationController: ObservableObject {
         }
     }
 
-    private func sendInputImage(png: Data, prompt: String) async throws {
+    /// live_audio で送る画像の目標サイズ（base64 前のバイト数）。
+    /// base64 化で約 4/3 倍（~16K chars）になり、backend の入力上限内に収める。
+    private static let liveImageMaxBytes = 12_000
+
+    private func sendInputImage(data: Data, mediaType: String, prompt: String) async throws {
         // input.audio と同じ送信チェーンに載せ、音声チャンクとの順序を保つ。
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             sendTail = Task { [sendTail] in
@@ -309,7 +321,11 @@ public final class VoiceConversationController: ObservableObject {
                     guard let socket = currentSocket else {
                         throw VoiceSessionError.notReady
                     }
-                    let text = try VoiceOutgoingFrame.inputImage(png: png, prompt: prompt)
+                    let text = try VoiceOutgoingFrame.inputImage(
+                        data: data,
+                        prompt: prompt,
+                        mediaType: mediaType
+                    )
                     try await socket.send(text)
                     continuation.resume()
                 } catch {
@@ -542,20 +558,18 @@ public final class VoiceConversationController: ObservableObject {
             return false
 
         case .assistantToolCall(let name, _, let arguments):
+            // 進行中の assistant 下書きをここで確定する。確定しておかないと、
+            // ツール実行後に届く応答テキストがツール行より上のバブルに追記されてしまう。
+            finalizeAssistantMessage()
             appendSystem("ツール呼び出し: \(name)")
             handleToolCall(name: name, arguments: arguments)
             return false
 
         case .assistantToolActivity(let name, _, let status):
             // room が実行したツールの通知。client では実行しない。
-            switch status {
-            case "failed":
-                appendSystem("みはり: \(name) に失敗")
-            case "running":
-                appendSystem("みはり: \(name) を実行中")
-            default:
-                appendSystem("みはり: \(name) を実行")
-            }
+            // tool_call と同じく、下書きを確定してから活動行を置く。
+            finalizeAssistantMessage()
+            appendSystem(VoiceToolActivityLabel.text(name: name, status: status))
             return false
 
         case .error(_, let message):
@@ -805,6 +819,13 @@ public final class VoiceConversationController: ObservableObject {
     private static let userPlaceholderText = "（音声を送信）"
 
     private func appendUserPlaceholder() {
+        // 未置換のプレースホルダが残っているのに追加すると、後の置き換えで片方が
+        // 孤児行として残るため、残っているあいだは増やさない。
+        guard !messages.contains(where: {
+            $0.role == .user && $0.text == Self.userPlaceholderText
+        }) else {
+            return
+        }
         appendMessage(VoiceConversationMessage(role: .user, text: Self.userPlaceholderText))
     }
 
@@ -833,12 +854,13 @@ public final class VoiceConversationController: ObservableObject {
             return
         }
         // プッシュ・トゥ・トークのプレースホルダが残っていれば、その行を発話行にする。
-        if let last = messages.last,
-            last.role == .user,
-            last.text == Self.userPlaceholderText
-        {
-            messages[messages.count - 1].text = text
-            streamingUserMessageID = last.id
+        // live_audio はフルデュプレックスで assistant の出力が文字起こしより先に来るため、
+        // 末尾だけでなく履歴の中から未置換のプレースホルダを探す（見つからなければ孤児になる）。
+        if let index = messages.lastIndex(where: {
+            $0.role == .user && $0.text == Self.userPlaceholderText
+        }) {
+            streamingUserMessageID = messages[index].id
+            messages[index].text = text
             return
         }
         let message = VoiceConversationMessage(role: .user, text: text)
@@ -846,15 +868,15 @@ public final class VoiceConversationController: ObservableObject {
         appendMessage(message)
     }
 
-    /// 従来形式（`text` のみ）の確定済み文字起こし。直前がプレースホルダなら
-    /// 本当の文に差し替え、そうでなければ新しい user 行として追加する。
+    /// 従来形式（`text` のみ）の確定済み文字起こし。未置換のプレースホルダが残って
+    /// いればその行を本当の文に差し替え、そうでなければ新しい user 行として追加する。
+    /// assistant の出力が先に履歴へ載っていても、末尾以外のプレースホルダを拾える。
     private func applyUserTranscriptFinal(_ text: String) {
         guard !text.isEmpty else { return }
-        if let last = messages.last,
-            last.role == .user,
-            last.text == Self.userPlaceholderText
-        {
-            messages[messages.count - 1].text = text
+        if let index = messages.lastIndex(where: {
+            $0.role == .user && $0.text == Self.userPlaceholderText
+        }) {
+            messages[index].text = text
         } else {
             appendMessage(VoiceConversationMessage(role: .user, text: text))
         }

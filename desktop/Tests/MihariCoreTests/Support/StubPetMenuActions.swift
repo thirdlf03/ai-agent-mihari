@@ -9,6 +9,8 @@ final class StubPetMenuActions: ObservableObject, PetMenuActions {
     var isOnBreak = false
     var isStatusPanelVisible = false
     var isPhotobombEnabled = true
+    /// 「Mac 操作を常に許可」の状態。テストから差し込む。
+    var isMacControlAlwaysAllowed = false
     var voiceMode: VoiceMode = .bundled
     var focusStreakIntervalSeconds: TimeInterval = 900
     var isFastThresholds = false
@@ -65,6 +67,7 @@ final class StubPetMenuActions: ObservableObject, PetMenuActions {
     func openPermissions() {}
     func toggleStatusPanel() {}
     func setPhotobombEnabled(_ enabled: Bool) { isPhotobombEnabled = enabled }
+    func setMacControlAlwaysAllowed(_ allowed: Bool) { isMacControlAlwaysAllowed = allowed }
     func setVoiceMode(_ mode: VoiceMode) { voiceMode = mode }
     func setFocusStreakInterval(_ seconds: TimeInterval) { focusStreakIntervalSeconds = seconds }
     func setFastThresholds(_ enabled: Bool) { isFastThresholds = enabled }

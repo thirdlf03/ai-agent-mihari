@@ -41,13 +41,58 @@ struct VoiceScreenCaptureTests {
     @Test("input.image フレームを契約どおり組み立てる")
     func buildsInputImageFrame() throws {
         let png = Data([0x89, 0x50, 0x4E, 0x47])
-        let text = try VoiceOutgoingFrame.inputImage(png: png, prompt: "画面を見て")
+        let text = try VoiceOutgoingFrame.inputImage(data: png, prompt: "画面を見て")
         let json = try #require(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
         #expect(json["type"] as? String == "input.image")
         #expect(json["image_base64"] as? String == png.base64EncodedString())
         #expect(json["media_type"] as? String == "image/png")
         #expect(json["prompt"] as? String == "画面を見て")
         #expect(json["create_response"] as? Bool == true)
+    }
+
+    @Test("input.image は mediaType を指定できる（JPEG）")
+    func buildsInputImageFrameWithJPEG() throws {
+        let jpeg = Data([0xFF, 0xD8, 0xFF, 0xE0])
+        let text = try VoiceOutgoingFrame.inputImage(data: jpeg, prompt: "見て", mediaType: "image/jpeg")
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        #expect(json["image_base64"] as? String == jpeg.base64EncodedString())
+        #expect(json["media_type"] as? String == "image/jpeg")
+    }
+
+    @Test("縮小 JPEG は大きい画像を目標バイト以下に収める")
+    func downscaleJPEGFitsByteBudget() throws {
+        // 圧縮が効かないノイズ画像を種固定で作る。320px でも 12KB を超えるサイズ。
+        var generator = SeededGenerator(seed: 42)
+        let width = 1600
+        let height = 1200
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        for index in bytes.indices {
+            bytes[index] = UInt8(truncatingIfNeeded: generator.next())
+        }
+        let context = try #require(
+            CGContext(
+                data: &bytes,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+            )
+        )
+        let image = try #require(context.makeImage())
+        let png = try CaptureImageCodec.pngData(from: image)
+
+        let jpeg = try #require(VoiceScreenDownscaleJPEG.jpegData(from: png, maxBytes: 12_000))
+
+        #expect(jpeg.count <= 12_000)
+        // JPEG マジック（FF D8 FF）で始まる。
+        #expect(jpeg.prefix(3).elementsEqual([0xFF, 0xD8, 0xFF]))
+    }
+
+    @Test("デコードできない画像データは nil を返す")
+    func downscaleJPEGRejectsUndecodableData() {
+        #expect(VoiceScreenDownscaleJPEG.jpegData(from: Data([0x00, 0x01])) == nil)
     }
 
     @Test("スタブでマウスディスプレイを撮って送る")
@@ -87,7 +132,56 @@ struct VoiceScreenCaptureTests {
         }
         let imageFrame = try #require(imageFrames.first)
         #expect(imageFrame["prompt"] as? String == "見て")
+        // text モードでは従来どおり PNG を送る。
+        #expect(imageFrame["media_type"] as? String == "image/png")
         #expect(controller.messages.contains(where: { $0.imageThumbnailPNG != nil }))
+        controller.stop()
+    }
+
+    @Test("live_audio では縮小 JPEG を image/jpeg で送る")
+    func liveAudioCaptureSendsJPEG() async throws {
+        let png = Data(
+            base64Encoded:
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )!
+        let socket = VoiceConversationCaptureTestsScriptedSocket()
+        let factory = VoiceConversationControllerTestsScriptedSocketFactory()
+        factory.queue(socket)
+        let controller = VoiceConversationCaptureTests.makeController(
+            factory: factory,
+            screenCapture: StubVoiceScreenCapture(
+                result: VoiceScreenCaptureResult(pngData: png, displayTitle: "Main", displayID: 1)
+            )
+        )
+        controller.start()
+        await settle(until: { factory.makeCount >= 1 })
+        // output_modalities に audio を含む live_audio セッションにする。
+        socket.feed(
+            #"{"type":"session.ready","session_id":"sess-test","model":"gpt-live-1","output_modalities":["audio","text"]}"#
+        )
+        await settle(until: { controller.connectionState == .ready })
+
+        controller.captureAndSendScreen(prompt: "見て")
+        await settle(until: {
+            socket.sent.contains { $0.contains("\"input.image\"") }
+        })
+
+        let imageFrame = socket.sent.compactMap { text -> [String: Any]? in
+            guard
+                let data = text.data(using: .utf8),
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                json["type"] as? String == "input.image"
+            else { return nil }
+            return json
+        }.first
+        let frame = try #require(imageFrame)
+        #expect(frame["media_type"] as? String == "image/jpeg")
+        let sentData = try #require(
+            (frame["image_base64"] as? String).flatMap { Data(base64Encoded: $0) }
+        )
+        // JPEG マジックで始まり、目標バイト数に収まる。
+        #expect(sentData.prefix(3).elementsEqual([0xFF, 0xD8, 0xFF]))
+        #expect(sentData.count <= 12_000)
         controller.stop()
     }
 }

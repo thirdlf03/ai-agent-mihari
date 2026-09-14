@@ -63,6 +63,22 @@ _LIVE_INPUT_PACER_INTERVAL = 0.1
 #: ペーサーが補填する無音 1 枚分。PCM16 mono 24kHz の 100ms = 2400 サンプル = 4800 バイト。
 _LIVE_SILENCE_FRAME_B64 = base64.b64encode(b"\x00" * 4800).decode()
 
+#: Live delegation（Responses バックエンド）の入力履歴はセッション累積で
+#: 128 items / 32,768 UTF-8 bytes まで。安全マージン込みの目安。
+LIVE_DELEGATION_INPUT_LIMIT = 30_000
+
+#: live で upstream へ積む画像 item の base64 文字列の上限。data URL 化と
+#: JSON 枠のオーバーヘッドを見て、item 全体が 32KB 未満に収まるよう半分にする。
+_LIVE_IMAGE_B64_LIMIT = LIVE_DELEGATION_INPUT_LIMIT // 2
+
+#: live の fco output の最大文字数。超過分は切り詰めて末尾に印を付ける。
+_LIVE_FCO_OUTPUT_LIMIT = 4_000
+
+#: 画像を backend へ送らなかったとき fco output に添える説明。
+_LIVE_IMAGE_DROPPED_NOTE = (
+    "画像は backend の入力上限を超えるため送信しなかった（ユーザー側には表示済み）"
+)
+
 UpstreamFactory = Callable[[], RealtimeUpstream]
 
 
@@ -441,16 +457,27 @@ async def _forward_image(
     )
     if capture_call_id is not None:
         pending_client_calls.pop(capture_call_id, None)
+        # live の delegation 入力履歴はセッション累積で上限が小さい（32KB）。
+        # 上限を超える画像は backend へ送らず、fco の note で欠落を伝える。
+        image_dropped = live and len(image_b64) > _LIVE_IMAGE_B64_LIMIT
         function_output: dict[str, Any] = {
             "type": "function_call_output",
             "call_id": capture_call_id,
             "output": json.dumps(
-                {"success": True, "note": "画像は直前のメッセージ"},
+                {
+                    "success": True,
+                    "note": (
+                        _LIVE_IMAGE_DROPPED_NOTE
+                        if image_dropped
+                        else "画像は直前のメッセージ"
+                    ),
+                },
                 ensure_ascii=False,
             ),
         }
         if live:
-            await upstream.send({"type": "response.item.create", "item": image_item})
+            if not image_dropped:
+                await upstream.send({"type": "response.item.create", "item": image_item})
             await upstream.send({"type": "response.item.create", "item": function_output})
             await upstream.send({"type": "response.create"})
         else:
@@ -528,6 +555,29 @@ def _call_arguments_str(raw: Any) -> str:
     return json.dumps(raw or {}, ensure_ascii=False)
 
 
+def _live_fco_output(output: str, *, image_dropped: bool) -> str:
+    """live 用の fco output を整える（長文の切り詰め + 画像欠落 note）。
+
+    切り詰めは JSON を壊しうるので先に行い、image_dropped の note は
+    その結果を包む形で必ず末尾へ残す。
+    """
+    if len(output) > _LIVE_FCO_OUTPUT_LIMIT:
+        output = output[:_LIVE_FCO_OUTPUT_LIMIT] + "…(truncated)"
+    if not image_dropped:
+        return output
+    try:
+        payload = json.loads(output)
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        payload["note"] = _LIVE_IMAGE_DROPPED_NOTE
+        return json.dumps(payload, ensure_ascii=False)
+    return json.dumps(
+        {"success": True, "note": _LIVE_IMAGE_DROPPED_NOTE, "output": output},
+        ensure_ascii=False,
+    )
+
+
 async def _send_tool_result(
     upstream: RealtimeUpstream,
     *,
@@ -537,28 +587,36 @@ async def _send_tool_result(
 ) -> None:
     """function_call_output（+ あれば画像メッセージ）を upstream へ積む。"""
     item_create = "response.item.create" if live else "conversation.item.create"
+    image_dropped = False
     if outcome.image_png:
-        image_item: dict[str, Any] = {
-            "type": "message",
-            "role": "user",
-            "content": [
-                {
-                    "type": "input_image",
-                    "image_url": (
-                        "data:image/png;base64," + base64.b64encode(outcome.image_png).decode()
-                    ),
-                },
-                {"type": "input_text", "text": "ツール実行結果の画像"},
-            ],
-        }
-        await upstream.send({"type": item_create, "item": image_item})
+        image_b64 = base64.b64encode(outcome.image_png).decode()
+        if live and len(image_b64) > _LIVE_IMAGE_B64_LIMIT:
+            # delegation の入力履歴はセッション累積で上限 32KB と小さい。
+            # 大きい画像は積まず、fco の note で欠落だけ伝える。
+            image_dropped = True
+        else:
+            image_item: dict[str, Any] = {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64," + image_b64,
+                    },
+                    {"type": "input_text", "text": "ツール実行結果の画像"},
+                ],
+            }
+            await upstream.send({"type": item_create, "item": image_item})
+    output = outcome.output
+    if live:
+        output = _live_fco_output(output, image_dropped=image_dropped)
     await upstream.send(
         {
             "type": item_create,
             "item": {
                 "type": "function_call_output",
                 "call_id": call_id,
-                "output": outcome.output,
+                "output": output,
             },
         }
     )
@@ -727,6 +785,9 @@ async def _live_upstream_to_client(
                 delegated_response_id = str(event.get("response_id") or "") or None
                 # ユーザーの発話を履歴へ確定させてから委譲の記録を残す。
                 await flush_user()
+                # 委譲前の発話断片も確定する。ここで閉じないと desktop 側で
+                # ツール行の上のバブルへ続き発話が追記され続ける。
+                await flush_assistant()
                 await send_client(
                     assistant_tool_activity_event(
                         name="delegate",
@@ -750,6 +811,9 @@ async def _live_upstream_to_client(
                     calls, delegated_calls = delegated_calls, []
                     if calls:
                         await flush_user()
+                        # ツール実行前に発話中の断片を確定させ、tool_activity と
+                        # 続き発話のバブルを分ける。
+                        await flush_assistant()
                         await _run_function_calls(
                             calls,
                             upstream=upstream,

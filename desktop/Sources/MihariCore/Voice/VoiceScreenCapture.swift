@@ -104,20 +104,49 @@ public enum MouseDisplaySelector {
 
 /// 画面キャプチャ 1 回分。
 public struct VoiceScreenCaptureResult: Equatable, Sendable {
-    public let pngData: Data
+    /// 画像バイト列。形式は `mediaType` が示す（"image/png" / "image/jpeg"）。
+    public let data: Data
+    /// `data` の MIME タイプ。`input.image` の `media_type` にそのまま使う。
+    public let mediaType: String
     public let displayTitle: String
     public let displayID: UInt32
 
-    public init(pngData: Data, displayTitle: String, displayID: UInt32) {
-        self.pngData = pngData
+    public init(data: Data, mediaType: String, displayTitle: String, displayID: UInt32) {
+        self.data = data
+        self.mediaType = mediaType
         self.displayTitle = displayTitle
         self.displayID = displayID
+    }
+
+    /// PNG 1 枚の結果を作る。
+    public init(pngData: Data, displayTitle: String, displayID: UInt32) {
+        self.init(data: pngData, mediaType: "image/png", displayTitle: displayTitle, displayID: displayID)
     }
 }
 
 /// §5-3: マウスがあるディスプレイ 1 枚を撮る（確認ダイアログなし）。
 public protocol VoiceScreenCapturing: Sendable {
     func captureMouseDisplayPNG() async throws -> VoiceScreenCaptureResult
+    /// live_audio 用の縮小 JPEG。backend の入力履歴上限に収めるため
+    /// `maxBytes` 以下を目指して縮小・再圧縮する。
+    func captureMouseDisplayJPEG(maxBytes: Int) async throws -> VoiceScreenCaptureResult
+}
+
+extension VoiceScreenCapturing {
+    /// 既定実装: PNG を撮ってから縮小 JPEG へ変換する。
+    /// JPEG を直接撮れる実装は差し替えてよい。
+    public func captureMouseDisplayJPEG(maxBytes: Int) async throws -> VoiceScreenCaptureResult {
+        let png = try await captureMouseDisplayPNG()
+        guard let jpeg = VoiceScreenDownscaleJPEG.jpegData(from: png.data, maxBytes: maxBytes) else {
+            throw CaptureError.imageEncodingFailed
+        }
+        return VoiceScreenCaptureResult(
+            data: jpeg,
+            mediaType: "image/jpeg",
+            displayTitle: png.displayTitle,
+            displayID: png.displayID
+        )
+    }
 }
 
 /// 本番実装。Screen Recording 権限が必要。
@@ -187,6 +216,73 @@ public enum VoiceScreenThumbnail {
         context.draw(image, in: CGRect(x: 0, y: 0, width: targetWidth, height: targetHeight))
         guard let scaled = context.makeImage() else { return png }
         return try? CaptureImageCodec.pngData(from: scaled)
+    }
+}
+
+/// live_audio の入力履歴上限へ収めるための縮小 JPEG 変換。
+///
+/// 長辺 `maxEdge` まで縮めてから画質を段階的に下げ、`maxBytes` 以下を目指す。
+/// それでも収まらなければ半分の辺でやり直し、最後はいちばん小さくなったものを返す。
+public enum VoiceScreenDownscaleJPEG {
+    /// 試す JPEG 品質。先に試す順で、最初に `maxBytes` を下回ったものを採用する。
+    private static let qualitySteps: [CGFloat] = [0.6, 0.45, 0.3, 0.18, 0.08]
+
+    /// PNG / JPEG などの画像データを縮小 JPEG にする。デコードできなければ nil。
+    public static func jpegData(
+        from source: Data,
+        maxEdge: Int = 320,
+        maxBytes: Int = 12_000
+    ) -> Data? {
+        guard
+            let imageSource = CGImageSourceCreateWithData(source as CFData, nil),
+            let image = CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
+        else {
+            return nil
+        }
+        var smallest: Data?
+        for edge in [maxEdge, maxEdge / 2] where edge > 0 {
+            guard let scaled = scaledImage(image, maxEdge: edge) else { continue }
+            for quality in qualitySteps {
+                guard let jpeg = jpegData(scaled, quality: quality) else { continue }
+                if jpeg.count <= maxBytes { return jpeg }
+                if smallest.map({ jpeg.count < $0.count }) ?? true {
+                    smallest = jpeg
+                }
+            }
+        }
+        return smallest
+    }
+
+    /// 長辺が `maxEdge` を超えないよう縮小する。既に小さければそのまま返す。
+    private static func scaledImage(_ image: CGImage, maxEdge: Int) -> CGImage? {
+        let width = image.width
+        let height = image.height
+        guard width > 0, height > 0 else { return nil }
+        let scale = min(Double(maxEdge) / Double(max(width, height)), 1.0)
+        let targetWidth = max(1, Int((Double(width) * scale).rounded()))
+        let targetHeight = max(1, Int((Double(height) * scale).rounded()))
+        guard
+            let context = CGContext(
+                data: nil,
+                width: targetWidth,
+                height: targetHeight,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+            )
+        else {
+            return nil
+        }
+        context.interpolationQuality = .medium
+        context.draw(image, in: CGRect(x: 0, y: 0, width: targetWidth, height: targetHeight))
+        return context.makeImage()
+    }
+
+    /// `CGImage` を指定品質の JPEG データにする。
+    private static func jpegData(_ image: CGImage, quality: CGFloat) -> Data? {
+        NSBitmapImageRep(cgImage: image)
+            .representation(using: .jpeg, properties: [.compressionFactor: quality])
     }
 }
 
