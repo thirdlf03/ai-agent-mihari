@@ -7,12 +7,18 @@ room の voice 契約（``/voice/sessions`` 系）だけを切り出して手元
 desktop 側は ``MIHARI_VOICE_GATEWAY_URL`` があればそこへ voice を向け、
 無ければ従来どおり ``MIHARI_ROOM_URL``（= VPS room）を使う。
 
+音声ツール（submit_job / mac_* / discord_*）の実行は、``MIHARI_ROOM_URL``
+が設定されていれば room 本体の ``POST /voice/tools/execute`` へ HTTP で委譲する
+（``RemoteVoiceToolExecutor``）。未設定なら従来どおり orchestrator 無しの
+失敗 JSON を返す。
+
 認証は room と同じ ``X-Mihari-Token``（``MIHARI_ROOM_TOKEN`` と照合）。
 セッション履歴は ``MIHARI_VOICE_GATEWAY_ROOT``（既定
 ``~/.local/share/mihari-voice-gateway``）に置く。
 
 起動例:
 
+    MIHARI_ROOM_URL=https://room.example.ts.net \\
     MIHARI_ROOM_TOKEN=... \\
     MIHARI_OPENAI_API_KEY=... \\
     MIHARI_VC_URL=http://127.0.0.1:18995 \\
@@ -30,6 +36,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 
 from mihari_room.config import RoomConfig
+from mihari_room.voice.remote_tools import remote_tool_executor_factory
 from mihari_room.voice.routes import register_voice_routes
 
 #: セッション履歴・ロックの置き場所。本体 room の root（~/mihari-room）とは分ける。
@@ -66,10 +73,20 @@ def build_config() -> RoomConfig:
     )
 
 
-def create_gateway_app(config: RoomConfig) -> FastAPI:
+def create_gateway_app(config: RoomConfig, *, room_url: str | None = None) -> FastAPI:
     app = FastAPI(title="mihari-voice-gateway")
     app.state.config = config
     register_voice_routes(app)
+
+    # room 本体の URL が分かればツール実行は HTTP 委譲（remote executor）にする。
+    # 無ければ executor は従来どおり orchestrator 無しで失敗 JSON を返す。
+    resolved_room_url = (
+        room_url if room_url is not None else os.environ.get("MIHARI_ROOM_URL", "")
+    ).strip()
+    if resolved_room_url:
+        app.state.voice_tool_executor_factory = remote_tool_executor_factory(
+            room_url=resolved_room_url, token=config.token
+        )
 
     @app.get("/health")
     def health() -> dict[str, str]:

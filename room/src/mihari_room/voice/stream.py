@@ -81,6 +81,10 @@ _LIVE_IMAGE_DROPPED_NOTE = (
 
 UpstreamFactory = Callable[[], RealtimeUpstream]
 
+#: 音声セッション 1 本ぶんのツール実行器を組み立てる factory（session_id を取る）。
+#: voice gateway が ``RemoteVoiceToolExecutor`` を差し込むために使う。
+ToolExecutorFactory = Callable[[str], Any]
+
 
 class _ClientAudioClock:
     """クライアント音声の最終到着時刻をモノトニック秒で共有するホルダ。"""
@@ -102,11 +106,15 @@ async def handle_voice_stream(
     mac_hub: Any = None,
     interactions: Any = None,
     tool_executor: Any = None,
+    tool_executor_factory: ToolExecutorFactory | None = None,
 ) -> None:
     """``/voice/sessions/{id}/stream`` の本体。
 
     ``orchestrator`` / ``mac_hub`` / ``interactions`` は room のツール実行器へ
     渡す依存（app.state 由来）。``tool_executor`` があればそれを使う（test 用）。
+    ``tool_executor_factory`` は orchestrator が無い環境（voice gateway）でのみ
+    使い、session_id から executor を組み立てる。orchestrator が居る room 本体
+    では常にローカルの ``VoiceToolExecutor`` を優先する。
     """
     session = manager.get(session_id)
     if session is None:
@@ -136,17 +144,20 @@ async def handle_voice_stream(
     close_sent = False
     history = manager.get_history(session_id)
     resumed = bool(history)
-    executor = (
-        tool_executor
-        if tool_executor is not None
-        else VoiceToolExecutor(
+    if tool_executor is not None:
+        executor = tool_executor
+    elif tool_executor_factory is not None and orchestrator is None:
+        # orchestrator の無い gateway だけ factory（例: remote executor）を使う。
+        # room 本体では app.state.orchestrator が居るので常にローカル実行器。
+        executor = tool_executor_factory(session_id)
+    else:
+        executor = VoiceToolExecutor(
             session_id=session_id,
             manager=manager,
             orchestrator=orchestrator,
             mac_hub=mac_hub,
             interactions=interactions,
         )
-    )
     #: client 実行ツール（capture_screen）の未解決 call。call_id → ツール名。
     pending_client_calls: dict[str, str] = {}
 
