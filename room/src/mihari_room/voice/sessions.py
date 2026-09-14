@@ -38,6 +38,8 @@ class VoiceSession:
     error: str = ""
     #: upstream から観測したモデル音声出力イベント数（課金確認用）。
     upstream_audio_output_events: int = 0
+    #: 出力モード。"text"（既定）か "live_audio"（音声出力を VC 経由で中継）。
+    output_mode: str = "text"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -48,8 +50,14 @@ class VoiceSession:
             "closed_at": self.closed_at,
             "error": self.error or None,
             "upstream_audio_output_events": self.upstream_audio_output_events,
-            "output_modalities": ["text"],
+            "output_modalities": self.output_modalities,
         }
+
+    @property
+    def output_modalities(self) -> list[str]:
+        if self.output_mode == "live_audio":
+            return ["audio", "text"]
+        return ["text"]
 
     def to_meta(self) -> dict[str, Any]:
         return {
@@ -60,6 +68,7 @@ class VoiceSession:
             "closed_at": self.closed_at,
             "error": self.error,
             "upstream_audio_output_events": self.upstream_audio_output_events,
+            "output_mode": self.output_mode,
         }
 
     @classmethod
@@ -79,6 +88,7 @@ class VoiceSession:
             closed_at=meta.get("closed_at"),
             error=str(meta.get("error") or ""),
             upstream_audio_output_events=int(meta.get("upstream_audio_output_events") or 0),
+            output_mode=str(meta.get("output_mode") or "text"),
         )
 
 
@@ -131,7 +141,13 @@ class VoiceSessionManager:
             # ストリームが張られていない = 実際には通話中でないので、閉じて作り直す。
             self.close_session(existing.id)
         session_id = secrets.token_urlsafe(16)
-        session = VoiceSession(id=session_id, model=self._config.voice_realtime_model)
+        output_mode = self._config.voice_output_mode
+        model = (
+            self._config.live_model
+            if output_mode == "live_audio"
+            else self._config.voice_realtime_model
+        )
+        session = VoiceSession(id=session_id, model=model, output_mode=output_mode)
         self._sessions[session_id] = session
         self._persist(session)
         return session
@@ -155,9 +171,7 @@ class VoiceSessionManager:
     def history_to_dicts(self, session_id: str) -> list[dict[str, Any]]:
         return [message.to_dict() for message in self.get_history(session_id)]
 
-    def record_user_text(
-        self, session_id: str, text: str, *, kind: HistoryKind = "text"
-    ) -> None:
+    def record_user_text(self, session_id: str, text: str, *, kind: HistoryKind = "text") -> None:
         if not self._accepts_history(session_id):
             return
         self._store.record_user_text(session_id, text, kind=kind)

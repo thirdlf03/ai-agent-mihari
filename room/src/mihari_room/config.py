@@ -17,6 +17,17 @@ DEFAULT_PORT = 8787
 #: OpenAI Realtime の既定モデル（§5-1 最小検証）。
 DEFAULT_VOICE_REALTIME_MODEL = "gpt-realtime-2.1-mini"
 
+#: gpt-live-1（Live API）の既定モデル・音声。
+DEFAULT_LIVE_MODEL = "gpt-live-1"
+DEFAULT_LIVE_VOICE = "marin"
+
+#: voice セッションの出力モード。text=テキストのみ / live_audio=gpt-live-1 音声+VC 中継。
+VOICE_OUTPUT_MODES = frozenset({"text", "live_audio"})
+DEFAULT_VOICE_OUTPUT_MODE = "text"
+
+#: VC サービスへの 1 変換あたりのタイムアウト秒。
+DEFAULT_VC_TIMEOUT = 2.0
+
 
 @dataclass(frozen=True, slots=True)
 class RoomConfig:
@@ -35,6 +46,16 @@ class RoomConfig:
     openai_api_key: str = ""
     #: Realtime セッションのモデル名。
     voice_realtime_model: str = DEFAULT_VOICE_REALTIME_MODEL
+    #: voice の出力モード。"text"（既定・従来どおり）か "live_audio"（gpt-live-1 音声 + VC）。
+    voice_output_mode: str = DEFAULT_VOICE_OUTPUT_MODE
+    #: live_audio モードの Live モデル名。
+    live_model: str = DEFAULT_LIVE_MODEL
+    #: live_audio モードで upstream が返す声（VC 前の素の声）。
+    live_voice: str = DEFAULT_LIVE_VOICE
+    #: 外部 VC サービスの base URL。空なら VC 無効（パススルー）。
+    vc_url: str = ""
+    #: VC サービスへの変換タイムアウト秒。
+    vc_timeout: float = DEFAULT_VC_TIMEOUT
 
     @classmethod
     def from_environment(cls) -> RoomConfig:
@@ -54,10 +75,21 @@ class RoomConfig:
         voice_realtime_model = (
             os.environ.get("MIHARI_VOICE_REALTIME_MODEL") or DEFAULT_VOICE_REALTIME_MODEL
         ).strip()
+        voice_output_mode = (
+            os.environ.get("MIHARI_VOICE_OUTPUT_MODE") or DEFAULT_VOICE_OUTPUT_MODE
+        ).strip()
+        live_model = (os.environ.get("MIHARI_LIVE_MODEL") or DEFAULT_LIVE_MODEL).strip()
+        live_voice = (os.environ.get("MIHARI_LIVE_VOICE") or DEFAULT_LIVE_VOICE).strip()
+        vc_url = (os.environ.get("MIHARI_VC_URL") or "").strip()
+        vc_timeout_raw = (os.environ.get("MIHARI_VC_TIMEOUT") or str(DEFAULT_VC_TIMEOUT)).strip()
         try:
             port = int(port_raw)
         except ValueError as error:
             raise ValueError(f"MIHARI_ROOM_PORT が数字ではない: {port_raw}") from error
+        try:
+            vc_timeout = float(vc_timeout_raw)
+        except ValueError as error:
+            raise ValueError(f"MIHARI_VC_TIMEOUT が数字ではない: {vc_timeout_raw}") from error
         forum_channel_id = int(forum_raw) if forum_raw else None
         return cls(
             token=token,
@@ -70,6 +102,11 @@ class RoomConfig:
             preview_base_url=preview_base_url,
             openai_api_key=openai_api_key,
             voice_realtime_model=voice_realtime_model,
+            voice_output_mode=voice_output_mode,
+            live_model=live_model,
+            live_voice=live_voice,
+            vc_url=vc_url,
+            vc_timeout=vc_timeout,
         )
 
     def __post_init__(self) -> None:
@@ -80,3 +117,14 @@ class RoomConfig:
         base = self.preview_base_url
         if base and not (base.startswith("http://") or base.startswith("https://")):
             raise ValueError("MIHARI_PREVIEW_BASE_URL は http(s):// で始めて")
+        if self.voice_output_mode not in VOICE_OUTPUT_MODES:
+            raise ValueError(
+                f"MIHARI_VOICE_OUTPUT_MODE は {sorted(VOICE_OUTPUT_MODES)} のいずれか: "
+                f"{self.voice_output_mode}"
+            )
+        if self.vc_url and not (
+            self.vc_url.startswith("http://") or self.vc_url.startswith("https://")
+        ):
+            raise ValueError("MIHARI_VC_URL は http(s):// で始めて")
+        if self.vc_timeout <= 0:
+            raise ValueError(f"MIHARI_VC_TIMEOUT は正の秒数で: {self.vc_timeout}")

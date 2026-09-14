@@ -37,6 +37,8 @@ public final class VoiceConversationController: ObservableObject {
         var micFactory: @MainActor () -> any MicCapturing
         var jobCollaboration: any VoiceJobCollaborating
         var screenCapture: any VoiceScreenCapturing
+        /// `assistant.audio`（PCM16 24 kHz）の逐次再生。テストではスタブに差し替える。
+        var pcmPlayer: any PCMStreamPlaying = PCMStreamPlayer()
         /// 仕事依頼成功時 `(jobID, title)`。`RoomJobMonitor.attach` などへ。
         var onJobSubmitted: (@MainActor (_ jobID: String, _ title: String?) -> Void)?
         /// マイク権限の照会。テストでは実機の TCC を見ないよう差し替える。
@@ -60,6 +62,7 @@ public final class VoiceConversationController: ObservableObject {
                 micFactory: { AVAudioMicCapture() },
                 jobCollaboration: LiveVoiceJobCollaboration.makeFromEnvironment(),
                 screenCapture: LiveVoiceScreenCapture(),
+                pcmPlayer: PCMStreamPlayer(),
                 onJobSubmitted: onJobSubmitted
             )
         }
@@ -102,11 +105,25 @@ public final class VoiceConversationController: ObservableObject {
     private var pendingAssistantText = ""
     private var currentAssistantMessageID: UUID?
 
+    /// このセッションで `assistant.audio` を受けたか。受けたら音声は room 側（VC 済み）が
+    /// 返すため、以降の `assistant.text` では VOICEVOX 合成・再生を行わない（二重発話防止）。
+    private var assistantAudioMode = false
+
     /// 押下中に commit:false で送ったか（確定時に全体を再送しない）。
     private var hasStreamedAudioInTurn = false
 
+    /// live_audio の逐次 `user.text` で更新中の user 行。`done: true` で確定し、
+    /// 次の発話は新しい行から始める。
+    private var streamingUserMessageID: UUID?
+
     public init(deps: Dependencies) {
         self.deps = deps
+        // assistant.audio の 1 発話を鳴らし切ったらエコー対策を解除する。
+        deps.pcmPlayer.onDrained = { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.handlePlaybackFinished()
+            }
+        }
     }
 
     /// `SpeechPlayer.onPlaybackFinished` から呼ぶ（`VoiceController` とチェーンすること）。
@@ -124,9 +141,14 @@ public final class VoiceConversationController: ObservableObject {
         backoffSeconds = 1
         messages = []
         pendingQuestions = []
+        assistantAudioMode = false
+        streamingUserMessageID = nil
         connectionState = .connecting
         statusText = "接続中…"
         appendSystem("会話を開始した")
+
+        // assistant.audio の再生エンジンを暖めておく（audio が来ないセッションでは使われない）。
+        deps.pcmPlayer.start()
 
         runTask?.cancel()
         runTask = Task { [weak self] in
@@ -431,6 +453,8 @@ public final class VoiceConversationController: ObservableObject {
                 let connection = try await openConnection()
                 currentSocket = connection.socket
                 backoffSeconds = 1
+                // 再接続では closeSocket で止まっているため起こし直す。冪等。
+                deps.pcmPlayer.start()
 
                 var ready = false
                 while !Task.isCancelled, isActive {
@@ -481,8 +505,8 @@ public final class VoiceConversationController: ObservableObject {
             applyHistorySync(entries)
             return false
 
-        case .userText(let text):
-            applyUserTranscript(text)
+        case .userText(let text, let delta, let done):
+            applyUserTranscript(text, delta: delta, done: done)
             return false
 
         case .assistantText(let delta, let text, let done):
@@ -504,6 +528,10 @@ public final class VoiceConversationController: ObservableObject {
             if done {
                 finalizeAssistantMessage()
             }
+            return false
+
+        case .assistantAudio(let pcm16, let done):
+            handleAssistantAudio(pcm16: pcm16, done: done)
             return false
 
         case .assistantToolCall(let name, _, let arguments):
@@ -633,11 +661,28 @@ public final class VoiceConversationController: ObservableObject {
         pendingAssistantText = ""
         currentAssistantMessageID = nil
         deps.speechPlayer.stop(priority: .chatter)
+        deps.pcmPlayer.stop()
         echoGuardActive = false
         updateMicLive()
     }
 
     // MARK: - 合成・再生
+
+    /// `assistant.audio`: room が VC 済みの音声を PCM で返すモード。
+    /// 一度でも届いたらこのセッションでは VOICEVOX 経路へ流さない。
+    private func handleAssistantAudio(pcm16: Data, done: Bool) {
+        assistantAudioMode = true
+        // 再生中はマイク送信を止める（エコー対策）。鳴らし切ると onDrained から解除する。
+        echoGuardActive = true
+        updateMicLive()
+        if !pcm16.isEmpty {
+            deps.pcmPlayer.enqueue(pcm16: pcm16)
+            statusText = "再生中…"
+        }
+        if done {
+            deps.pcmPlayer.finish()
+        }
+    }
 
     private func finalizeAssistantMessage() {
         let text = pendingAssistantText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -652,6 +697,10 @@ public final class VoiceConversationController: ObservableObject {
     }
 
     private func speakAssistant(_ text: String) {
+        // assistant.audio モードでは音声は room が返すため、ここでは合成しない（二重発話防止）。
+        // テキストは finalizeAssistantMessage で履歴に載っている。
+        guard !assistantAudioMode else { return }
+
         let spoken = Self.shortenForSpeech(text)
         guard !spoken.isEmpty else { return }
 
@@ -711,9 +760,47 @@ public final class VoiceConversationController: ObservableObject {
         appendMessage(VoiceConversationMessage(role: .user, text: Self.userPlaceholderText))
     }
 
-    /// room が送る入力音声の文字起こし。直前がプレースホルダなら本当の文に差し替え、
-    /// そうでなければ新しい user 行として追加する。
-    private func applyUserTranscript(_ text: String) {
+    /// room が送る入力音声の文字起こし。
+    ///
+    /// live_audio の逐次形式（`delta` / `done` フィールド付き）は `text` が累積全文なので、
+    /// 同一発話のあいだは同じ user 行を書き換えるだけにして行を増やさない。
+    /// `done: true` で確定し、次の発話は新しい行から始める。
+    /// 従来形式（`text` のみ）は非破壊のまま、プレースホルダ置換か新規行追加を行う。
+    private func applyUserTranscript(_ text: String, delta: String?, done: Bool?) {
+        guard delta != nil || done != nil else {
+            applyUserTranscriptFinal(text)
+            return
+        }
+        defer {
+            if done == true { streamingUserMessageID = nil }
+        }
+        guard !text.isEmpty else { return }
+
+        // 進行中の発話行を追いかけて書き換える。途中に assistant/system 行が
+        // 挟まっても ID で引き当てるため、同じ発話で行が増殖しない。
+        if let id = streamingUserMessageID,
+            let index = messages.firstIndex(where: { $0.id == id })
+        {
+            messages[index].text = text
+            return
+        }
+        // プッシュ・トゥ・トークのプレースホルダが残っていれば、その行を発話行にする。
+        if let last = messages.last,
+            last.role == .user,
+            last.text == Self.userPlaceholderText
+        {
+            messages[messages.count - 1].text = text
+            streamingUserMessageID = last.id
+            return
+        }
+        let message = VoiceConversationMessage(role: .user, text: text)
+        streamingUserMessageID = message.id
+        appendMessage(message)
+    }
+
+    /// 従来形式（`text` のみ）の確定済み文字起こし。直前がプレースホルダなら
+    /// 本当の文に差し替え、そうでなければ新しい user 行として追加する。
+    private func applyUserTranscriptFinal(_ text: String) {
         guard !text.isEmpty else { return }
         if let last = messages.last,
             last.role == .user,
@@ -755,6 +842,7 @@ public final class VoiceConversationController: ObservableObject {
     private func applyHistorySync(_ entries: [VoiceHistorySyncEntry]) {
         pendingAssistantText = ""
         currentAssistantMessageID = nil
+        streamingUserMessageID = nil
         messages = entries.compactMap { $0.asConversationMessage() }
         statusText = "履歴を同期した（\(messages.count) 件）"
     }
@@ -763,6 +851,8 @@ public final class VoiceConversationController: ObservableObject {
         let socket = currentSocket
         currentSocket = nil
         sendTail = nil
+        // 切断で assistant.audio の再生が宙に浮かないよう止める。再接続時は runLoop が起こし直す。
+        deps.pcmPlayer.stop()
         // 押下中に切断すると解放操作を受け取れないことがあるため、ここで戻す。
         isTalking = false
         hasStreamedAudioInTurn = false
@@ -825,5 +915,7 @@ public final class VoiceConversationController: ObservableObject {
         sessionID = nil
         streamPath = nil
         sendTail = nil
+        // セッション単位のフラグ。新しいセッションでは audio モードを引き継がない。
+        assistantAudioMode = false
     }
 }

@@ -279,6 +279,59 @@ Hermes が clarify 等でユーザー入力待ちになったとき、ジョブ 
 
 `GET /jobs/{id}` の `pending_questions` に未回答分が載る。不明な `qid` は **404**、存在するが回答済み・取消済みは **409**。
 
+## 出力モード（`MIHARI_VOICE_OUTPUT_MODE`）
+
+| 値 | 既定 | upstream | 出力 |
+| --- | --- | --- | --- |
+| `text` | ○ | OpenAI Realtime（`gpt-realtime-2.1-mini`） | `assistant.text` のみ（読み上げは desktop 側） |
+| `live_audio` | | gpt-live-1（Live API, `wss://api.openai.com/v1/live/sessions`） | `assistant.audio`（VC 後の PCM16）+ `assistant.text`（文字起こし） |
+
+関連 env:
+
+| env | 既定 | 用途 |
+| --- | --- | --- |
+| `MIHARI_VOICE_OUTPUT_MODE` | `text` | `text` / `live_audio` |
+| `MIHARI_LIVE_MODEL` | `gpt-live-1` | live_audio のモデル |
+| `MIHARI_LIVE_VOICE` | `marin` | upstream が返す素の声（VC 前） |
+| `MIHARI_VC_URL` | 空（VC 無効） | 外部 VC サービスの base URL。空ならパススルー |
+| `MIHARI_VC_TIMEOUT` | `2.0` | VC 変換 1 回あたりのタイムアウト秒 |
+
+### `live_audio` モードの線上差分
+
+- `session.ready` の `output_modalities` は `["audio", "text"]`。
+- `input.audio` は従来どおり PCM16 24 kHz mono base64。`commit` / `create_response` フィールドは受け付けるが、Live API はフルデュプレックス（commit/response.create 相当のイベントが無い）なので upstream 側で捨てられる。発話区切りはモデルが自律的に決める。
+- upstream の `session.output_audio.delta`（base64 PCM16 24kHz）を PCM16 → f32 に変換して VC サービスへ送り、戻りの f32 を PCM16 に戻して `assistant.audio` で中継する。
+- 文字起こし（`session.input_transcript.delta` / `session.output_transcript.delta`）は断片のみでターン完了イベントが無い。room はユーザー分を累積し、アシスタント出力の区切りで確定（履歴記録 + `done: true`）する。
+
+#### `assistant.audio`（room → client, live_audio のみ）
+
+```json
+{ "type": "assistant.audio", "audio_base64": "<base64 PCM16 24kHz mono>", "done": false }
+{ "type": "assistant.audio", "done": true }
+```
+
+`done: true` は 1 発話分の終端（`session.output_audio.done` / `.stopped` 相当）。`audio_base64` は VC 後の音声。
+
+#### `user.text` の拡張（live_audio のみ）
+
+```json
+{ "type": "user.text", "text": "<累積>", "delta": "<断片>", "done": false }
+{ "type": "user.text", "text": "<確定文>", "done": true }
+```
+
+`delta` / `done` は live_audio でのみ付く追加フィールド。text モードでは従来どおり `{ "type": "user.text", "text": "..." }` のみ。
+
+### VC サービス契約（room → 外部 HTTP）
+
+`MIHARI_VC_URL` が指すサービスとの I/F（Beatrice / Seed-VC 等をこの形に合わせる）:
+
+- `POST {base}/convert` — body: f32（-1.0〜1.0）モノラル 24 kHz の生バイト列、`Content-Type: application/octet-stream`。応答 body: 変換済み f32（同フォーマット）。
+- `POST {base}/reset` — 変換の内部状態リセット。ストリーム開始時に 1 度呼ぶ。
+
+変換失敗・タイムアウト・接続不可のとき、room は warning を出して**パススルー**（素の音声をそのまま中継）で継続する。会話は落とさない。
+
+room 側に DSP（リサンプリング等）は入れない。PCM16 ↔ f32 の変換のみ。
+
 ## protocol_version
 
 現在 `1`。破壊的変更時は room / desktop を同時に上げる。

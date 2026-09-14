@@ -15,6 +15,33 @@ struct VoiceRealtimeProtocolTests {
         #expect(frame == .assistantText(delta: "こん", text: "", done: false))
     }
 
+    @Test("user.text の逐次形式を delta / done 付きで読む")
+    func parsesStreamingUserText() {
+        let partial = """
+        {"type":"user.text","text":"こんに","delta":"に","done":false}
+        """
+        let final = """
+        {"type":"user.text","text":"こんにちは","done":true}
+        """
+        #expect(
+            VoiceIncomingFrame.parse(data: Data(partial.utf8))
+                == .userText(text: "こんに", delta: "に", done: false)
+        )
+        #expect(
+            VoiceIncomingFrame.parse(data: Data(final.utf8))
+                == .userText(text: "こんにちは", delta: nil, done: true)
+        )
+    }
+
+    @Test("user.text の従来形式は delta / done が nil になる")
+    func parsesLegacyUserText() {
+        let json = """
+        {"type":"user.text","text":"今日の予定を教えて"}
+        """
+        let frame = VoiceIncomingFrame.parse(data: Data(json.utf8))
+        #expect(frame == .userText(text: "今日の予定を教えて", delta: nil, done: nil))
+    }
+
     @Test("input.image を base64 付きで組み立てる")
     func buildsInputImage() throws {
         let png = Data([0x89, 0x50, 0x4E, 0x47])
@@ -113,6 +140,25 @@ struct VoiceRealtimeProtocolTests {
             VoiceIncomingFrame.parse(data: Data(closedJSON.utf8))
                 == .sessionClosed(reason: "idle")
         )
+    }
+
+    @Test("assistant.audio を base64 と done で読む")
+    func parsesAssistantAudio() {
+        let pcm = Data([0x01, 0x00, 0xFF, 0x7F])
+        let json = """
+        {"type":"assistant.audio","audio_base64":"\(pcm.base64EncodedString())","done":false}
+        """
+        let frame = VoiceIncomingFrame.parse(data: Data(json.utf8))
+        #expect(frame == .assistantAudio(pcm16: pcm, done: false))
+    }
+
+    @Test("assistant.audio の done 通知だけのフレームは空音声になる")
+    func parsesAssistantAudioDoneOnly() {
+        let json = """
+        {"type":"assistant.audio","audio_base64":"","done":true}
+        """
+        let frame = VoiceIncomingFrame.parse(data: Data(json.utf8))
+        #expect(frame == .assistantAudio(pcm16: Data(), done: true))
     }
 
     @Test("assistant.text は text フィールドも delta として扱う")
