@@ -32,10 +32,12 @@ public struct CGEventMacControlOperator: MacControlOperating {
     private let displays: MacControlDisplayListing
     /// ファイル系 op が触れてよい範囲。`MIHARI_MAC_SEARCH_DIRS` で上書きできる。
     private let filePolicy: MacFileAccessPolicy
-    /// Finder でファイルを選択状態にする口。テストでは記録用のスタブに差し替える。
-    private let revealInFinder: @Sendable ([URL]) -> Void
+    /// 手渡しファイルを束ねるステージ。短い窓で届いた分を1フォルダに集めて開く。
+    private let handoffStage: MacHandoffStage
     /// 手渡し演出の出し手。`MacControlCenter` があとから差し込む。
-    public var handoffPresenter: (any MacFileHandoffPresenting)?
+    public var handoffPresenter: (any MacFileHandoffPresenting)? {
+        didSet { handoffStage.presenter = handoffPresenter }
+    }
     private let accessibilityIsTrusted: @Sendable () -> Bool
     private let screenRecordingIsGranted: @Sendable () -> Bool
 
@@ -44,9 +46,7 @@ public struct CGEventMacControlOperator: MacControlOperating {
         displays: MacControlDisplayListing = CGMacControlDisplayListing(),
         filePolicy: MacFileAccessPolicy = MacFileAccessPolicy(),
         handoffPresenter: (any MacFileHandoffPresenting)? = nil,
-        revealInFinder: @escaping @Sendable ([URL]) -> Void = {
-            NSWorkspace.shared.activateFileViewerSelecting($0)
-        },
+        handoffStage: MacHandoffStage = MacHandoffStage(),
         accessibilityIsTrusted: @escaping @Sendable () -> Bool = { AXIsProcessTrusted() },
         screenRecordingIsGranted: @escaping @Sendable () -> Bool = {
             PermissionChecker.check(.screenRecording).grant == .granted
@@ -55,8 +55,9 @@ public struct CGEventMacControlOperator: MacControlOperating {
         self.capture = capture
         self.displays = displays
         self.filePolicy = filePolicy
-        self.revealInFinder = revealInFinder
+        self.handoffStage = handoffStage
         self.handoffPresenter = handoffPresenter
+        handoffStage.presenter = handoffPresenter
         self.accessibilityIsTrusted = accessibilityIsTrusted
         self.screenRecordingIsGranted = screenRecordingIsGranted
     }
@@ -170,8 +171,9 @@ public struct CGEventMacControlOperator: MacControlOperating {
         }
     }
 
-    /// 許可フォルダ内のファイルを Finder で見せ、ペットの「手渡し」演出を試す。
-    /// 演出を出す側が未接続でも失敗にはしない（revealed だけ返す）。
+    /// 許可フォルダ内のファイルをステージへ積み、バッチの flush を待って結果を返す。
+    /// 連続して届く複数ファイルは1フォルダにまとまり、Finder が開くのも
+    /// カットインもバッチごとに1回。演出を出す側が未接続でも失敗にはしない。
     private func performHandOffFile(op: MacControlOpFrame) async -> MacOpExecutionResult {
         guard let rawPath = op.filePath, !rawPath.isEmpty else {
             return .failure(code: "invalid_params", message: "path が空")
@@ -193,14 +195,23 @@ public struct CGEventMacControlOperator: MacControlOperating {
                 message: MacFileSearchError.fileNotFound.message
             )
         }
-        revealInFinder([url])
-        var presented = false
-        if let handoffPresenter {
-            presented = await handoffPresenter.presentFile(at: url, label: op.handOffLabel)
+        let key = op.jobID.isEmpty ? "misc" : op.jobID
+        let outcomes = await handoffStage.add(
+            MacHandoffStage.Entry(url: url, label: op.handOffLabel, key: key)
+        ).value
+        let outcome =
+            outcomes[key]
+            ?? MacHandoffStage.Outcome(
+                directory: nil,
+                presented: false,
+                error: "handoff batch missing"
+            )
+        if let error = outcome.error {
+            return .failure(code: "execution_failed", message: error)
         }
         return .makeSuccess([
-            "revealed": true,
-            "presented": presented,
+            "revealed": outcome.directory != nil,
+            "presented": outcome.presented,
         ])
     }
 

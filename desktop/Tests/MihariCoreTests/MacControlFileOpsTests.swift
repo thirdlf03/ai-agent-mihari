@@ -42,12 +42,18 @@ struct MacControlFileOpsTests {
     private func makeOperator(
         allowedRoots: [URL],
         handoffPresenter: (any MacFileHandoffPresenting)? = nil,
-        revealInFinder: @escaping @Sendable ([URL]) -> Void = { _ in }
+        handoffStage: MacHandoffStage? = nil
     ) -> CGEventMacControlOperator {
         CGEventMacControlOperator(
             filePolicy: MacFileAccessPolicy(allowedRoots: allowedRoots),
             handoffPresenter: handoffPresenter,
-            revealInFinder: revealInFinder,
+            handoffStage: handoffStage
+                ?? MacHandoffStage(
+                    stageRoot: FileManager.default.temporaryDirectory
+                        .appendingPathComponent("mihari-handoffs-\(UUID().uuidString)"),
+                    window: 0.02,
+                    openFolder: { _ in }
+                ),
             accessibilityIsTrusted: { true },
             screenRecordingIsGranted: { true }
         )
@@ -225,21 +231,27 @@ struct MacControlFileOpsTests {
         #expect(code == "path_not_allowed")
     }
 
-    @Test("hand_off_file は Finder で見せ、出し手が無ければ presented=false で返す")
+    @Test("hand_off_file はフォルダを開き、出し手が無ければ presented=false で返す")
     func handOffWithoutPresenter() async throws {
         let root = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: root) }
         let file = root.appendingPathComponent("渡す.txt")
         try "中身".write(to: file, atomically: true, encoding: .utf8)
 
-        let revealed = RevealedFiles()
+        let stageRoot = root.appendingPathComponent("handoffs")
+        let opened = OpenedFolders()
+        let stage = MacHandoffStage(
+            stageRoot: stageRoot,
+            window: 0.02,
+            openFolder: { opened.record($0) }
+        )
         let op = makeOp(
             kind: .handOffFile,
             params: ["path": .string(file.path), "label": .string("これだよ")]
         )
         let result = try await makeOperator(
             allowedRoots: [root],
-            revealInFinder: { urls in revealed.record(urls) }
+            handoffStage: stage
         ).execute(op: op)
         guard case .success(let value) = result else {
             Issue.record("成功のはず: \(result)")
@@ -247,7 +259,14 @@ struct MacControlFileOpsTests {
         }
         #expect(value["revealed"]?.boolValue() == true)
         #expect(value["presented"]?.boolValue() == false)
-        #expect(revealed.urls == [MacFileAccessPolicy.normalize(file)])
+        // 原本の場所ではなく、依頼（job）ごとのフォルダが1回だけ開く。
+        let dir = try #require(opened.urls.first)
+        #expect(dir.path == stageRoot.appendingPathComponent("job-1").path)
+        #expect(opened.urls.count == 1)
+        // フォルダの中身は原本へのシンボリックリンク。
+        let link = dir.appendingPathComponent("渡す.txt")
+        let dest = try FileManager.default.destinationOfSymbolicLink(atPath: link.path)
+        #expect(dest == MacFileAccessPolicy.normalize(file).path)
     }
 
     @Test("hand_off_file は出し手がいれば presented=true と label を渡す")
@@ -274,6 +293,107 @@ struct MacControlFileOpsTests {
         #expect(value["presented"]?.boolValue() == true)
         #expect(presenter.calls.count == 1)
         #expect(presenter.calls.first?.label == "請求書です")
+    }
+
+    @Test("連続した hand_off_file は1フォルダにまとまり、演出は1回だけ出る")
+    func handOffBatchesIntoOneFolder() async throws {
+        let root = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = root.appendingPathComponent("a.txt")
+        let second = root.appendingPathComponent("b.txt")
+        try "a".write(to: first, atomically: true, encoding: .utf8)
+        try "b".write(to: second, atomically: true, encoding: .utf8)
+
+        let stageRoot = root.appendingPathComponent("handoffs")
+        let opened = OpenedFolders()
+        let stage = MacHandoffStage(
+            stageRoot: stageRoot,
+            window: 0.1,
+            openFolder: { opened.record($0) }
+        )
+        let presenter = RecordingHandoffPresenter()
+        let sut = makeOperator(
+            allowedRoots: [root],
+            handoffPresenter: presenter,
+            handoffStage: stage
+        )
+        async let firstResult = sut.execute(
+            op: makeOp(kind: .handOffFile, params: ["path": .string(first.path)])
+        )
+        async let secondResult = sut.execute(
+            op: makeOp(kind: .handOffFile, params: ["path": .string(second.path)])
+        )
+        let results = [try await firstResult, try await secondResult]
+        for result in results {
+            guard case .success(let value) = result else {
+                Issue.record("成功のはず: \(result)")
+                return
+            }
+            #expect(value["revealed"]?.boolValue() == true)
+            #expect(value["presented"]?.boolValue() == true)
+        }
+        // 開かれたフォルダもカットインも1回だけ。フォルダ名は jobID。
+        #expect(opened.urls.count == 1)
+        #expect(opened.urls[0].lastPathComponent == "job-1")
+        #expect(presenter.calls.count == 1)
+        #expect(presenter.calls.first?.label == "2件のファイル")
+        // 2 ファイルぶんのリンクが同じフォルダに入る。
+        let contents = try FileManager.default.contentsOfDirectory(atPath: opened.urls[0].path)
+        #expect(contents.sorted() == ["a.txt", "b.txt"])
+    }
+
+    @Test("同じ job の後発ファイルは同じフォルダへ追加され、別の job は別フォルダになる")
+    func handOffReusesFolderPerJob() async throws {
+        let root = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let a = root.appendingPathComponent("a.txt")
+        let b = root.appendingPathComponent("b.txt")
+        let c = root.appendingPathComponent("c.txt")
+        for url in [a, b, c] {
+            try "x".write(to: url, atomically: true, encoding: .utf8)
+        }
+
+        let stageRoot = root.appendingPathComponent("handoffs")
+        let opened = OpenedFolders()
+        let stage = MacHandoffStage(
+            stageRoot: stageRoot,
+            window: 0.02,
+            openFolder: { opened.record($0) }
+        )
+        let sut = makeOperator(allowedRoots: [root], handoffStage: stage)
+
+        // job-1 の2件は窓を跨いでも同じフォルダへ。
+        _ = try await sut.execute(
+            op: makeOp(kind: .handOffFile, params: ["path": .string(a.path)])
+        )
+        _ = try await sut.execute(
+            op: makeOp(kind: .handOffFile, params: ["path": .string(b.path)])
+        )
+        // 別 job（job-2）は別フォルダ。
+        var other = makeOp(kind: .handOffFile, params: ["path": .string(c.path)])
+        other = MacControlOpFrame(
+            opID: other.opID,
+            runID: other.runID,
+            jobID: "job-2",
+            kind: other.kind,
+            params: other.params,
+            expected: other.expected,
+            sentAt: other.sentAt
+        )
+        _ = try await sut.execute(op: other)
+
+        #expect(opened.urls.count == 3)
+        #expect(opened.urls[0].path == stageRoot.appendingPathComponent("job-1").path)
+        #expect(opened.urls[1].path == stageRoot.appendingPathComponent("job-1").path)
+        #expect(opened.urls[2].path == stageRoot.appendingPathComponent("job-2").path)
+        let job1 = try FileManager.default.contentsOfDirectory(
+            atPath: stageRoot.appendingPathComponent("job-1").path
+        )
+        #expect(job1.sorted() == ["a.txt", "b.txt"])
+        let job2 = try FileManager.default.contentsOfDirectory(
+            atPath: stageRoot.appendingPathComponent("job-2").path
+        )
+        #expect(job2 == ["c.txt"])
     }
 
     @Test("hand_off_file も許可フォルダの外は拒む")
@@ -344,16 +464,16 @@ private final class RecordingCutIn: AttendanceCutInPresenting {
     func dismiss() {}
 }
 
-/// Finder で選択された URL の記録用。@Sendable クロージャの中から書き込めるようクラスにする。
-private final class RevealedFiles: Sendable {
+/// バッチフォルダとして開かれた URL の記録用。@Sendable クロージャから書き込めるようクラスにする。
+private final class OpenedFolders: Sendable {
     private let state = OSAllocatedUnfairLock(initialState: [URL]())
 
     var urls: [URL] {
         state.withLock { $0 }
     }
 
-    func record(_ urls: [URL]) {
-        state.withLock { $0 = urls }
+    func record(_ url: URL) {
+        state.withLock { $0.append(url) }
     }
 }
 
